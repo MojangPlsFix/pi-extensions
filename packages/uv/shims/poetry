@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+printf '%s\n' 'Error: poetry is disabled. Use uv init, uv add, uv sync, and uv run instead.' >&2
+exit 1

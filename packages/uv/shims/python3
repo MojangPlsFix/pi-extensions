@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+name="$(basename "$0")"
+for argument in "$@"; do
+  case "$argument" in
+    -mpip|-m\ pip|pip)
+      printf "Error: '%s -m pip' is disabled. Use uv run --with PACKAGE python script.py or uv add PACKAGE.\n" "$name" >&2; exit 1 ;;
+    -mvenv|-m\ venv|venv)
+      printf "Error: '%s -m venv' is disabled. Use uv venv.\n" "$name" >&2; exit 1 ;;
+    -mpy_compile|-m\ py_compile|py_compile)
+      printf "Error: '%s -m py_compile' is disabled because it writes bytecode. Use uv run python -m ast path/to/file.py.\n" "$name" >&2; exit 1 ;;
+  esac
+done
+
+shim_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+resolve_python() {
+  local candidate candidate_dir
+  candidate="$(uv python find --managed-python 2>/dev/null || true)"
+  if [ -n "$candidate" ] && [ -x "$candidate" ]; then
+    candidate_dir="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd || true)"
+    [ "$candidate_dir" != "$shim_dir" ] && printf '%s\n' "$candidate" && return 0
+  fi
+  while IFS= read -r candidate; do
+    candidate_dir="$(cd "$(dirname "$candidate")" 2>/dev/null && pwd || true)"
+    [ "$candidate_dir" = "$shim_dir" ] || { printf '%s\n' "$candidate"; return 0; }
+  done < <(type -aP python3 2>/dev/null || true)
+  return 1
+}
+
+interpreter="$(resolve_python || true)"
+if [ -z "$interpreter" ]; then
+  printf "Error: no real Python interpreter was found. Install one with 'uv python install'.\n" >&2
+  exit 1
+fi
+exec uv run --python "$interpreter" python "$@"
