@@ -4,13 +4,22 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { contextModeRoot, contextModeServer } from "./context-mode-resolver.js";
 
 /** Context Mode without its Pi active-memory/session hooks or admin tools. */
-export const ALLOWED_TOOLS = new Set([
+export const READ_ONLY_TOOLS = [
   "ctx_execute_file",
   "ctx_index",
   "ctx_search",
   "ctx_fetch_and_index",
   "ctx_stats",
-]);
+] as const;
+export const EXECUTION_TOOLS = ["ctx_execute", "ctx_batch_execute"] as const;
+export const ALLOWED_TOOLS = new Set<string>(READ_ONLY_TOOLS);
+
+function allowedTools(): Set<string> {
+  const allowed = new Set<string>(READ_ONLY_TOOLS);
+  if (process.env.PI_SUBAGENT_CONTEXT_EXECUTION === "1")
+    for (const tool of EXECUTION_TOOLS) allowed.add(tool);
+  return allowed;
+}
 
 type McpClient = {
   start(): void;
@@ -23,8 +32,23 @@ type McpClient = {
   shutdown(): void;
 };
 
+export function createIdempotentShutdown(state: {
+  client?: Pick<McpClient, "shutdown">;
+}): () => void {
+  return () => {
+    const client = state.client;
+    state.client = undefined;
+    try {
+      client?.shutdown();
+    } catch {
+      // Startup/shutdown cleanup is best effort and must not mask the original failure.
+    }
+  };
+}
+
 export default function childContextModeExtension(pi: ExtensionAPI): void {
-  let shutdown: (() => void) | undefined;
+  const state: { client?: McpClient } = {};
+  const shutdown = createIdempotentShutdown(state);
   pi.on("session_start", async (_event, ctx) => {
     const root = contextModeRoot();
     const server = root ? contextModeServer(root) : undefined;
@@ -38,18 +62,19 @@ export default function childContextModeExtension(pi: ExtensionAPI): void {
       )) as {
         MCPStdioClient: new (server: string, env?: NodeJS.ProcessEnv) => McpClient;
       };
-      const client = new bridge.MCPStdioClient(server, process.env);
-      client.start();
-      await client.initialize();
-      for (const tool of await client.listTools()) {
-        if (!ALLOWED_TOOLS.has(tool.name)) continue;
+      state.client = new bridge.MCPStdioClient(server, process.env);
+      state.client!.start();
+      await state.client!.initialize();
+      const allowed = allowedTools();
+      for (const tool of await state.client!.listTools()) {
+        if (!allowed.has(tool.name)) continue;
         pi.registerTool({
           name: tool.name,
           label: tool.name,
           description: tool.description ?? "",
           parameters: tool.inputSchema ?? { type: "object", properties: {} },
           async execute(_toolCallId, params) {
-            const result = await client.callTool(tool.name, (params ?? {}) as object);
+            const result = await state.client!.callTool(tool.name, (params ?? {}) as object);
             const text = (result.content ?? [])
               .filter((part) => part.type === "text" && typeof part.text === "string")
               .map((part) => part.text)
@@ -59,13 +84,13 @@ export default function childContextModeExtension(pi: ExtensionAPI): void {
           },
         });
       }
-      shutdown = () => client.shutdown();
     } catch (error) {
+      shutdown();
       ctx.ui.notify(
         `Context Mode is unavailable: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
     }
   });
-  pi.on("session_shutdown", () => shutdown?.());
+  pi.on("session_shutdown", shutdown);
 }

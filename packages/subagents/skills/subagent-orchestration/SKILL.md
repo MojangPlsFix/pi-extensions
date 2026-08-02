@@ -14,6 +14,27 @@ Use Subagents to delegate independent work while keeping the parent responsible 
 - Roles may resolve to separate configured models and thinking levels. Treat the requested/effective model shown by the tools as diagnostic information, not as a reason to change role semantics.
 - Only use custom role names returned by `subagent_list`; never invent one.
 
+## Recommended Luna role configuration
+
+For development, recommend `~/.pi/agent/subagents/config.json` with Luna/low Explorers for inexpensive parallel investigation and review, and one Luna/high Worker as the persistent implementation owner:
+
+```json
+{
+  "agents": {
+    "explorer": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "low"
+    },
+    "worker": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "high"
+    }
+  }
+}
+```
+
+This is a recommended example, not a hard-coded requirement. The provider must be configured and authenticated. Model policy resolves when each child spawns; existing open children keep their original model and thinking. Run `/reload` after changing the file. Before relying on the policy, use `subagent_list` or `/agents` to verify the effective model of a newly spawned child.
+
 ## Coordinate without serializing everything
 
 - Up to four Subagents may remain open, with at most one open Worker.

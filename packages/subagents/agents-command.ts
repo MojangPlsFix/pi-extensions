@@ -4,6 +4,8 @@ import { type AgentsOverlayAction, AgentsViewer, formatAgent } from "./renderers
 
 const help = [
   "/agents shows complete Subagent history; the inline block is intentionally limited to four.",
+  "Role models and resources: ~/.pi/agent/subagents/config.json (run /reload after edits).",
+  "Use subagent_list or /agents to verify the effective model after the next child spawns.",
   "",
   "↑/↓  Navigate",
   "Enter Guide the selected open agent (also resumes a completed agent)",

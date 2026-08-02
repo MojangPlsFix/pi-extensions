@@ -19,28 +19,26 @@ Model policy is resolved once when the child spawns:
 3. Subagent defaults;
 4. the parent model and thinking level at spawn time.
 
-Create `~/.pi/agent/subagents/config.json` to configure roles:
+Create `~/.pi/agent/subagents/config.json` to configure roles. This recommended development setup uses inexpensive Luna/low Explorers for parallel investigation and review, and a Luna/high Worker as the persistent implementation owner:
 
 ```json
 {
-  "defaults": {
-    "model": "inherit",
-    "thinking": "inherit"
-  },
   "agents": {
     "explorer": {
-      "model": "github-copilot/gpt-5.6-luna",
-      "thinking": "off"
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "low"
     },
     "worker": {
-      "model": "inherit",
-      "thinking": "inherit"
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "high"
     }
   }
 }
 ```
 
-`inherit` takes the parent snapshot immediately; later parent model changes do not affect an open child. Luna is opt-in—there is no built-in Luna default. Before allocating transcript directories, child processes, tabs, or panes, Subagents verifies that an explicitly resolved model exists and that Pi can resolve its provider authentication. Invalid configuration or missing auth fails with an actionable error.
+This is a reproducible recommendation, not a hard-coded requirement. The selected provider must be configured and authenticated. Model resolution occurs when a child spawns; existing open children retain their original model and thinking level. Run `/reload` after changing the file, then use `subagent_list` or `/agents` to verify the effective model of newly spawned children.
+
+`inherit` explicitly takes the parent snapshot immediately; later parent model changes do not affect an open child. Luna is opt-in—there is no built-in Luna default. Before allocating transcript directories, child processes, tabs, or panes, Subagents verifies that an explicitly resolved model exists and that Pi can resolve its provider authentication. Invalid configuration or missing auth fails with an actionable error.
 
 Custom definition frontmatter may include `model` and `thinking`:
 
@@ -118,8 +116,53 @@ Stats scans normal Pi sessions, this hidden tree, and the legacy `~/.pi/agent/se
 
 Pi does not expose an extension hook for adding nested children to the built-in `/resume` picker, so durable cross-parent restoration and nested resume are deferred.
 
-## Optional Context Mode and security
+## Optional child resources
 
-When Context Mode is positively discovered, children receive a narrow read-oriented bridge. Missing Context Mode does not affect ordinary RPC or Herdr operation. Child Todo and Context Mode paths are temporary and isolated from parent state.
+Child resources are selected by role and can be overridden with a `resources` object in `defaults`, a built-in mode entry, or an exact custom-agent entry. Resolution order is the built-in mode profile, `defaults.resources`, the mode entry (`agents.explorer` or `agents.worker`), then the exact custom-agent entry. Optional integration policies accept `"auto"`, `"enabled"`, or `"disabled"`: auto activates an installed capability, enabled requests it but only warns when unavailable, and disabled skips probing and loading.
+
+| Resource | Explorer | Worker |
+| --- | --- | --- |
+| Context Mode | Auto-detect | Auto-detect |
+| Context execution | Never | When Context Mode is effective |
+| Web Search | Enabled | Disabled by default |
+| Todos | Disabled | Enabled |
+| RTK | Never | Auto-detect |
+| UV Bash policy | Never | Auto-detect |
+| Copilot compaction fix | Enabled, provider-gated | Enabled, provider-gated |
+
+```json
+{
+  "agents": {
+    "explorer": {
+      "resources": {
+        "contextMode": "auto",
+        "contextExecution": false,
+        "webSearch": true,
+        "todos": false,
+        "rtk": "disabled",
+        "uv": "disabled",
+        "copilotCompactionFix": true
+      }
+    },
+    "worker": {
+      "resources": {
+        "contextMode": "auto",
+        "contextExecution": true,
+        "webSearch": false,
+        "todos": true,
+        "rtk": "auto",
+        "uv": "auto",
+        "copilotCompactionFix": true
+      }
+    }
+  }
+}
+```
+
+Explorers remain read-only: Context execution, Todos, RTK, and UV cannot be enabled for them. Explorer Web Search is enabled by default; its retrieval calls consume separately provider-accounted usage. Workers may explicitly enable Web Search. Arbitrary child extension and skill paths are not accepted.
+
+Context Mode uses only the package-owned narrow child bridge, not the full extension. Missing Context Mode never blocks spawning. RTK requires version 0.23.0 or newer and fails open; UV requires both the package extension and a working `uv` executable, otherwise native Pi Bash remains active. When both are effective, RTK rewrites before UV validates and executes. Todo and Context Mode state is temporary and isolated. The Copilot compaction fix remains gated by its provider-aware implementation.
+
+Capability state is visible in spawn/read/list results, expanded completion cards, and `/agents`; for example, `UV: enabled → unavailable; native Bash active`.
 
 Subagents are separate processes, not a security boundary. They inherit the user's process credentials so configured providers can authenticate. Review this extension, child prompts, trusted global definitions, delegated tasks, and Worker changes. Herdr receives only reviewed path overrides; parent credentials are not serialized into `herdr --env` arguments. Full prompts are never used as pane labels, but transcript content remains sensitive local data.

@@ -1,3 +1,6 @@
+import { access, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
 import { SubagentManager } from "../manager.js";
@@ -212,6 +215,29 @@ describe("SubagentManager follow-up lifecycle", () => {
     expect(subject.redirectMessage).toBeUndefined();
     expect(poller.restorePromptCheckpoint).toHaveBeenCalledWith(checkpoint);
     expect(subject.activity.at(-1)?.text).toContain("redirect failed");
+  });
+
+  it("cleans child state even when transport cleanup exhausts retries", async () => {
+    const { manager } = managerHarness();
+    const subject = agent("completed");
+    const directory = await mkdtemp(join(tmpdir(), "subagent-cleanup-"));
+    const internals = manager as unknown as {
+      contextDirs: Map<string, string>;
+      rpc: { shutdown: () => Promise<void> };
+      releaseTransportNow(agent: ManagedAgent): Promise<void>;
+    };
+    internals.contextDirs.set(subject.id, directory);
+    internals.rpc = {
+      shutdown: vi.fn(async () => {
+        throw new Error("transport unavailable");
+      }),
+    };
+    try {
+      await expect(internals.releaseTransportNow(subject)).rejects.toThrow("transport unavailable");
+      await expect(access(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   it("retains completed agents as open until explicit close releases capacity and transport", async () => {

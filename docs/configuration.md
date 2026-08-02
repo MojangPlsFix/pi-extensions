@@ -21,7 +21,9 @@ All resources are delivered by one Pi package and can be enabled or disabled wit
 
 - **Copilot CLI:** Required only when `search` runs under `github-copilot`. Invoking Search without an installed, authenticated CLI reports a useful error. The CLI backend defaults to `gpt-5.6-luna` with effort `none` unless overridden.
 - **OpenAI Codex OAuth:** Required only when `search` runs under `openai-codex`. Use `/login openai-codex`; Pi resolves and refreshes the credential for every native search request. Search sends OAuth only to the trusted HTTPS `chatgpt.com` endpoint and rejects plaintext or custom-host overrides.
-- **Context Mode:** Subagents discover it only when installed. Missing Context Mode does not prevent ordinary RPC subagents.
+- **Context Mode:** Subagents discover it only when installed. Missing Context Mode does not prevent ordinary RPC subagents. Children use only the reviewed narrow bridge, never the full Context Mode extension.
+- **RTK:** Worker children auto-detect RTK 0.23.0 or newer. Missing, outdated, failed, or timed-out probes are nonfatal and native command execution remains available.
+- **UV:** Worker children require both the packaged UV extension and a successful `uv --version` probe. Unavailable UV falls back to native Pi Bash.
 - **Herdr:** Attached-pane support is selected only after explicit environment and control-plane checks succeed. Normal Subagents use RPC. Current Herdr creates one non-focused `Subagents · <project>` tab, queries geometry for adaptive one-to-four-pane placement, reports bounded task metadata, supports explicit focus from `/agents`, and closes the tab with its final pane. Older installations fall back to adjacent splitting with a visible capability warning.
 
 Search reports the selected backend immediately and returns bounded output labeled as untrusted external content. Codex structured results are normalized to deduplicated titles, URLs, and snippets; credentials, encrypted output, unknown fields, and raw responses are excluded. Expanded TUI output shows only a bounded source list and short preview. Truncation is explicit.
@@ -30,19 +32,59 @@ Copilot CLI and Codex native search can consume provider subscription quota, but
 
 ## Subagent configuration
 
-Create `~/.pi/agent/subagents/config.json` (or the corresponding path beneath `PI_CODING_AGENT_DIR`) when roles should use different models:
+Create `~/.pi/agent/subagents/config.json` (or the corresponding path beneath `PI_CODING_AGENT_DIR`) when roles should use different models. A recommended development setup is:
 
 ```json
 {
-  "defaults": { "model": "inherit", "thinking": "inherit" },
   "agents": {
-    "explorer": { "model": "github-copilot/gpt-5.6-luna", "thinking": "off" },
-    "worker": { "model": "inherit", "thinking": "inherit" }
+    "explorer": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "low"
+    },
+    "worker": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "high"
+    }
   }
 }
 ```
 
+Explorer Luna/low is suitable for inexpensive parallel investigation and review; Worker Luna/high is suitable for the persistent implementation owner. This is a recommended example, not a hard-coded requirement, and the provider must be configured and authenticated. Resolution happens when each child spawns. Open children keep their original model and thinking level. Run `/reload` after editing configuration, then use `subagent_list` or `/agents` to verify the effective model of a newly spawned child.
+
 Configured models and provider authentication are preflighted before child files, processes, or Herdr layouts are allocated. Up to four running/completed children may remain open, including one Worker. Use `subagent_close` or `x` in `/agents` to release completed capacity. Failed and interrupted children release automatically.
+
+Optional child resources are configured under `resources` in `defaults` or an agent entry. Built-in mode defaults resolve first, followed by `defaults.resources`, the mode entry, and the exact custom-agent entry. `contextMode`, `rtk`, and `uv` accept `"auto"`, `"enabled"`, or `"disabled"`; requested integrations that are missing only produce diagnostics and never block spawning.
+
+```json
+{
+  "agents": {
+    "explorer": {
+      "resources": {
+        "contextMode": "auto",
+        "contextExecution": false,
+        "webSearch": true,
+        "todos": false,
+        "rtk": "disabled",
+        "uv": "disabled",
+        "copilotCompactionFix": true
+      }
+    },
+    "worker": {
+      "resources": {
+        "contextMode": "auto",
+        "contextExecution": true,
+        "webSearch": false,
+        "todos": true,
+        "rtk": "auto",
+        "uv": "auto",
+        "copilotCompactionFix": true
+      }
+    }
+  }
+}
+```
+
+Explorers cannot enable Context execution, Todos, RTK, or UV. Workers may explicitly enable Web Search. Explorer search retrieval uses separately provider-accounted usage. Arbitrary extension and skill paths are prohibited. Capability diagnostics appear in spawn, list, and read results and in expanded `/agents` details.
 
 The always-visible task-first activity widget is not controlled by Ctrl+O; `/agents` contains full history, reports, Herdr focus, and cleanup. New transcripts are hidden from `/resume` at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the unchanged legacy `<agent-dir>/sessions/subagents` location, so migration is optional.
 

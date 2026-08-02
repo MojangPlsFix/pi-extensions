@@ -4,6 +4,36 @@ export type Mode = "explorer" | "worker";
 export type AgentStatus = "running" | "completed" | "failed" | "interrupted" | "closed";
 export type BackendKind = "rpc" | "herdr";
 
+export type OptionalIntegrationPolicy = "auto" | "enabled" | "disabled";
+
+/** Partial configuration override accepted in defaults and agent entries. */
+export type ChildResourcePolicy = {
+  contextMode?: OptionalIntegrationPolicy;
+  contextExecution?: boolean;
+  webSearch?: boolean;
+  todos?: boolean;
+  rtk?: OptionalIntegrationPolicy;
+  uv?: OptionalIntegrationPolicy;
+  copilotCompactionFix?: boolean;
+};
+
+/** Fully resolved role policy used by a running child. */
+export type ResolvedChildResourcePolicy = Required<ChildResourcePolicy>;
+
+/** Probed/installed capability state. A false value can also mean that probing was skipped. */
+export type ChildDetectedResources = {
+  contextMode: boolean;
+  contextExecution: boolean;
+  webSearch: boolean;
+  todos: boolean;
+  rtk: boolean;
+  uv: boolean;
+  copilotCompactionFix: boolean;
+};
+
+/** Capabilities actually exposed to the child. */
+export type ChildEffectiveResources = ChildDetectedResources;
+
 export type Usage = {
   input: number;
   output: number;
@@ -59,6 +89,10 @@ export type AgentSnapshot = {
   requestedThinking?: string;
   effectiveModel?: string;
   effectiveThinking?: string;
+  requestedResources?: ResolvedChildResourcePolicy;
+  detectedResources?: ChildDetectedResources;
+  effectiveResources?: ChildEffectiveResources;
+  resourceWarnings?: string[];
   latestActivity?: string;
   activity: AgentActivity[];
   report: string;
@@ -92,6 +126,10 @@ export type ManagedAgent = {
   requestedThinking?: string;
   effectiveModel?: string;
   effectiveThinking?: string;
+  requestedResources?: ResolvedChildResourcePolicy;
+  detectedResources?: ChildDetectedResources;
+  effectiveResources?: ChildEffectiveResources;
+  resourceWarnings?: string[];
   activity: AgentActivity[];
   redirectMessage?: string;
 };
@@ -139,6 +177,10 @@ export function agentSnapshot(agent: ManagedAgent, now = Date.now()): AgentSnaps
     requestedThinking: agent.requestedThinking,
     effectiveModel: agent.effectiveModel,
     effectiveThinking: agent.effectiveThinking,
+    requestedResources: agent.requestedResources ? { ...agent.requestedResources } : undefined,
+    detectedResources: agent.detectedResources ? { ...agent.detectedResources } : undefined,
+    effectiveResources: agent.effectiveResources ? { ...agent.effectiveResources } : undefined,
+    resourceWarnings: agent.resourceWarnings ? [...agent.resourceWarnings] : undefined,
     // Transport observations belong in the expanded history but must not replace actual work in the compact widget.
     latestActivity: [...agent.activity].reverse().find((entry) => entry.kind !== "transport")?.text,
     activity: [...agent.activity],

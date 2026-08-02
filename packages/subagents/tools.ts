@@ -5,7 +5,7 @@ import { discoverAgents } from "./agents.js";
 import { loadSubagentConfig, MAX_ACTIVE, MAX_WORKERS, resolveAgentModelPolicy } from "./config.js";
 import { HerdrClient } from "./herdr-client.js";
 import type { SubagentManager } from "./manager.js";
-import { formatAgent } from "./renderers.js";
+import { formatAgent, resourceDiagnostics } from "./renderers.js";
 import type { AgentSnapshot } from "./types.js";
 
 function snapshots(details: unknown): AgentSnapshot[] {
@@ -56,8 +56,9 @@ function resultRenderer(
       : context.isError
         ? "Subagent operation failed."
         : "Subagent operation completed.";
+    const diagnostics = agents.flatMap((agent) => resourceDiagnostics(agent));
     text.setText(
-      `${theme.fg(context.isError ? "error" : "muted", summary)}\n${theme.fg("dim", expandHint())}`,
+      `${theme.fg(context.isError ? "error" : "muted", summary)}${diagnostics.length ? `\n${theme.fg("dim", diagnostics.join("\n"))}` : ""}\n${theme.fg("dim", expandHint())}`,
     );
     return text;
   }
@@ -72,6 +73,7 @@ function resultRenderer(
         `Task history:\n${agent.taskHistory.map((task, index) => `${index + 1}. ${task}`).join("\n") || "(none)"}`,
         `Requested: ${agent.requestedModel ?? "default"} · ${agent.requestedThinking ?? "default"}`,
         `Effective: ${agent.effectiveModel ?? "pending confirmation"} · ${agent.effectiveThinking ?? "pending confirmation"}`,
+        ...resourceDiagnostics(agent),
         `Started: ${agent.startedAt}${agent.finishedAt ? `\nFinished: ${agent.finishedAt}` : ""}`,
         `Activity:\n${agent.activity.map((entry) => `${entry.at} · ${entry.kind} · ${entry.text}`).join("\n") || "(none)"}`,
         agent.report ? `Report:\n${agent.report}` : "",
@@ -136,7 +138,14 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       try {
         const agent = await manager.spawn(params.agent, params.task, ctx);
         return {
-          content: [{ type: "text", text: `Started ${agent.name} as ${agent.id}.` }],
+          content: [
+            {
+              type: "text",
+              text: [`Started ${agent.name} as ${agent.id}.`, ...resourceDiagnostics(agent)].join(
+                "\n",
+              ),
+            },
+          ],
           details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
         };
       } catch (error) {
@@ -237,7 +246,13 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
         const herdr = HerdrClient.environmentState();
         const current =
           agents
-            .map((agent) => `${agent.id}: ${formatAgent(agent)}\n  Task: ${agent.task}`)
+            .map((agent) =>
+              [
+                `${agent.id}: ${formatAgent(agent)}`,
+                `  Task: ${agent.task}`,
+                ...resourceDiagnostics(agent).map((line) => `  ${line}`),
+              ].join("\n"),
+            )
             .join("\n") || "(none)";
         return {
           content: [
@@ -284,7 +299,12 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
             content: [
               {
                 type: "text",
-                text: `${formatAgent(agent)}\n\n${agent.report || agent.error || "(running; no report yet)"}`,
+                text: [
+                  formatAgent(agent),
+                  ...resourceDiagnostics(agent),
+                  "",
+                  agent.report || agent.error || "(running; no report yet)",
+                ].join("\n"),
               },
             ],
             details: { agent },

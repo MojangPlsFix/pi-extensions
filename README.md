@@ -28,7 +28,7 @@ pi update --extensions
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private bounded cache and sends the model a file reference instead. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Displays the selected model's input, cache, output, and long-context API prices in Pi's model selector. | Automatic | Interactive model selector |
 | [Stats](packages/stats/) | Summarizes local Pi usage by period, model, project, and Subagent contribution without contacting a provider. | `/stats`, `/stats week`, `/stats month`, `/stats previous` | Local session history |
-| [Subagents](packages/subagents/) | Runs model-configurable isolated Explorer or Worker sessions with explicit lifecycle, hidden transcripts, reports, and a complete activity overlay. | `/agents`, `/agents help`, `subagent_spawn`, `subagent_send`, `subagent_wait`, `subagent_list`, `subagent_read`, `subagent_interrupt`, `subagent_close` | RPC by default; Herdr and Context Mode optional |
+| [Subagents](packages/subagents/) | Runs model-configurable isolated Explorer or Worker sessions with explicit lifecycle, hidden transcripts, reports, and a complete activity overlay. | `/agents`, `/agents help`, `subagent_spawn`, `subagent_send`, `subagent_wait`, `subagent_list`, `subagent_read`, `subagent_interrupt`, `subagent_close` | RPC by default; child integrations auto-detected |
 | [UV](packages/uv/) | Replaces Pi's Bash tool with a UV-aware wrapper and redirects unsafe `pip`, Poetry, `venv`, and bytecode commands toward UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Sole owner of the always-visible Pi-themed, task-first Subagent activity block and animated `Hackeln...` summary. | Automatic | Running, ready, and recent Subagents |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider, returns normalized source evidence, and shows backend-aware progress/results. | `search` | `github-copilot` + authenticated Copilot CLI, or authenticated `openai-codex` |
@@ -41,12 +41,32 @@ All 14 extension entrypoints are installed together. Missing optional tools do n
 - **OpenAI Codex OAuth** is needed for Search only while the active provider is `openai-codex`; run `/login openai-codex`.
 - **Herdr** is optional; Subagents normally use persistent Pi RPC children. When available, one non-focused task-named Subagents tab uses an adaptive one-to-four-pane layout and closes deterministically.
 - **Context Mode** is discovered only for the narrow optional Subagent integration.
+- **RTK 0.23+** and a working **UV** executable are auto-detected only for Worker children; either can be absent without blocking spawn, and native Pi Bash remains the fallback.
 
 Search intentionally defaults Copilot CLI retrieval to `gpt-5.6-luna` with reasoning effort `none`; Codex uses native `/codex/alpha/search`. Both return bounded, untrusted external evidence with safe normalized sources while the active parent model handles substantive analysis. Retrieval consumption is provider-accounted because neither backend exposes usage or cost for inclusion in Pi's local totals.
 
 ## Configuration
 
-See [Configuration](docs/configuration.md) for environment variables, provider-aware behavior, and optional capabilities. Feature directories include additional notes for Plan Mode, Subagents, Copilot features, Todos, Stats, Notify, and Ask User Question.
+For inexpensive parallel investigation and a high-effort implementation owner, this recommended Subagent setup can be copied to `~/.pi/agent/subagents/config.json`:
+
+```json
+{
+  "agents": {
+    "explorer": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "low"
+    },
+    "worker": {
+      "model": "openai-codex/gpt-5.6-luna",
+      "thinking": "high"
+    }
+  }
+}
+```
+
+This is not a hard-coded default. Configure and authenticate the provider, run `/reload` after editing, and use `subagent_list` or `/agents` to verify newly spawned children. Model resolution happens at spawn time, so existing open children retain their model and thinking level.
+
+See [Configuration](docs/configuration.md) for environment variables, child resource policies, provider-aware behavior, and optional capabilities. Feature directories include additional notes for Plan Mode, Subagents, Copilot features, Todos, Stats, Notify, and Ask User Question.
 
 ## Development
 

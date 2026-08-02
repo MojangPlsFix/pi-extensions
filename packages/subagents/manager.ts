@@ -12,14 +12,18 @@ import {
   childIsolationOverrides,
   childPiArgs,
   childPrompt,
+  childResourceWarnings,
   childSystemPromptPath,
+  detectChildResources,
   piInvocation,
 } from "./child-runtime.js";
 import {
+  effectiveAgentResources,
   loadSubagentConfig,
   MAX_ACTIVE,
   MAX_WORKERS,
   resolveAgentModelPolicy,
+  resolveAgentResourcePolicy,
   SESSION_ROOT,
 } from "./config.js";
 import { HerdrBackend } from "./herdr-backend.js";
@@ -63,6 +67,7 @@ export class SubagentManager {
   private readonly operationTails = new Map<string, Promise<unknown>>();
   private readonly reportTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly releases = new Map<string, Promise<void>>();
+  private readonly resourceProbeCache = new Map<string, Promise<boolean>>();
   private readonly released = new Set<string>();
   private pendingActive = 0;
   private pendingWorkers = 0;
@@ -149,12 +154,22 @@ export class SubagentManager {
       if (definition.mode === "worker") this.pendingWorkers--;
     };
     try {
+      const config = await loadSubagentConfig();
       const resolved = resolveAgentModelPolicy(
         definition,
-        await loadSubagentConfig(),
+        config,
         modelName(ctx),
         ctx.thinkingLevel,
       );
+      // Resource probes and resolution happen before allocating files, processes, tabs, or panes.
+      const requestedResources = resolveAgentResourcePolicy(definition, config);
+      const detectedResources = await detectChildResources(
+        requestedResources,
+        ctx.cwd,
+        this.resourceProbeCache,
+      );
+      const effectiveResources = effectiveAgentResources(requestedResources, detectedResources);
+      const resourceWarnings = childResourceWarnings(requestedResources, detectedResources);
       // Model existence and auth are checked before allocating files, processes, tabs, or panes.
       await this.preflightModel(resolved.model, ctx);
       this.assertParentOpen();
@@ -170,7 +185,10 @@ export class SubagentManager {
         fs.mkdir(join(contextDir, "context-mode"), { recursive: true }),
         fs.mkdir(join(contextDir, "todos"), { recursive: true }),
       ]);
-      await fs.writeFile(childSystemPromptPath({ sessionDir }), childPrompt(definition));
+      await fs.writeFile(
+        childSystemPromptPath({ sessionDir }),
+        childPrompt(definition, effectiveResources),
+      );
       this.assertParentOpen();
       if (backend === "herdr") this.ensureHerdr(ctx, contextDir);
       const agent: ManagedAgent = {
@@ -189,6 +207,10 @@ export class SubagentManager {
         completionReported: false,
         requestedModel: resolved.model,
         requestedThinking: resolved.thinking,
+        requestedResources,
+        detectedResources,
+        effectiveResources,
+        resourceWarnings,
         activity: [],
       };
       recordActivity(agent, "spawn", `starting ${definition.mode} via ${backend}`);
@@ -458,31 +480,51 @@ export class SubagentManager {
     if (reportTimer) clearTimeout(reportTimer);
     this.reportTimers.delete(agent.id);
     const poller = this.pollers.get(agent.id);
-    poller?.stop();
-    const idle = (poller as unknown as { idle?: () => Promise<void> } | undefined)?.idle;
-    if (idle) await idle.call(poller);
-    this.pollers.delete(agent.id);
-    let lastError: unknown;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    let transportError: unknown;
+    try {
+      poller?.stop();
+      const idle = (poller as unknown as { idle?: () => Promise<void> } | undefined)?.idle;
+      if (idle) await idle.call(poller);
+      this.pollers.delete(agent.id);
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          await this.backendFor(agent).shutdown?.(agent);
+          lastError = undefined;
+          break;
+        } catch (cause) {
+          lastError = cause;
+          recordActivity(
+            agent,
+            "transport",
+            `cleanup attempt ${attempt} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+          if (attempt < 3) await new Promise<void>((resolve) => setTimeout(resolve, attempt * 100));
+        }
+      }
+      if (lastError) {
+        this.publish();
+        transportError = lastError;
+      }
+    } catch (cause) {
+      transportError = cause;
+    } finally {
+      this.pollers.delete(agent.id);
       try {
-        await this.backendFor(agent).shutdown?.(agent);
-        lastError = undefined;
-        break;
-      } catch (cause) {
-        lastError = cause;
-        recordActivity(
-          agent,
-          "transport",
-          `cleanup attempt ${attempt} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-        );
-        if (attempt < 3) await new Promise<void>((resolve) => setTimeout(resolve, attempt * 100));
+        await this.cleanupContext(agent.id);
+      } catch (cleanupError) {
+        // Preserve the transport failure as the actionable release error; cleanup is best effort.
+        if (transportError) {
+          recordActivity(
+            agent,
+            "transport",
+            `context cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+          );
+          this.publish();
+        } else transportError = cleanupError;
       }
     }
-    if (lastError) {
-      this.publish();
-      throw lastError;
-    }
-    await this.cleanupContext(agent.id);
+    if (transportError) throw transportError;
   }
 
   private async cleanupContext(agentId: string): Promise<void> {
@@ -505,7 +547,7 @@ export class SubagentManager {
     const args = [...invocation.args, "--mode", "rpc", ...this.childArgs(agent)];
     const child = spawn(invocation.command, args, {
       cwd: ctx.cwd,
-      env: childEnvironment(contextDir),
+      env: childEnvironment(contextDir, agent),
       stdio: ["pipe", "pipe", "pipe"],
       shell: false,
     });
@@ -524,7 +566,7 @@ export class SubagentManager {
       process.env.HERDR_PANE_ID,
       ctx.cwd,
       // Never serialize parent credentials through Herdr's --env arguments.
-      (child) => childIsolationOverrides(this.contextDirs.get(child.id) ?? contextDir),
+      (child) => childIsolationOverrides(this.contextDirs.get(child.id) ?? contextDir, child),
       (child) => this.childArgs(child),
       (child) => this.onHerdrReady(child),
       (child, error) => this.settle(child, "failed", error.message),

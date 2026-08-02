@@ -52,6 +52,33 @@ export function shortModel(value: string | undefined): string {
   return model;
 }
 
+export function resourceDiagnostics(agent: ManagedAgent | AgentSnapshot): string[] {
+  const requested = agent.requestedResources;
+  const detected = agent.detectedResources;
+  const effective = agent.effectiveResources;
+  if (!requested || !detected || !effective) return [];
+  const state = (value: boolean, requestedValue: string | boolean) =>
+    requestedValue === false || requestedValue === "disabled"
+      ? "disabled"
+      : value
+        ? "available"
+        : "unavailable";
+  const requestedText = (value: string | boolean) =>
+    typeof value === "boolean" ? (value ? "enabled" : "disabled") : value;
+  const mode = "definition" in agent ? agent.definition.mode : agent.mode;
+  const lines = [
+    `Context Mode: ${requested.contextMode} → ${state(effective.contextMode, requested.contextMode)}`,
+    `Context Execution: ${requestedText(requested.contextExecution)} → ${state(effective.contextExecution, requested.contextExecution)}`,
+    `Web Search: ${requestedText(requested.webSearch)} → ${state(effective.webSearch, requested.webSearch)}`,
+    `Todos: ${requestedText(requested.todos)} → ${state(effective.todos, requested.todos)}`,
+    `RTK: ${requested.rtk} → ${state(effective.rtk, requested.rtk)}`,
+    `UV: ${requested.uv} → ${state(effective.uv, requested.uv)}${mode === "worker" && !effective.uv ? "; native Bash active" : ""}`,
+    `Copilot compaction fix: ${requestedText(requested.copilotCompactionFix)} → ${state(effective.copilotCompactionFix, requested.copilotCompactionFix)}`,
+  ];
+  if (agent.resourceWarnings?.length) lines.push(`Warnings: ${agent.resourceWarnings.join(" ")}`);
+  return lines;
+}
+
 export function formatAgent(agent: ManagedAgent | AgentSnapshot): string {
   const tokens =
     agent.usage.total ||
@@ -164,6 +191,7 @@ export function agentViewLines(agents: Iterable<ManagedAgent | AgentSnapshot>): 
   return values.flatMap((agent) => [
     taskLabel(agent.task),
     `  ${agent.id} · ${formatAgent(agent)} · ${agent.backend}`,
+    ...resourceDiagnostics(agent).map((line) => `  ${line}`),
     ...(agent.report
       ? agent.report
           .split("\n")
@@ -274,6 +302,7 @@ export class AgentsViewer {
           "dim",
           `Effective: ${selected.effectiveModel ?? "pending"} · ${selected.effectiveThinking ?? "pending"}`,
         ),
+        ...resourceDiagnostics(selected).map((line) => this.theme.fg("dim", line)),
         this.theme.fg("muted", `Activity: ${selected.latestActivity ?? "waiting…"}`),
         this.theme.fg(
           "dim",
@@ -358,6 +387,7 @@ export function completionMessageRenderer(
       `Backend: ${agent.backend}${agent.herdrPaneId ? ` · pane ${agent.herdrPaneId}` : ""}`,
     ),
     theme.fg("dim", `Transcript: ${agent.sessionFile ?? agent.sessionDir}`),
+    ...resourceDiagnostics(agent).map((line) => theme.fg("dim", line)),
     theme.fg(
       "dim",
       `Requested: ${agent.requestedModel ?? "inherit"} · ${agent.requestedThinking ?? "inherit"}`,

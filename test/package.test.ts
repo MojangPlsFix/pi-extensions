@@ -98,6 +98,35 @@ describe("package manifest", () => {
       expect(notices).toContain(url);
   });
 
+  it("documents the recommended Luna Subagent roles everywhere users and agents look", async () => {
+    const paths = [
+      "README.md",
+      "docs/configuration.md",
+      "packages/subagents/README.md",
+      "packages/subagents/skills/subagent-orchestration/SKILL.md",
+    ];
+    for (const path of paths) {
+      const source = await readFile(path, "utf8");
+      for (const expected of [
+        "~/.pi/agent/subagents/config.json",
+        "openai-codex/gpt-5.6-luna",
+        '"thinking": "low"',
+        '"thinking": "high"',
+      ])
+        expect(source, `${path} must contain ${expected}`).toContain(expected);
+    }
+    const skill = await readFile(
+      "packages/subagents/skills/subagent-orchestration/SKILL.md",
+      "utf8",
+    );
+    expect(skill).toContain("/reload");
+    expect(skill).toContain("effective model");
+    expect(skill).toContain("subagent_list");
+    const command = await readFile("packages/subagents/agents-command.ts", "utf8");
+    expect(command).toContain("~/.pi/agent/subagents/config.json");
+    expect(command).toContain("/reload");
+  });
+
   it("has no lifecycle install scripts or production dependencies", async () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
       dependencies?: object;
