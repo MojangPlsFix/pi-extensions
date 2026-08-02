@@ -1,6 +1,9 @@
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { discoverAgents } from "./agents.js";
+import { loadSubagentConfig, MAX_ACTIVE, MAX_WORKERS, resolveAgentModelPolicy } from "./config.js";
+import { HerdrClient } from "./herdr-client.js";
 import type { SubagentManager } from "./manager.js";
 import { formatAgent } from "./renderers.js";
 import type { AgentSnapshot } from "./types.js";
@@ -112,6 +115,14 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
     label: "Subagent spawn",
     description:
       "Start a persistent isolated subagent. Omit agent for all read-only investigation, documentation lookup, and current web research: this selects explorer. Specify agent: worker only when the delegated task must modify files. Never invent agent names such as research or web-researcher; custom names are only valid when listed by subagent_list. It returns after prompt acceptance; use subagent_wait or subagent_read for completion.",
+    promptSnippet:
+      "Delegate isolated read-only investigation to an Explorer or file changes to one Worker.",
+    promptGuidelines: [
+      "Use Explorer for read-only investigation and Worker only when delegated work must modify files.",
+      "Continue independent work after spawning instead of waiting immediately when useful.",
+      "Read completed reports and close agents when follow-ups are unnecessary; completed agents still consume capacity.",
+      "Subagents cannot recursively spawn Subagents or ask users directly.",
+    ],
     parameters: Type.Object({
       agent: Type.Optional(
         Type.String({
@@ -207,21 +218,54 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
   pi.registerTool({
     name: "subagent_list",
     label: "Subagent list",
-    description: "List current and completed subagents.",
+    description:
+      "List roles, configured model policy, capacity, backend capabilities, lifecycle guidance, and current or completed agents.",
+    promptSnippet: "Inspect Subagent roles, capacity, model policy, lifecycle, and current agents.",
     parameters: Type.Object({}),
-    async execute() {
-      const agents = manager.snapshots();
-      return {
-        content: [
-          {
-            type: "text",
-            text:
-              agents.map((agent) => `${agent.id}: ${formatAgent(agent)}`).join("\n") ||
-              "No subagents.",
-          },
-        ],
-        details: { agents },
-      };
+    async execute(_id, _params, _signal, _update, ctx) {
+      try {
+        const agents = manager.snapshots();
+        const definitions = await discoverAgents();
+        const config = await loadSubagentConfig();
+        const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+        const roles = definitions.map((definition) => {
+          const resolved = resolveAgentModelPolicy(definition, config, parent, ctx.thinkingLevel);
+          return `- ${definition.name} (${definition.mode}): ${resolved.model ?? "inherit"} · ${resolved.thinking ?? "inherit"}`;
+        });
+        const open = agents.filter((agent) => ["running", "completed"].includes(agent.status));
+        const workers = open.filter((agent) => agent.mode === "worker").length;
+        const herdr = HerdrClient.environmentState();
+        const current =
+          agents
+            .map((agent) => `${agent.id}: ${formatAgent(agent)}\n  Task: ${agent.task}`)
+            .join("\n") || "(none)";
+        return {
+          content: [
+            {
+              type: "text",
+              text: [
+                "Roles and spawn-time model policy:",
+                ...roles,
+                "Resolution: per-agent config → custom frontmatter → defaults → parent snapshot.",
+                `Capacity: ${open.length}/${MAX_ACTIVE} open · ${workers}/${MAX_WORKERS} Worker open. Completed agents remain open until subagent_close.`,
+                `Backend: ${herdr === "absent" ? "RPC fallback" : herdr === "complete" ? "Herdr (dedicated adaptive tab, metadata, and manual focus)" : "Herdr configured incompletely; spawning is blocked"}.`,
+                "Lifecycle: running and completed consume capacity; failed/interrupted release immediately; closed reports remain readable.",
+                "Continue independent work after spawning. Read reports and close agents when follow-ups are unnecessary.",
+                "",
+                "Agents:",
+                current,
+              ].join("\n"),
+            },
+          ],
+          details: { agents },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+          details: {},
+          isError: true,
+        };
+      }
     },
     renderCall(args, theme, context) {
       return callRenderer("subagent_list", args as Record<string, unknown>, theme, context);
@@ -249,6 +293,33 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
     },
     renderCall(args, theme, context) {
       return callRenderer("subagent_read", args as Record<string, unknown>, theme, context);
+    },
+    renderResult: resultRenderer,
+  });
+  pi.registerTool({
+    name: "subagent_close",
+    label: "Subagent close",
+    description:
+      "Close an open Subagent, release its capacity, terminate its transport, and retain its report for reading.",
+    promptSnippet: "Close Subagents whose reports no longer need follow-up.",
+    parameters: Type.Object({ id: Type.String() }),
+    async execute(_id, params) {
+      try {
+        const agent = await manager.close(params.id);
+        return {
+          content: [{ type: "text", text: `Closed ${agent.name}; its report remains readable.` }],
+          details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+    renderCall(args, theme, context) {
+      return callRenderer("subagent_close", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });

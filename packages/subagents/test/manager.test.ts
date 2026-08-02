@@ -37,6 +37,7 @@ function managerHarness() {
     events: {
       on(name: string, handler: (data: unknown) => void) {
         eventHandlers.set(name, handler);
+        return () => eventHandlers.delete(name);
       },
       emit: vi.fn(),
     },
@@ -176,9 +177,68 @@ describe("SubagentManager follow-up lifecycle", () => {
     await expect(manager.send(explorer.id, "read only task")).resolves.toBe(explorer);
     await expect(manager.send(worker.id, "write task")).rejects.toThrow("Workers cannot resume");
 
-    manager.shutdown();
+    await manager.shutdown();
     expect(shutdown).toHaveBeenCalledTimes(2);
     expect(explorerPoller.stop).toHaveBeenCalled();
     expect(workerPoller.stop).toHaveBeenCalled();
+  });
+
+  it("rolls back task and poller boundaries when redirect delivery fails", async () => {
+    const { manager } = managerHarness();
+    const subject = agent("running");
+    manager.store.add(subject);
+    const checkpoint = {
+      generation: { text: "initial", userPersisted: true, assistantPersisted: false, offset: 1 },
+      legacyAssistant: false,
+    };
+    const poller = {
+      beginPrompt: vi.fn(async () => {}),
+      promptCheckpoint: vi.fn(() => checkpoint),
+      restorePromptCheckpoint: vi.fn(),
+      rollbackPromptBoundary: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+    };
+    const internals = manager as unknown as {
+      pollers: Map<string, typeof poller>;
+      rpc: object;
+    };
+    internals.pollers.set(subject.id, poller);
+    internals.rpc = { redirect: vi.fn(() => Promise.reject(new Error("redirect rejected"))) };
+
+    await expect(manager.redirect(subject.id, "replacement")).rejects.toThrow("redirect rejected");
+    expect(subject.task).toBe("initial");
+    expect(subject.taskHistory).toEqual(["initial"]);
+    expect(subject.redirectMessage).toBeUndefined();
+    expect(poller.restorePromptCheckpoint).toHaveBeenCalledWith(checkpoint);
+    expect(subject.activity.at(-1)?.text).toContain("redirect failed");
+  });
+
+  it("retains completed agents as open until explicit close releases capacity and transport", async () => {
+    const { manager } = managerHarness();
+    const subject = agent("completed");
+    manager.store.add(subject);
+    const shutdown = vi.fn(async () => {});
+    const poller = {
+      resetPromptBoundary: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+      idle: vi.fn(async () => {}),
+    };
+    const internals = manager as unknown as {
+      pollers: Map<string, typeof poller>;
+      rpc: object;
+    };
+    internals.pollers.set(subject.id, poller);
+    internals.rpc = { send: vi.fn(), shutdown };
+
+    expect(manager.store.summary()).toMatchObject({ active: 0, ready: 1, open: 1 });
+    await manager.close(subject.id);
+
+    expect(subject.status).toBe("closed");
+    expect(manager.store.summary()).toMatchObject({ active: 0, ready: 0, open: 0, closed: 1 });
+    expect(shutdown).toHaveBeenCalledWith(subject);
+    expect(poller.stop).toHaveBeenCalledOnce();
+    expect(poller.idle).toHaveBeenCalledOnce();
   });
 });

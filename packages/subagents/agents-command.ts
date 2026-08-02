@@ -2,15 +2,33 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { SubagentManager } from "./manager.js";
 import { type AgentsOverlayAction, AgentsViewer, formatAgent } from "./renderers.js";
 
+const help = [
+  "/agents shows complete Subagent history; the inline block is intentionally limited to four.",
+  "",
+  "↑/↓  Navigate",
+  "Enter Guide the selected open agent (also resumes a completed agent)",
+  "s    Stop the running turn and redirect it",
+  "f    Focus the selected Herdr pane without automatic focus stealing",
+  "x    Close the selected agent and release its capacity",
+  "r    Refresh",
+  "?    Show this help",
+  "Esc  Close the overlay",
+].join("\n");
+
 export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager): void {
   pi.registerCommand("agents", {
-    description: "Open the live local subagent activity viewer",
-    handler: async (_args, ctx) => {
+    description: "Open complete Subagent activity, reports, Herdr focus, and cleanup controls",
+    handler: async (args, ctx) => {
+      if (args.trim().toLowerCase() === "help") {
+        if (ctx.mode === "tui" && ctx.hasUI) await ctx.ui.editor("Subagent controls", help);
+        else ctx.ui.notify(help, "info");
+        return;
+      }
       if (ctx.mode !== "tui" || !ctx.hasUI) {
         ctx.ui.notify(
           manager
             .snapshots()
-            .map((agent) => `${agent.id}: ${formatAgent(agent)}`)
+            .map((agent) => `${agent.id}: ${formatAgent(agent)}\n  ${agent.task}`)
             .join("\n") || "No subagents.",
           "info",
         );
@@ -30,21 +48,41 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
           },
         },
       );
-      if (!action.id || action.kind === "close") return;
-      const instruction = await ctx.ui.editor(
-        action.kind === "guide" ? "Guide subagent" : "Stop & redirect subagent",
-        "",
-      );
-      if (!instruction?.trim()) return;
-      if (
-        action.kind === "redirect" &&
-        !(await ctx.ui.confirm(
-          "Stop & redirect subagent?",
-          "The active turn will be interrupted before this replacement instruction is sent.",
-        ))
-      )
+      if (action.kind === "help") {
+        await ctx.ui.editor("Subagent controls", help);
         return;
+      }
+      if (!action.id || action.kind === "close") return;
       try {
+        if (action.kind === "focus") {
+          await manager.focus(action.id);
+          return;
+        }
+        if (action.kind === "closeAgent") {
+          if (
+            await ctx.ui.confirm(
+              "Close subagent?",
+              "Its report remains readable, but its transport and Herdr pane are removed.",
+            )
+          ) {
+            await manager.close(action.id);
+            ctx.ui.notify("Subagent closed.", "info");
+          }
+          return;
+        }
+        const instruction = await ctx.ui.editor(
+          action.kind === "guide" ? "Guide subagent" : "Stop & redirect subagent",
+          "",
+        );
+        if (!instruction?.trim()) return;
+        if (
+          action.kind === "redirect" &&
+          !(await ctx.ui.confirm(
+            "Stop & redirect subagent?",
+            "The active turn will be interrupted before this replacement instruction is sent.",
+          ))
+        )
+          return;
         if (action.kind === "guide") await manager.send(action.id, instruction);
         else await manager.redirect(action.id, instruction);
         ctx.ui.notify(

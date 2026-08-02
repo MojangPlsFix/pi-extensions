@@ -31,6 +31,7 @@ function registry() {
         commands.push(name);
       },
       registerEntryRenderer: () => undefined,
+      registerMessageRenderer: () => undefined,
       appendEntry: () => undefined,
       getActiveTools: () => ["read", "bash", "edit", "write"],
       setActiveTools: () => undefined,
@@ -69,7 +70,13 @@ describe("package manifest", () => {
     expect(new Set(subject.tools).size).toBe(subject.tools.length);
     expect(new Set(subject.commands).size).toBe(subject.commands.length);
     expect(subject.tools).toEqual(
-      expect.arrayContaining(["ask_user_question", "todo", "subagent_spawn", "search"]),
+      expect.arrayContaining([
+        "ask_user_question",
+        "todo",
+        "subagent_spawn",
+        "subagent_close",
+        "search",
+      ]),
     );
   });
 

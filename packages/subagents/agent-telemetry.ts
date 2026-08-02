@@ -5,6 +5,13 @@ import type { ManagedAgent } from "./types.js";
 
 const MAX_ACTIVITY = 24;
 
+type PromptGeneration = {
+  text: string;
+  userPersisted: boolean;
+  assistantPersisted: boolean;
+  offset: number;
+};
+
 type SessionRecord = {
   type?: string;
   timestamp?: string;
@@ -112,7 +119,7 @@ export class SessionPoller {
   private remainder = "";
   private pollTail: Promise<void> = Promise.resolve();
   private legacyAssistant = false;
-  private generation?: { text: string; userPersisted: boolean; assistantPersisted: boolean; offset: number };
+  private generation?: PromptGeneration;
 
   constructor(
     private readonly agent: ManagedAgent,
@@ -132,6 +139,10 @@ export class SessionPoller {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
   }
+  /** Await an in-flight filesystem poll after stop() so cleanup is deterministic. */
+  async idle(): Promise<void> {
+    await this.pollTail.catch(() => {});
+  }
   hasAssistantSincePrompt(): boolean {
     return this.generation
       ? Boolean(this.generation.userPersisted && this.generation.assistantPersisted)
@@ -140,18 +151,49 @@ export class SessionPoller {
   /** Begin an exact, persisted turn boundary after draining records already present. */
   async beginPrompt(text: string): Promise<void> {
     await this.pollOnce();
-    this.generation = { text, userPersisted: false, assistantPersisted: false, offset: this.offset };
+    this.generation = {
+      text,
+      userPersisted: false,
+      assistantPersisted: false,
+      offset: this.offset,
+    };
   }
   resetPromptBoundary(): void {
     // Kept for callers that cannot provide text; it never consumes old reports.
-    this.generation = { text: "", userPersisted: true, assistantPersisted: false, offset: this.offset };
+    this.generation = {
+      text: "",
+      userPersisted: true,
+      assistantPersisted: false,
+      offset: this.offset,
+    };
     this.legacyAssistant = false;
   }
-  rollbackPromptBoundary(): void { this.generation = undefined; }
+  rollbackPromptBoundary(): void {
+    this.generation = undefined;
+  }
+  promptCheckpoint(): {
+    generation: PromptGeneration | undefined;
+    legacyAssistant: boolean;
+  } {
+    return {
+      generation: this.generation ? { ...this.generation } : undefined,
+      legacyAssistant: this.legacyAssistant,
+    };
+  }
+  restorePromptCheckpoint(checkpoint: {
+    generation: PromptGeneration | undefined;
+    legacyAssistant: boolean;
+  }): void {
+    this.generation = checkpoint.generation ? { ...checkpoint.generation } : undefined;
+    this.legacyAssistant = checkpoint.legacyAssistant;
+  }
 
   /** One deterministic incremental poll, exposed for lifecycle verification and diagnostics. */
   async pollOnce(): Promise<void> {
-    const operation = this.pollTail.then(() => this.pollNow(), () => this.pollNow());
+    const operation = this.pollTail.then(
+      () => this.pollNow(),
+      () => this.pollNow(),
+    );
     this.pollTail = operation.catch(() => {});
     return operation;
   }

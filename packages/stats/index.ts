@@ -4,7 +4,7 @@ import { collectStats } from "./stats.js";
 
 export { buildReport, parseStatsArgs } from "./report.js";
 export type { Bucket, ReportMode, StatsReport, UsageTotals } from "./stats.js";
-export { collectStats, periodRange, sessionDirectory } from "./stats.js";
+export { collectStats, periodRange, sessionDirectories, sessionDirectory } from "./stats.js";
 
 export default function statsExtension(pi: ExtensionAPI): void {
   pi.registerCommand("stats", {

@@ -57,4 +57,41 @@ describe("stats", () => {
     expect(report.totals.responses).toBe(2);
     expect(buildReport(report)).toContain("Subagents (included above)");
   });
+
+  it("scans normal, hidden, and legacy Subagent roots without double-counting nested legacy files", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-extensions-stats-roots-"));
+    directories.push(root);
+    const normal = join(root, "sessions");
+    const hidden = join(root, "subagents", "sessions");
+    const legacy = join(normal, "subagents");
+    await Promise.all([
+      mkdir(normal, { recursive: true }),
+      mkdir(hidden, { recursive: true }),
+      mkdir(legacy, { recursive: true }),
+    ]);
+    const timestamp = "2026-03-03T10:00:00.000Z";
+    const record = (id: string, input: number) =>
+      [
+        JSON.stringify({ type: "session", id, cwd: "/project" }),
+        JSON.stringify({
+          type: "message",
+          timestamp,
+          message: { role: "assistant", usage: { input } },
+        }),
+      ].join("\n");
+    await Promise.all([
+      writeFile(join(normal, "main.jsonl"), record("main", 1)),
+      writeFile(join(hidden, "hidden.jsonl"), record("hidden", 2)),
+      writeFile(join(legacy, "legacy.jsonl"), record("legacy", 3)),
+    ]);
+
+    const report = await collectStats({
+      mode: "week",
+      now: new Date("2026-03-04"),
+      directories: [normal, hidden, legacy],
+    });
+    expect(report.scannedFiles).toBe(3);
+    expect(report.totals.input).toBe(6);
+    expect(report.subagents.input).toBe(5);
+  });
 });

@@ -42,15 +42,19 @@ export function parseFrontmatter(source: string, _file: string): AgentDefinition
   const name = safeName(fields.get("name") ?? "");
   const description = fields.get("description")?.trim() ?? "";
   const mode = fields.get("mode") ?? "explorer";
-  const thinking = fields.get("thinking");
+  const thinking = fields.get("thinking")?.trim() || undefined;
+  const model = fields.get("model")?.trim() || undefined;
   if (!name || !description || (mode !== "explorer" && mode !== "worker")) return undefined;
-  if (thinking && !["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking))
+  if (
+    thinking &&
+    !["inherit", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(thinking)
+  )
     return undefined;
   return {
     name,
     description,
     mode,
-    model: fields.get("model"),
+    model,
     thinking,
     prompt: match[2]!.trim(),
     source: "user",

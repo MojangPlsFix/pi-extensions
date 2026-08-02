@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import { EXPLORER_TOOLS, MAX_ACTIVE, MAX_WORKERS, WORKER_TOOLS } from "../config.js";
 import { childPrompt } from "../manager.js";
@@ -30,5 +31,18 @@ describe("subagent boundaries", () => {
     });
     expect(prompt).toContain("isolated persistent Pi subagent");
     expect(prompt).toContain("Do not assume access to parent-only state");
+  });
+
+  it("registers model-facing orchestration guidance with accurate role and lifecycle rules", async () => {
+    const [skill, manifest] = await Promise.all([
+      readFile(new URL("../skills/subagent-orchestration/SKILL.md", import.meta.url), "utf8"),
+      readFile(new URL("../../../package.json", import.meta.url), "utf8"),
+    ]);
+    expect(skill).toContain("Explorer");
+    expect(skill).toContain("Worker");
+    expect(skill).toContain("four Subagents");
+    expect(skill).toContain("subagent_close");
+    expect(skill).toContain("cannot spawn recursive Subagents");
+    expect(JSON.parse(manifest).pi.skills).toContain("./packages/subagents/skills");
   });
 });

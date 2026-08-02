@@ -62,13 +62,29 @@ export function periodRange(
   return { start, end };
 }
 
+function agentDirectory(env: NodeJS.ProcessEnv = process.env): string {
+  return (
+    env.PI_CODING_AGENT_DIR?.trim()?.replace(/^~(?=$|[\\/])/, homedir()) ||
+    join(homedir(), ".pi", "agent")
+  );
+}
+
 export function sessionDirectory(env: NodeJS.ProcessEnv = process.env): string {
   const configured = env.PI_CODING_AGENT_SESSION_DIR?.trim();
   if (configured) return configured.replace(/^~(?=$|[\\/])/, homedir());
-  const agentDirectory =
-    env.PI_CODING_AGENT_DIR?.trim()?.replace(/^~(?=$|[\\/])/, homedir()) ||
-    join(homedir(), ".pi", "agent");
-  return join(agentDirectory, "sessions");
+  return join(agentDirectory(env), "sessions");
+}
+
+/** Normal Pi sessions, hidden new Subagents, and the legacy Subagent tree. */
+export function sessionDirectories(env: NodeJS.ProcessEnv = process.env): string[] {
+  const root = agentDirectory(env);
+  return [
+    ...new Set([
+      sessionDirectory(env),
+      join(root, "subagents", "sessions"),
+      join(root, "sessions", "subagents"),
+    ]),
+  ];
 }
 
 function emptyTotals(): UsageTotals {
@@ -138,9 +154,9 @@ function parsedDate(value: unknown): Date | undefined {
   );
   return Number.isFinite(date.getTime()) ? date : undefined;
 }
-async function files(directory: string): Promise<string[]> {
-  const pending = [directory];
-  const found: string[] = [];
+async function files(directories: string[]): Promise<string[]> {
+  const pending = [...directories];
+  const found = new Set<string>();
   while (pending.length) {
     const current = pending.pop();
     if (!current) continue;
@@ -148,13 +164,13 @@ async function files(directory: string): Promise<string[]> {
       for (const entry of await readdir(current, { withFileTypes: true })) {
         const path = join(current, entry.name);
         if (entry.isDirectory()) pending.push(path);
-        else if (entry.isFile() && entry.name.endsWith(".jsonl")) found.push(path);
+        else if (entry.isFile() && entry.name.endsWith(".jsonl")) found.add(path);
       }
     } catch {
       /* an absent or unreadable directory is an empty source */
     }
   }
-  return found.sort();
+  return [...found].sort();
 }
 
 async function collectFile(
@@ -217,7 +233,13 @@ async function collectFile(
 }
 
 export async function collectStats(
-  options: { mode?: ReportMode; offset?: number; now?: Date; directory?: string } = {},
+  options: {
+    mode?: ReportMode;
+    offset?: number;
+    now?: Date;
+    directory?: string;
+    directories?: string[];
+  } = {},
 ): Promise<StatsReport> {
   const mode = options.mode ?? "workweek";
   const { start, end } = periodRange(mode, options.now, options.offset ?? 0);
@@ -233,7 +255,9 @@ export async function collectStats(
     projects: new Map(),
     days: new Map(),
   };
-  const sessionFiles = await files(options.directory ?? sessionDirectory());
+  const sessionFiles = await files(
+    options.directories ?? (options.directory ? [options.directory] : sessionDirectories()),
+  );
   report.scannedFiles = sessionFiles.length;
   for (const path of sessionFiles)
     try {

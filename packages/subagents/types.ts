@@ -1,7 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 export type Mode = "explorer" | "worker";
-export type AgentStatus = "running" | "completed" | "failed" | "interrupted";
+export type AgentStatus = "running" | "completed" | "failed" | "interrupted" | "closed";
 export type BackendKind = "rpc" | "herdr";
 
 export type Usage = {
@@ -34,7 +34,8 @@ export type AgentActivity = {
     | "message"
     | "status"
     | "error"
-    | "transport";
+    | "transport"
+    | "close";
   text: string;
 };
 
@@ -53,6 +54,7 @@ export type AgentSnapshot = {
   sessionDir: string;
   sessionFile?: string;
   herdrPaneId?: string;
+  herdrTabId?: string;
   requestedModel?: string;
   requestedThinking?: string;
   effectiveModel?: string;
@@ -80,6 +82,7 @@ export type ManagedAgent = {
   /** Present only for the traditional invisible RPC transport. */
   process?: ChildProcessWithoutNullStreams;
   herdrPaneId?: string;
+  herdrTabId?: string;
   stderr: string;
   output: string;
   error?: string;
@@ -95,9 +98,13 @@ export type ManagedAgent = {
 
 export type AgentStatusSummary = {
   active: number;
+  ready: number;
+  open: number;
   explorers: number;
   workers: number;
   failed: number;
+  interrupted: number;
+  closed: number;
 };
 
 export const emptyUsage = (): Usage => ({
@@ -127,6 +134,7 @@ export function agentSnapshot(agent: ManagedAgent, now = Date.now()): AgentSnaps
     sessionDir: agent.sessionDir,
     sessionFile: agent.sessionFile,
     herdrPaneId: agent.herdrPaneId,
+    herdrTabId: agent.herdrTabId,
     requestedModel: agent.requestedModel,
     requestedThinking: agent.requestedThinking,
     effectiveModel: agent.effectiveModel,

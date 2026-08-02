@@ -55,7 +55,24 @@ export class RpcBackend implements SubagentBackend {
       );
     client.abort();
   }
-  shutdown(agent: ManagedAgent): void {
-    this.interrupt(agent);
+  async shutdown(agent: ManagedAgent): Promise<void> {
+    const process = agent.process;
+    if (!process || process.exitCode !== null || process.signalCode !== null) return;
+    const closed = new Promise<void>((resolve) => process.once("close", () => resolve()));
+    try {
+      this.clients.get(agent.id)?.abort();
+    } catch {
+      /* stdin can close before process exit */
+    }
+    process.kill("SIGTERM");
+    const graceful = await Promise.race([
+      closed.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), 1_500)),
+    ]);
+    if (!graceful && process.exitCode === null && process.signalCode === null) {
+      process.kill("SIGKILL");
+      await Promise.race([closed, new Promise<void>((resolve) => setTimeout(resolve, 500))]);
+    }
+    this.clients.delete(agent.id);
   }
 }

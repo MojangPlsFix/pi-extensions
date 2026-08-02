@@ -31,6 +31,92 @@ describe("Herdr capability checks", () => {
     expect(command).not.toContain("must-not-reach-herdr-arguments");
     delete process.env.FAKE_SECRET;
   });
+  it("creates a non-focused dedicated tab and returns its root pane", async () => {
+    const calls: string[][] = [];
+    const client = new HerdrClient(async (args) => {
+      calls.push(args);
+      return {
+        stdout:
+          '{"result":{"type":"tab_created","tab":{"tab_id":"tab-1"},"root_pane":{"pane_id":"root-1"}}}',
+        stderr: "",
+      };
+    });
+
+    await expect(
+      client.createTab("Subagents · project", "/work/project", { CHILD: "yes" }),
+    ).resolves.toEqual({
+      tabId: "tab-1",
+      paneId: "root-1",
+    });
+    expect(calls[0]).toEqual([
+      "tab",
+      "create",
+      "--label",
+      "Subagents · project",
+      "--cwd",
+      "/work/project",
+      "--env",
+      "CHILD=yes",
+      "--no-focus",
+    ]);
+  });
+  it("parses geometry-rich pane layout snapshots", async () => {
+    const calls: string[][] = [];
+    const client = new HerdrClient(async (args) => {
+      calls.push(args);
+      return {
+        stdout:
+          '{"result":{"type":"pane_layout","layout":{"tab_id":"tab-1","panes":[{"pane_id":"one","rect":{"x":0,"y":0,"width":120,"height":40}}]}}}',
+        stderr: "",
+      };
+    });
+
+    await expect(client.layout("one")).resolves.toEqual({
+      tabId: "tab-1",
+      panes: [{ paneId: "one", rect: { x: 0, y: 0, width: 120, height: 40 } }],
+    });
+    expect(calls).toEqual([["pane", "layout", "--pane", "one"]]);
+  });
+  it("reports bounded display metadata and focuses the canonical target", async () => {
+    const calls: string[][] = [];
+    const client = new HerdrClient(async (args) => {
+      calls.push(args);
+      return { stdout: "ok", stderr: "" };
+    });
+
+    await client.reportMetadata("pane-1", {
+      agent: "internal-a",
+      title: "Inspect parser",
+      displayRole: "explorer",
+      stateLabels: { working: "Exploring" },
+      tokens: { role: "explorer", model: "provider/model" },
+      seq: 3,
+    });
+    await client.focus("pane-1");
+
+    expect(calls[0]).toEqual([
+      "pane",
+      "report-metadata",
+      "pane-1",
+      "--source",
+      "pi-subagents",
+      "--agent",
+      "internal-a",
+      "--title",
+      "Inspect parser",
+      "--display-agent",
+      "explorer",
+      "--state-label",
+      "working=Exploring",
+      "--token",
+      "role=explorer",
+      "--token",
+      "model=provider/model",
+      "--seq",
+      "3",
+    ]);
+    expect(calls[1]).toEqual(["agent", "focus", "pane-1"]);
+  });
   it("verifies the control plane without creating a pane", async () => {
     const calls: string[][] = [];
     const client = new HerdrClient(async (args) => {

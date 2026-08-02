@@ -15,10 +15,16 @@ import {
   childSystemPromptPath,
   piInvocation,
 } from "./child-runtime.js";
-import { MAX_ACTIVE, MAX_WORKERS, SESSION_ROOT } from "./config.js";
+import {
+  loadSubagentConfig,
+  MAX_ACTIVE,
+  MAX_WORKERS,
+  resolveAgentModelPolicy,
+  SESSION_ROOT,
+} from "./config.js";
 import { HerdrBackend } from "./herdr-backend.js";
 import { HerdrClient } from "./herdr-client.js";
-import { activityWidgetLines, formatAgent } from "./renderers.js";
+import { formatAgent } from "./renderers.js";
 import { RpcBackend } from "./rpc-backend.js";
 import type { RpcEvent } from "./rpc-client.js";
 import { AgentStore } from "./store.js";
@@ -55,15 +61,24 @@ export class SubagentManager {
   private readonly pollers = new Map<string, SessionPoller>();
   private readonly contextDirs = new Map<string, string>();
   private readonly operationTails = new Map<string, Promise<unknown>>();
+  private readonly reportTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly releases = new Map<string, Promise<void>>();
+  private readonly released = new Set<string>();
   private pendingActive = 0;
   private pendingWorkers = 0;
-  private ui?: ExtensionContext["ui"]; 
+  private shutdownPromise?: Promise<void>;
+  private ui?: ExtensionContext["ui"];
+  private readonly unsubscribePlanMode: () => void;
 
   private enqueue<T>(id: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.operationTails.get(id) ?? Promise.resolve();
     const next = previous.catch(() => {}).then(operation);
     this.operationTails.set(id, next);
-    void next.finally(() => { if (this.operationTails.get(id) === next) this.operationTails.delete(id); }).catch(() => {});
+    void next
+      .finally(() => {
+        if (this.operationTails.get(id) === next) this.operationTails.delete(id);
+      })
+      .catch(() => {});
     return next;
   }
 
@@ -72,9 +87,11 @@ export class SubagentManager {
       (agent, event) => this.onRpcEvent(agent, event),
       (agent, code, signal) => this.onClose(agent, code, signal),
     );
-    pi.events.on(events.planMode, (data: unknown) => {
+    const unsubscribePlanMode = pi.events.on(events.planMode, (data: unknown) => {
       this.planMode = (data as { enabled?: boolean }).enabled === true;
     });
+    this.unsubscribePlanMode =
+      typeof unsubscribePlanMode === "function" ? unsubscribePlanMode : () => {};
   }
 
   attachUi(ctx: ExtensionContext): void {
@@ -86,8 +103,14 @@ export class SubagentManager {
   }
 
   publish(): void {
-    this.pi.events.emit(events.subagentsStatus, this.store.summary());
-    this.ui?.setWidget("subagents", activityWidgetLines(this.store.all()));
+    this.pi.events.emit(events.subagentsStatus, {
+      ...this.store.summary(),
+      agents: this.store.inline(4).map((agent) => agentSnapshot(agent)),
+    });
+  }
+
+  private assertParentOpen(): void {
+    if (this.shutdownPromise) throw new Error("The parent session is shutting down.");
   }
 
   async spawn(
@@ -95,6 +118,7 @@ export class SubagentManager {
     task: string,
     ctx: ExtensionContext,
   ): Promise<ManagedAgent> {
+    this.assertParentOpen();
     this.attachUi(ctx);
     const definitions = await discoverAgents();
     const requestedName = agentName ? safeName(agentName) : "explorer";
@@ -103,20 +127,21 @@ export class SubagentManager {
       throw new Error(
         `Unknown subagent ${agentName}. Available: ${definitions.map((agent) => agent.name).join(", ")}.`,
       );
-    const active = this.store.running();
-    const workerCount = active.filter((agent) => agent.definition.mode === "worker").length;
-    if (active.length + this.pendingActive >= MAX_ACTIVE)
-      throw new Error(`At most ${MAX_ACTIVE} subagents may run at once.`);
+    const open = this.store.open();
+    const workerCount = open.filter((agent) => agent.definition.mode === "worker").length;
+    if (open.length + this.pendingActive >= MAX_ACTIVE)
+      throw new Error(`At most ${MAX_ACTIVE} subagents may remain open at once. Close one first.`);
     if (definition.mode === "worker" && this.pendingWorkers + workerCount >= MAX_WORKERS)
-      throw new Error(`Only ${MAX_WORKERS} worker may run at once.`);
+      throw new Error(`Only ${MAX_WORKERS} worker may remain open at once.`);
     if (definition.mode === "worker" && this.planMode)
       throw new Error("Workers cannot start while Plan Mode is active.");
-    if (definition.mode === "worker" && active.some((agent) => agent.definition.mode === "worker"))
-      throw new Error(`Only ${MAX_WORKERS} worker may run at once.`);
 
     this.pendingActive++;
     if (definition.mode === "worker") this.pendingWorkers++;
     let reserved = true;
+    let allocatedContextDir: string | undefined;
+    let allocatedSessionDir: string | undefined;
+    let resourcesOwned = false;
     const releaseReservation = () => {
       if (!reserved) return;
       reserved = false;
@@ -124,61 +149,73 @@ export class SubagentManager {
       if (definition.mode === "worker") this.pendingWorkers--;
     };
     try {
-      // Verify an explicitly configured Herdr control plane before creating any child resources.
+      const resolved = resolveAgentModelPolicy(
+        definition,
+        await loadSubagentConfig(),
+        modelName(ctx),
+        ctx.thinkingLevel,
+      );
+      // Model existence and auth are checked before allocating files, processes, tabs, or panes.
+      await this.preflightModel(resolved.model, ctx);
+      this.assertParentOpen();
       const backend = await this.selectBackend();
-    const id = `${safeName(definition.name)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    const sessionDir = join(SESSION_ROOT, parentSessionId(ctx), id);
-    const contextDir = await fs.mkdtemp(join(tmpdir(), "pi-subagent-context-"));
-    await fs.mkdir(sessionDir, { recursive: true });
-    // These paths are intentionally separate from parent project and configuration state.
-    await Promise.all([
-      fs.mkdir(join(contextDir, "context-mode"), { recursive: true }),
-      fs.mkdir(join(contextDir, "todos"), { recursive: true }),
-    ]);
-    // Herdr safely encodes only shell-safe arguments. Keep the multiline child policy in a file.
-    await fs.writeFile(childSystemPromptPath({ sessionDir }), childPrompt(definition));
-    const requestedModel = definition.model ?? modelName(ctx);
-    const requestedThinking = definition.thinking ?? ctx.thinkingLevel;
-    const agent: ManagedAgent = {
-      id,
-      name: definition.name,
-      definition,
-      task,
-      taskHistory: [task],
-      status: "running",
-      backend,
-      startedAt: new Date().toISOString(),
-      sessionDir,
-      stderr: "",
-      output: "",
-      usage: emptyUsage(),
-      completionReported: false,
-      requestedModel,
-      requestedThinking,
-      activity: [],
-    };
-    recordActivity(agent, "spawn", `starting ${definition.mode} via ${backend}`);
-    this.store.add(agent);
-    releaseReservation();
-    this.contextDirs.set(id, contextDir);
-    // RPC events own RPC usage; Herdr has no event stream, so JSONL owns its usage.
-    const poller = new SessionPoller(agent, () => this.publish(), backend === "herdr");
-    this.pollers.set(id, poller);
-    poller.start();
-    if ("beginPrompt" in poller) await poller.beginPrompt(task);
-    try {
-      if (backend === "rpc") await this.spawnRpc(agent, task, ctx, contextDir);
-      else await this.spawnHerdr(agent, task, ctx, contextDir);
-      this.publish();
-      return agent;
-    } catch (cause) {
+      this.assertParentOpen();
+      const id = `${safeName(definition.name)}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+      const sessionDir = join(SESSION_ROOT, parentSessionId(ctx), id);
+      allocatedSessionDir = sessionDir;
+      const contextDir = await fs.mkdtemp(join(tmpdir(), "pi-subagent-context-"));
+      allocatedContextDir = contextDir;
+      await fs.mkdir(sessionDir, { recursive: true });
+      await Promise.all([
+        fs.mkdir(join(contextDir, "context-mode"), { recursive: true }),
+        fs.mkdir(join(contextDir, "todos"), { recursive: true }),
+      ]);
+      await fs.writeFile(childSystemPromptPath({ sessionDir }), childPrompt(definition));
+      this.assertParentOpen();
+      if (backend === "herdr") this.ensureHerdr(ctx, contextDir);
+      const agent: ManagedAgent = {
+        id,
+        name: definition.name,
+        definition,
+        task,
+        taskHistory: [task],
+        status: "running",
+        backend,
+        startedAt: new Date().toISOString(),
+        sessionDir,
+        stderr: "",
+        output: "",
+        usage: emptyUsage(),
+        completionReported: false,
+        requestedModel: resolved.model,
+        requestedThinking: resolved.thinking,
+        activity: [],
+      };
+      recordActivity(agent, "spawn", `starting ${definition.mode} via ${backend}`);
+      this.store.add(agent);
       releaseReservation();
-      this.settle(agent, "failed", cause instanceof Error ? cause.message : String(cause));
-      throw cause;
-    }
-    } catch (cause) {
+      this.contextDirs.set(id, contextDir);
+      resourcesOwned = true;
+      const poller = new SessionPoller(agent, () => this.publish(), backend === "herdr");
+      this.pollers.set(id, poller);
+      poller.start();
+      await poller.beginPrompt(task);
+      try {
+        this.assertParentOpen();
+        if (backend === "rpc") await this.spawnRpc(agent, task, ctx, contextDir);
+        else await this.spawnHerdr(agent, task, ctx, contextDir);
+        this.publish();
+        return agent;
+      } catch (cause) {
+        this.settle(agent, "failed", cause instanceof Error ? cause.message : String(cause));
+        throw cause;
+      }
+    } finally {
       releaseReservation();
-      throw cause;
+      if (!resourcesOwned) {
+        if (allocatedContextDir) await fs.rm(allocatedContextDir, { recursive: true, force: true });
+        if (allocatedSessionDir) await fs.rm(allocatedSessionDir, { recursive: true, force: true });
+      }
     }
   }
 
@@ -187,9 +224,10 @@ export class SubagentManager {
   }
 
   private async sendNow(id: string, message: string): Promise<ManagedAgent> {
+    if (this.shutdownPromise) throw new Error("The parent session is shutting down.");
     const agent = this.store.get(id);
-    if (!agent || agent.status === "failed" || agent.status === "interrupted")
-      throw new Error("No resumable subagent with that id.");
+    if (!agent || !["running", "completed"].includes(agent.status))
+      throw new Error("No open resumable subagent with that id.");
     if (this.planMode && agent.definition.mode === "worker")
       throw new Error("Workers cannot resume while Plan Mode is active.");
     const previous = {
@@ -208,9 +246,15 @@ export class SubagentManager {
     agent.error = undefined;
     agent.completionReported = false;
     const poller = this.pollers.get(id);
-    if (poller && "beginPrompt" in poller) await poller.beginPrompt(message);
-    else poller?.resetPromptBoundary();
-    poller?.start();
+    const promptPoller = poller as
+      | (SessionPoller & {
+          beginPrompt?: (text: string) => Promise<void>;
+          rollbackPromptBoundary?: () => void;
+        })
+      | undefined;
+    if (typeof promptPoller?.beginPrompt === "function") await promptPoller.beginPrompt(message);
+    else promptPoller?.resetPromptBoundary();
+    promptPoller?.start();
     recordActivity(
       agent,
       "guidance",
@@ -220,8 +264,8 @@ export class SubagentManager {
       await this.backendFor(agent).send(agent, message);
     } catch (cause) {
       // Do not leave a poller running for a follow-up that the backend rejected.
-      poller?.stop();
-      if (poller && "rollbackPromptBoundary" in poller) poller.rollbackPromptBoundary();
+      promptPoller?.stop();
+      promptPoller?.rollbackPromptBoundary?.();
       agent.status = previous.status;
       agent.finishedAt = previous.finishedAt;
       agent.task = previous.task;
@@ -233,6 +277,7 @@ export class SubagentManager {
       this.publish();
       throw cause;
     }
+    if (agent.backend === "herdr") await this.herdr?.updateMetadata?.(agent);
     this.publish();
     return agent;
   }
@@ -242,11 +287,17 @@ export class SubagentManager {
   }
 
   private async redirectNow(id: string, message: string): Promise<ManagedAgent> {
+    if (this.shutdownPromise) throw new Error("The parent session is shutting down.");
     const agent = this.store.get(id);
     if (agent?.status !== "running")
       throw new Error("Only a running subagent can be stopped and redirected.");
     if (this.planMode && agent.definition.mode === "worker")
       throw new Error("Workers cannot be redirected while Plan Mode is active.");
+    const previous = {
+      taskHistoryLength: agent.taskHistory.length,
+      activityLength: agent.activity.length,
+      redirectMessage: agent.redirectMessage,
+    };
     agent.taskHistory.push(message);
     recordActivity(
       agent,
@@ -254,18 +305,36 @@ export class SubagentManager {
       `stop & redirect: ${message.replace(/\s+/gu, " ").slice(0, 160)}`,
     );
     const poller = this.pollers.get(id);
+    const checkpoint = poller?.promptCheckpoint();
     await poller?.beginPrompt(message);
     poller?.start();
     const backend = this.backendFor(agent);
-    if (agent.backend === "rpc") {
-      agent.redirectMessage = message;
-      await (backend.redirect?.(agent, message) ?? backend.interrupt(agent));
-    } else if (backend.redirect) await backend.redirect(agent, message);
-    else {
-      agent.redirectMessage = message;
-      await backend.interrupt(agent);
+    try {
+      if (agent.backend === "rpc") {
+        agent.redirectMessage = message;
+        await (backend.redirect?.(agent, message) ?? backend.interrupt(agent));
+      } else if (backend.redirect) await backend.redirect(agent, message);
+      else {
+        agent.redirectMessage = message;
+        await backend.interrupt(agent);
+      }
+    } catch (cause) {
+      agent.taskHistory.splice(previous.taskHistoryLength);
+      agent.activity.splice(previous.activityLength);
+      agent.redirectMessage = previous.redirectMessage;
+      if (checkpoint) poller?.restorePromptCheckpoint(checkpoint);
+      else poller?.rollbackPromptBoundary();
+      poller?.start();
+      recordActivity(
+        agent,
+        "transport",
+        `redirect failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      this.publish();
+      throw cause;
     }
     agent.task = message;
+    if (agent.backend === "herdr") await this.herdr?.updateMetadata(agent);
     this.publish();
     return agent;
   }
@@ -279,6 +348,7 @@ export class SubagentManager {
     if (agent?.status !== "running") throw new Error("No running subagent with that id.");
     await this.backendFor(agent).interrupt(agent);
     this.settle(agent, "interrupted");
+    await this.releaseTransport(agent);
     return agent;
   }
 
@@ -312,20 +382,113 @@ export class SubagentManager {
     return all ? Promise.all(waits) : [await Promise.race(waits)];
   }
 
-  shutdown(): void {
-    this.ui?.setWidget("subagents", undefined);
-    // Completed children remain alive for follow-ups, so shutdown owns all child cleanup.
-    for (const agent of this.store.all()) {
-      void this.backendFor(agent).shutdown?.(agent);
-      this.pollers.get(agent.id)?.stop();
-      this.cleanupContext(agent.id);
-    }
+  async close(id: string): Promise<ManagedAgent> {
+    return this.enqueue(id, async () => {
+      const agent = this.store.get(id);
+      if (!agent) throw new Error("Unknown subagent.");
+      if (agent.status === "closed" && this.released.has(agent.id)) return agent;
+      if (agent.status !== "closed") {
+        agent.status = "closed";
+        agent.finishedAt ??= new Date().toISOString();
+        recordActivity(agent, "close", "closed by parent");
+      }
+      if (agent.backend === "herdr") await this.herdr?.updateMetadata(agent);
+      await this.releaseTransport(agent);
+      this.reportCompletion(agent);
+      this.publish();
+      return agent;
+    });
   }
 
-  private cleanupContext(agentId: string): void {
+  async focus(id: string): Promise<void> {
+    const agent = this.store.get(id);
+    if (!agent?.herdrPaneId || agent.backend !== "herdr")
+      throw new Error("That subagent has no open Herdr pane.");
+    await this.herdr?.focus(agent);
+  }
+
+  shutdown(): Promise<void> {
+    this.unsubscribePlanMode();
+    this.shutdownPromise ??= this.shutdownNow();
+    return this.shutdownPromise;
+  }
+
+  private async shutdownNow(): Promise<void> {
+    await Promise.all(
+      this.store.all().map(async (agent) => {
+        if (agent.status !== "closed") {
+          agent.status = "closed";
+          agent.finishedAt ??= new Date().toISOString();
+          recordActivity(agent, "close", "parent session shutdown");
+        }
+        await this.releaseTransport(agent);
+      }),
+    );
+    this.publish();
+  }
+
+  private releaseInBackground(agent: ManagedAgent): void {
+    void this.releaseTransport(agent).catch((cause) => {
+      recordActivity(
+        agent,
+        "transport",
+        `cleanup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      this.publish();
+    });
+  }
+
+  private releaseTransport(agent: ManagedAgent): Promise<void> {
+    if (this.released.has(agent.id)) return Promise.resolve();
+    const pending = this.releases.get(agent.id);
+    if (pending) return pending;
+    const release = this.releaseTransportNow(agent)
+      .then(() => {
+        this.released.add(agent.id);
+      })
+      .finally(() => {
+        if (this.releases.get(agent.id) === release) this.releases.delete(agent.id);
+      });
+    this.releases.set(agent.id, release);
+    return release;
+  }
+
+  private async releaseTransportNow(agent: ManagedAgent): Promise<void> {
+    const reportTimer = this.reportTimers.get(agent.id);
+    if (reportTimer) clearTimeout(reportTimer);
+    this.reportTimers.delete(agent.id);
+    const poller = this.pollers.get(agent.id);
+    poller?.stop();
+    const idle = (poller as unknown as { idle?: () => Promise<void> } | undefined)?.idle;
+    if (idle) await idle.call(poller);
+    this.pollers.delete(agent.id);
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        await this.backendFor(agent).shutdown?.(agent);
+        lastError = undefined;
+        break;
+      } catch (cause) {
+        lastError = cause;
+        recordActivity(
+          agent,
+          "transport",
+          `cleanup attempt ${attempt} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        if (attempt < 3) await new Promise<void>((resolve) => setTimeout(resolve, attempt * 100));
+      }
+    }
+    if (lastError) {
+      this.publish();
+      throw lastError;
+    }
+    await this.cleanupContext(agent.id);
+  }
+
+  private async cleanupContext(agentId: string): Promise<void> {
     const directory = this.contextDirs.get(agentId);
     this.contextDirs.delete(agentId);
-    if (directory) void fs.rm(directory, { recursive: true, force: true });
+    if (directory) await fs.rm(directory, { recursive: true, force: true });
   }
 
   private childArgs(agent: ManagedAgent): string[] {
@@ -353,30 +516,62 @@ export class SubagentManager {
     });
   }
 
+  private ensureHerdr(ctx: ExtensionContext, contextDir: string): void {
+    if (!process.env.HERDR_PANE_ID)
+      throw new Error("Herdr is detected but HERDR_PANE_ID is unavailable.");
+    this.herdr ??= new HerdrBackend(
+      this.verifiedHerdrClient ?? new HerdrClient(),
+      process.env.HERDR_PANE_ID,
+      ctx.cwd,
+      // Never serialize parent credentials through Herdr's --env arguments.
+      (child) => childIsolationOverrides(this.contextDirs.get(child.id) ?? contextDir),
+      (child) => this.childArgs(child),
+      (child) => this.onHerdrReady(child),
+      (child, error) => this.settle(child, "failed", error.message),
+      (child, error) => {
+        recordActivity(child, "transport", `Herdr wait retry: ${error.message}`);
+        this.publish();
+      },
+      (error) => {
+        this.ui?.notify(error.message, "warning");
+        for (const child of this.store.open())
+          if (child.backend === "herdr") recordActivity(child, "transport", error.message);
+        this.publish();
+      },
+      true,
+    );
+  }
+
   private async spawnHerdr(
     agent: ManagedAgent,
     task: string,
     ctx: ExtensionContext,
     contextDir: string,
   ): Promise<void> {
-    if (!process.env.HERDR_PANE_ID)
-      throw new Error("Herdr is detected but HERDR_PANE_ID is unavailable.");
-    if (!this.herdr)
-      this.herdr = new HerdrBackend(
-        this.verifiedHerdrClient ?? new HerdrClient(),
-        process.env.HERDR_PANE_ID,
-        ctx.cwd,
-        // Never serialize parent credentials through Herdr's --env arguments.
-        (child) => childIsolationOverrides(this.contextDirs.get(child.id) ?? contextDir),
-        (child) => this.childArgs(child),
-        (child) => this.onHerdrReady(child),
-        (child, error) => this.settle(child, "failed", error.message),
-        (child, error) => {
-          recordActivity(child, "transport", `Herdr wait retry: ${error.message}`);
-          this.publish();
-        },
+    this.ensureHerdr(ctx, contextDir);
+    await this.herdr!.spawn(agent, task);
+  }
+
+  private async preflightModel(
+    modelName: string | undefined,
+    ctx: ExtensionContext,
+  ): Promise<void> {
+    if (!modelName) return;
+    await ctx.modelRegistry.refresh();
+    const separator = modelName.indexOf("/");
+    const model =
+      separator > 0
+        ? ctx.modelRegistry.find(modelName.slice(0, separator), modelName.slice(separator + 1))
+        : ctx.modelRegistry.getAll().find((candidate) => candidate.id === modelName);
+    if (!model)
+      throw new Error(
+        `Configured Subagent model ${modelName} is unavailable. Check ~/.pi/agent/subagents/config.json or the agent frontmatter before spawning.`,
       );
-    await this.herdr.spawn(agent, task);
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok)
+      throw new Error(
+        `Configured Subagent model ${modelName} is not authenticated: ${auth.error}. Authenticate its provider before spawning.`,
+      );
   }
 
   private async selectBackend(): Promise<"rpc" | "herdr"> {
@@ -408,6 +603,7 @@ export class SubagentManager {
     // Herdr's idle/done state is only a transport signal. A final persisted text report decides completion.
     const deadline = Date.now() + 5_000;
     const awaitPersistedReport = () => {
+      this.reportTimers.delete(agent.id);
       if (agent.status !== "running" || agent.redirectMessage) return;
       if (this.pollers.get(agent.id)?.hasAssistantSincePrompt()) {
         this.settle(agent, "completed");
@@ -423,9 +619,11 @@ export class SubagentManager {
         this.publish();
         return;
       }
-      setTimeout(awaitPersistedReport, 200);
+      const timer = setTimeout(awaitPersistedReport, 200);
+      this.reportTimers.set(agent.id, timer);
     };
-    setTimeout(awaitPersistedReport, 200);
+    const timer = setTimeout(awaitPersistedReport, 200);
+    this.reportTimers.set(agent.id, timer);
   }
 
   private onRpcEvent(agent: ManagedAgent, event: RpcEvent): void {
@@ -455,12 +653,19 @@ export class SubagentManager {
   }
 
   private onClose(agent: ManagedAgent, code: number | null, signal: NodeJS.Signals | null): void {
-    if (agent.status === "running")
-      this.settle(
-        agent,
-        code === 0 ? "completed" : "failed",
-        code === 0 ? undefined : agent.stderr.trim() || `Child exited with ${signal ?? code}`,
-      );
+    if (agent.status === "running" && code !== 0) {
+      this.settle(agent, "failed", agent.stderr.trim() || `Child exited with ${signal ?? code}`);
+      return;
+    }
+    if (agent.status === "running" || agent.status === "completed") {
+      agent.status = "closed";
+      agent.finishedAt ??= new Date().toISOString();
+      recordActivity(agent, "close", "RPC child exited; transport released");
+      this.pollers.get(agent.id)?.stop();
+      this.reportCompletion(agent);
+      this.releaseInBackground(agent);
+      this.publish();
+    }
   }
   private settle(agent: ManagedAgent, status: AgentStatus, error?: string): void {
     if (agent.status !== "running") return;
@@ -468,23 +673,36 @@ export class SubagentManager {
     agent.error = error;
     agent.finishedAt = new Date().toISOString();
     this.pollers.get(agent.id)?.stop();
-    if (agent.backend === "herdr") this.herdr?.stopObserving(agent);
-    // A completed child is deliberately persistent. Keep its isolated state for follow-ups.
-    if (status !== "completed") this.cleanupContext(agent.id);
-    recordActivity(agent, error ? "error" : "status", error ?? status);
-    if (!agent.completionReported) {
-      agent.completionReported = true;
-      this.pi.sendMessage({
-        customType: "subagent-completion",
-        content: [
-          `Subagent **${agent.name}** ${status === "completed" ? "completed" : status}.`,
-          agent.output || agent.error || "(no report)",
-          `Usage: ${formatAgent(agent)}.`,
-        ].join("\n\n"),
-        display: true,
-        details: { agent: agentSnapshot(agent) },
+    if (agent.backend === "herdr") {
+      this.herdr?.stopObserving(agent);
+      void this.herdr?.updateMetadata(agent).catch((cause) => {
+        recordActivity(
+          agent,
+          "transport",
+          `metadata warning: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        this.publish();
       });
     }
+    recordActivity(agent, error ? "error" : "status", error ?? status);
+    this.reportCompletion(agent);
+    // Failed and interrupted children release capacity and transport immediately.
+    if (status === "failed" || status === "interrupted") this.releaseInBackground(agent);
     this.publish();
+  }
+
+  private reportCompletion(agent: ManagedAgent): void {
+    if (agent.completionReported) return;
+    agent.completionReported = true;
+    this.pi.sendMessage({
+      customType: "subagent-completion",
+      content: [
+        `Task: ${agent.task}`,
+        agent.output || agent.error || "(no report)",
+        `Usage: ${formatAgent(agent)}.`,
+      ].join("\n\n"),
+      display: true,
+      details: { agent: agentSnapshot(agent) },
+    });
   }
 }

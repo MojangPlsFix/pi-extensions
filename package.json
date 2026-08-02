@@ -30,7 +30,8 @@
       "./packages/copilot-compaction-fix/index.ts"
     ],
     "skills": [
-      "./packages/web-search/skills"
+      "./packages/web-search/skills",
+      "./packages/subagents/skills"
     ]
   },
   "scripts": {
