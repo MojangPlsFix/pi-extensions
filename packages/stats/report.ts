@@ -10,7 +10,9 @@ const compactTokens = (value: number): string =>
       : String(Math.round(value));
 const totalsLine = (label: string, total: UsageTotals): string =>
   `${label}: ${compactTokens(totalTokens(total))} tokens · ${total.responses} responses · $${total.cost.toFixed(4)} · ${total.sessions.size} sessions`;
-export function buildReport(report: StatsReport): string {
+export type ReportOptions = { liveProviderQuota?: string };
+
+export function buildReport(report: StatsReport, options: ReportOptions = {}): string {
   const heading = `${report.mode} · ${report.start.toLocaleDateString()} – ${new Date(report.end.getTime() - 1).toLocaleDateString()}`;
   const bucketLines = (label: string, buckets: Map<string, Bucket>): string[] => [
     label,
@@ -32,6 +34,7 @@ export function buildReport(report: StatsReport): string {
     ...bucketLines("Projects", report.projects),
     "",
     `Scanned ${report.scannedFiles} session files${report.unreadableFiles ? `; ${report.unreadableFiles} unreadable` : ""}.`,
+    ...(options.liveProviderQuota ? ["", options.liveProviderQuota] : []),
   ].join("\n");
 }
 

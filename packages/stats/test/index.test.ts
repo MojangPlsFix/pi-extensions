@@ -1,8 +1,16 @@
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { buildReport, collectStats, parseStatsArgs, periodRange } from "../index.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  buildReport,
+  collectStats,
+  formatLiveProviderQuota,
+  parseStatsArgs,
+  periodRange,
+  registerStats,
+  type StatsReport,
+} from "../index.js";
 
 const directories: string[] = [];
 afterEach(async () => {
@@ -93,5 +101,142 @@ describe("stats", () => {
     expect(report.scannedFiles).toBe(3);
     expect(report.totals.input).toBe(6);
     expect(report.subagents.input).toBe(5);
+  });
+});
+
+const emptyTotals = () => ({
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  uncategorized: 0,
+  cost: 0,
+  responses: 0,
+  sessions: new Set<string>(),
+});
+
+const emptyReport = (): StatsReport => ({
+  mode: "workweek",
+  start: new Date("2026-03-02T00:00:00Z"),
+  end: new Date("2026-03-07T00:00:00Z"),
+  totals: emptyTotals(),
+  subagents: emptyTotals(),
+  models: new Map(),
+  projects: new Map(),
+  days: new Map(),
+  scannedFiles: 0,
+  unreadableFiles: 0,
+});
+
+function commandHarness(options: Parameters<typeof registerStats>[1], provider = "openai-codex") {
+  let command: { handler: (args: string, ctx: any) => Promise<void> } | undefined;
+  registerStats(
+    {
+      registerCommand: (_name: string, value: typeof command) => {
+        command = value;
+      },
+    } as never,
+    options,
+  );
+  const editor = vi.fn(async (_title: string, _content: string) => undefined);
+  const context = {
+    model: { provider },
+    modelRegistry: {},
+    mode: "tui",
+    hasUI: true,
+    ui: { notify: vi.fn(), editor, setWidget: vi.fn() },
+  };
+  return { command: () => command!, context, editor };
+}
+
+describe("live provider quota", () => {
+  it("formats successful Copilot and Codex snapshots separately from local totals", () => {
+    const copilot = formatLiveProviderQuota({
+      provider: "github-copilot",
+      snapshot: {
+        provider: "github-copilot",
+        quota: {
+          remaining: 42,
+          total: 300,
+          percentRemaining: 14,
+          unlimited: false,
+          unit: "premium_requests",
+        },
+      },
+    });
+    expect(copilot).toContain("Current provider quota (live; not included in period totals)");
+    expect(copilot).toContain("Copilot: 42/300 premium requests (14% left)");
+
+    const codex = formatLiveProviderQuota({
+      provider: "openai-codex",
+      snapshot: {
+        provider: "openai-codex",
+        usage: {
+          planType: "Pro",
+          primaryWindow: { usedPercent: 42, limitWindowSeconds: 18_000 },
+          secondaryWindow: { usedPercent: 19, limitWindowSeconds: 604_800 },
+        },
+      },
+    });
+    expect(codex).toContain("Codex · Pro");
+    expect(codex).toContain("5h: 58% left");
+    expect(codex).toContain("Weekly: 81% left");
+    const report = buildReport(emptyReport(), { liveProviderQuota: codex });
+    expect(report).toContain("Total: 0 tokens · 0 responses · $0.0000 · 0 sessions");
+    expect(report).toContain("not included in period totals");
+  });
+
+  it("renders local history when quota retrieval fails", async () => {
+    const subject = commandHarness({
+      collect: vi.fn(async () => emptyReport()),
+      fetchQuota: vi.fn(async () => {
+        throw new Error("provider unavailable");
+      }),
+    });
+    await subject.command().handler("", subject.context);
+    const output = subject.editor.mock.calls[0]?.[1] as string;
+    expect(output).toContain("Total: 0 tokens");
+    expect(output).toContain("Codex quota unavailable.");
+  });
+
+  it("does not call the quota router for unsupported providers", async () => {
+    const fetchQuota = vi.fn();
+    const subject = commandHarness(
+      { collect: vi.fn(async () => emptyReport()), fetchQuota },
+      "anthropic",
+    );
+    await subject.command().handler("week", subject.context);
+    expect(fetchQuota).not.toHaveBeenCalled();
+    expect(subject.editor.mock.calls[0]?.[1]).toContain(
+      "Live quota is not supported for anthropic.",
+    );
+  });
+
+  it("starts local history and provider quota collection concurrently", async () => {
+    let releaseCollect: (() => void) | undefined;
+    let releaseQuota: (() => void) | undefined;
+    let collectStarted = false;
+    let quotaStarted = false;
+    const collect = vi.fn(
+      () =>
+        new Promise<StatsReport>((resolve) => {
+          collectStarted = true;
+          releaseCollect = () => resolve(emptyReport());
+        }),
+    );
+    const fetchQuota = vi.fn(
+      () =>
+        new Promise<any>((resolve) => {
+          quotaStarted = true;
+          releaseQuota = () => resolve({ provider: "openai-codex" });
+        }),
+    );
+    const subject = commandHarness({ collect, fetchQuota });
+    const pending = subject.command().handler("", subject.context);
+    expect(collectStarted).toBe(true);
+    expect(quotaStarted).toBe(true);
+    releaseCollect?.();
+    releaseQuota?.();
+    await pending;
   });
 });

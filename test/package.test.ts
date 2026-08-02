@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
 import contextSize from "../packages/context-size/index.js";
 import copilotCompactionFix from "../packages/copilot-compaction-fix/index.js";
-import copilotUsage from "../packages/copilot-usage/index.js";
 import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
 import notify from "../packages/notify/index.js";
@@ -11,6 +10,7 @@ import planMode from "../packages/plan-mode/index.js";
 import stats from "../packages/stats/index.js";
 import subagents from "../packages/subagents/index.js";
 import todos from "../packages/todos/index.js";
+import usageMeter from "../packages/usage-meter/index.js";
 import uv from "../packages/uv/index.js";
 import webSearch from "../packages/web-search/index.js";
 import workingIndicator from "../packages/working-indicator/index.js";
@@ -56,7 +56,7 @@ const entrypoints = [
   uv,
   workingIndicator,
   webSearch,
-  copilotUsage,
+  usageMeter,
   copilotCompactionFix,
 ];
 
@@ -85,6 +85,7 @@ describe("package manifest", () => {
     for (const url of [
       "https://github.com/openai/codex/commit/578c1b2230288104041e880a86d0f7f3a5ca6e47",
       "https://github.com/openai/codex/commit/1e85ca099e4265bf89f4016772d299816e231bb3",
+      "https://github.com/openai/codex/commit/2b5bdcf67547860f2e5c5a605009a70026796b2b",
       "https://github.com/openai/codex/blob/main/LICENSE",
       "https://github.com/badlogic/pi-skills",
       "https://github.com/badlogic/pi-skills/blob/main/LICENSE",

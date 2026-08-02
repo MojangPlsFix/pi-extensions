@@ -15,6 +15,12 @@ The projects below were used as references or inspiration. Their inclusion does 
 - License: [Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE)
 - Relationship: The Web Search extension's native `/codex/alpha/search` request and response handling was informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
 
+## OpenAI Codex Usage Meter
+
+- Reference commit: <https://github.com/openai/codex/commit/2b5bdcf67547860f2e5c5a605009a70026796b2b>
+- License: [Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE)
+- Relationship: The Usage Meter extension's direct ChatGPT quota request and rate-limit parsing were informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
+
 ## Pi Skills
 
 - Repository: <https://github.com/badlogic/pi-skills>

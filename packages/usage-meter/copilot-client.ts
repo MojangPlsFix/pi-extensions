@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { type CopilotQuota, parseCopilotQuota } from "./quota.js";
+import { type CopilotQuota, parseCopilotQuota } from "./copilot-quota.js";
 
 const credentialCacheMs = 5 * 60_000;
 const endpoint = "https://api.github.com/copilot_internal/user";

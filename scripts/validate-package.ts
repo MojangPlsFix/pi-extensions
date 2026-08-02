@@ -14,7 +14,7 @@ const expectedEntrypoints = [
   "packages/uv/index.ts",
   "packages/working-indicator/index.ts",
   "packages/web-search/index.ts",
-  "packages/copilot-usage/index.ts",
+  "packages/usage-meter/index.ts",
   "packages/copilot-compaction-fix/index.ts",
 ];
 

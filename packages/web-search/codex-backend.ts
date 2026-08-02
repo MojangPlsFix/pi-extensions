@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { buildCodexHeaders, extractCodexAccountId } from "../../shared/codex-auth.js";
 import {
   type BackendSearchResult,
   boundedText,
@@ -78,44 +79,6 @@ export function buildCodexSearchRequest(
   };
 }
 
-export function extractCodexAccountId(token: string): string {
-  try {
-    const parts = token.split(".");
-    if (parts.length !== 3) throw new Error("invalid token");
-    const payload = JSON.parse(Buffer.from(parts[1] ?? "", "base64url").toString("utf8")) as {
-      [key: string]: unknown;
-    };
-    const auth = payload["https://api.openai.com/auth"];
-    const accountId =
-      auth && typeof auth === "object"
-        ? (auth as Record<string, unknown>).chatgpt_account_id
-        : undefined;
-    if (typeof accountId !== "string" || !accountId) throw new Error("missing account id");
-    return accountId;
-  } catch {
-    throw new Error(
-      "OpenAI Codex authentication is invalid. Run `/login openai-codex` and try again.",
-    );
-  }
-}
-
-export function buildCodexHeaders(
-  token: string,
-  accountId: string,
-  inherited?: Record<string, unknown>,
-): Headers {
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(inherited ?? {})) {
-    if (typeof value === "string") headers.set(key, value);
-  }
-  headers.set("authorization", `Bearer ${token}`);
-  headers.set("chatgpt-account-id", accountId);
-  headers.set("originator", "pi");
-  headers.set("accept", "application/json");
-  headers.set("content-type", "application/json");
-  return headers;
-}
-
 function codexSearchUrl(baseUrl: string | undefined): string {
   const base = (baseUrl?.trim() || defaultCodexBaseUrl).replace(/\/+$/, "");
   let url: URL;
@@ -176,6 +139,8 @@ async function withAbortSignal<T>(promise: Promise<T>, signal?: AbortSignal): Pr
     promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
   });
 }
+
+export { buildCodexHeaders, extractCodexAccountId } from "../../shared/codex-auth.js";
 
 export async function runCodexSearch(
   params: SearchParams,

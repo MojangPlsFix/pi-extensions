@@ -4,7 +4,7 @@ All resources are delivered by one Pi package and can be enabled or disabled wit
 
 ## Provider-aware behavior
 
-- Copilot Usage and the Copilot compaction workaround act only while the active model provider is `github-copilot`.
+- Usage Meter acts while the active model provider is `github-copilot` or `openai-codex`; the Copilot compaction workaround remains limited to `github-copilot`.
 - The single `search` tool routes at execution time: `github-copilot` uses the authenticated local Copilot CLI, while `openai-codex` uses native `/codex/alpha/search` with Pi's refreshed OAuth. Other providers receive an explicit availability error; there is no cross-provider fallback.
 - Subagents resolve model and thinking policy at spawn time: per-agent `~/.pi/agent/subagents/config.json`, trusted custom-agent frontmatter, Subagent defaults, then a parent snapshot. `inherit` explicitly selects the parent value. Luna is opt-in.
 
@@ -19,8 +19,8 @@ All resources are delivered by one Pi package and can be enabled or disabled wit
 
 ## Optional capabilities
 
-- **Copilot CLI:** Required only when `search` runs under `github-copilot`. Invoking Search without an installed, authenticated CLI reports a useful error. The CLI backend defaults to `gpt-5.6-luna` with effort `none` unless overridden.
-- **OpenAI Codex OAuth:** Required only when `search` runs under `openai-codex`. Use `/login openai-codex`; Pi resolves and refreshes the credential for every native search request. Search sends OAuth only to the trusted HTTPS `chatgpt.com` endpoint and rejects plaintext or custom-host overrides.
+- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`, then requests the trusted GitHub Copilot quota endpoint. The Copilot CLI itself is required only when `search` runs under `github-copilot`; its backend defaults to `gpt-5.6-luna` with effort `none` unless overridden.
+- **OpenAI Codex OAuth:** Required when Usage Meter or Search runs under `openai-codex`. Use `/login openai-codex`; Pi resolves and refreshes the credential for each direct request. Usage Meter requests subscription quota directly from the trusted HTTPS `chatgpt.com/backend-api/wham/usage` endpoint, with no Codex CLI dependency. Both features reject plaintext and custom-host endpoints.
 - **Context Mode:** Subagents discover it only when installed. Missing Context Mode does not prevent ordinary RPC subagents. Children use only the reviewed narrow bridge, never the full Context Mode extension.
 - **RTK:** Worker children auto-detect RTK 0.23.0 or newer. Missing, outdated, failed, or timed-out probes are nonfatal and native command execution remains available.
 - **UV:** Worker children require both the packaged UV extension and a successful `uv --version` probe. Unavailable UV falls back to native Pi Bash.
@@ -28,7 +28,7 @@ All resources are delivered by one Pi package and can be enabled or disabled wit
 
 Search reports the selected backend immediately and returns bounded output labeled as untrusted external content. Codex structured results are normalized to deduplicated titles, URLs, and snippets; credentials, encrypted output, unknown fields, and raw responses are excluded. Expanded TUI output shows only a bounded source list and short preview. Truncation is explicit.
 
-Copilot CLI and Codex native search can consume provider subscription quota, but their retrieval responses expose no token or monetary usage. Search therefore returns no Pi `usage` or fabricated cost and marks consumption as `provider-accounted`, outside Pi's local totals.
+Copilot CLI and Codex native search can consume provider subscription quota, but their retrieval responses expose no token or monetary usage. Search therefore returns no Pi `usage` or fabricated cost and marks consumption as `provider-accounted`, outside Pi's local totals. Usage Meter and `/stats` display provider quota only as a live snapshot; they never add balances, percentages, or limits to Pi's local token and cost totals. OAuth tokens and authenticated quota payloads are not logged or persisted.
 
 ## Subagent configuration
 

@@ -1,12 +1,8 @@
+import type { CopilotQuota } from "./types.js";
+
 type RecordValue = Record<string, unknown>;
-export type CopilotQuota = {
-  remaining: number;
-  total?: number;
-  unlimited: boolean;
-  percentRemaining?: number;
-  unit: "ai_credits" | "premium_requests";
-  resetDate?: string;
-};
+
+export type { CopilotQuota } from "./types.js";
 
 const record = (value: unknown): value is RecordValue =>
   Boolean(value && typeof value === "object");
