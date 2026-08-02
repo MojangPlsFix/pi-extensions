@@ -31,7 +31,7 @@ pi update --extensions
 | [Subagents](packages/subagents/) | Runs isolated persistent explorer or worker Pi processes with follow-ups, interruption, usage tracking, and an activity viewer. | `/agents`, `subagent_spawn`, `subagent_send`, `subagent_wait`, `subagent_list`, `subagent_read`, `subagent_interrupt` | RPC by default; Herdr and Context Mode optional |
 | [UV](packages/uv/) | Replaces Pi's Bash tool with a UV-aware wrapper and redirects unsafe `pip`, Poetry, `venv`, and bytecode commands toward UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Shows the animated `Hackeln...` indicator and active explorer/worker counts while Subagents run. | Automatic | Active Subagents |
-| [Provider-Aware Search](packages/copilot-search/) | Routes bounded web and documentation retrieval through the active provider, returns normalized source evidence, and shows backend-aware progress/results. | `search` | `github-copilot` + authenticated Copilot CLI, or authenticated `openai-codex` |
+| [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider, returns normalized source evidence, and shows backend-aware progress/results. | `search` | `github-copilot` + authenticated Copilot CLI, or authenticated `openai-codex` |
 | [Copilot Usage](packages/copilot-usage/) | Displays and refreshes the current GitHub Copilot quota without retaining credentials. | `/copilot-usage` | Active `github-copilot` model |
 | [Copilot Compaction Fix](packages/copilot-compaction-fix/) | Applies the Copilot-specific compaction and branch-summary request workaround when needed. | Automatic | Active `github-copilot` model |
 

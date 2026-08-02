@@ -13,7 +13,7 @@ const expectedEntrypoints = [
   "packages/subagents/index.ts",
   "packages/uv/index.ts",
   "packages/working-indicator/index.ts",
-  "packages/copilot-search/index.ts",
+  "packages/web-search/index.ts",
   "packages/copilot-usage/index.ts",
   "packages/copilot-compaction-fix/index.ts",
 ];
@@ -60,7 +60,7 @@ expect(
 );
 expect(new Set(normalized).size === normalized.length, "duplicate extension entrypoint");
 expect(
-  JSON.stringify(packageJson.pi?.skills) === JSON.stringify(["./packages/copilot-search/skills"]),
+  JSON.stringify(packageJson.pi?.skills) === JSON.stringify(["./packages/web-search/skills"]),
   "pi.skills differs from reviewed resources",
 );
 
@@ -77,9 +77,9 @@ for (const entrypoint of expectedEntrypoints) {
 }
 
 try {
-  await access(resolve("packages/copilot-search/skills"));
+  await access(resolve("packages/web-search/skills"));
 } catch {
-  failures.push("missing Copilot Search skill directory");
+  failures.push("missing Web Search skill directory");
 }
 
 for (const name of ["preinstall", "install", "postinstall", "prepare"]) {

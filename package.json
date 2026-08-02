@@ -25,12 +25,12 @@
       "./packages/subagents/index.ts",
       "./packages/uv/index.ts",
       "./packages/working-indicator/index.ts",
-      "./packages/copilot-search/index.ts",
+      "./packages/web-search/index.ts",
       "./packages/copilot-usage/index.ts",
       "./packages/copilot-compaction-fix/index.ts"
     ],
     "skills": [
-      "./packages/copilot-search/skills"
+      "./packages/web-search/skills"
     ]
   },
   "scripts": {

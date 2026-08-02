@@ -1,4 +1,4 @@
-# Provider-Aware Search
+# Web Search
 
 Registers one `search` tool for bounded web and programming-documentation retrieval. The active Pi model provider selects the backend at execution time:
 

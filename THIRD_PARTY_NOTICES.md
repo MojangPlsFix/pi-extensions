@@ -13,7 +13,7 @@ The projects below were used as references or inspiration. Their inclusion does 
 - Reference commit: <https://github.com/openai/codex/commit/1e85ca099e4265bf89f4016772d299816e231bb3>
 - Pinned source references: [search request/response types](https://github.com/openai/codex/blob/1e85ca099e4265bf89f4016772d299816e231bb3/codex-rs/codex-api/src/search.rs) and [search endpoint](https://github.com/openai/codex/blob/1e85ca099e4265bf89f4016772d299816e231bb3/codex-rs/codex-api/src/endpoint/search.rs)
 - License: [Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE)
-- Relationship: The provider-aware Search extension's native `/codex/alpha/search` request and response handling was informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
+- Relationship: The Web Search extension's native `/codex/alpha/search` request and response handling was informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
 
 ## Pi Skills
 

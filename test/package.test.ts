@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
 import contextSize from "../packages/context-size/index.js";
 import copilotCompactionFix from "../packages/copilot-compaction-fix/index.js";
-import copilotSearch from "../packages/copilot-search/index.js";
 import copilotUsage from "../packages/copilot-usage/index.js";
 import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
@@ -13,6 +12,7 @@ import stats from "../packages/stats/index.js";
 import subagents from "../packages/subagents/index.js";
 import todos from "../packages/todos/index.js";
 import uv from "../packages/uv/index.js";
+import webSearch from "../packages/web-search/index.js";
 import workingIndicator from "../packages/working-indicator/index.js";
 
 type Registered = { name: string };
@@ -54,7 +54,7 @@ const entrypoints = [
   subagents,
   uv,
   workingIndicator,
-  copilotSearch,
+  webSearch,
   copilotUsage,
   copilotCompactionFix,
 ];

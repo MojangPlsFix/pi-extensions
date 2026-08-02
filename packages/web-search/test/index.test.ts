@@ -34,7 +34,7 @@ afterEach(async () => {
 });
 
 async function fakeCopilot(): Promise<string> {
-  const directory = await mkdtemp(join(tmpdir(), "pi-copilot-search-"));
+  const directory = await mkdtemp(join(tmpdir(), "pi-web-search-"));
   temporaryDirectories.push(directory);
   const executable = join(directory, "copilot");
   await writeFile(
