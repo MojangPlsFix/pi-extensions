@@ -5,9 +5,15 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { events, type PlanModeEvent, type SubagentsStatusEvent } from "../../shared/events.js";
+import { configureBashPolicy } from "./bash-policy.js";
+import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
 import { PlanModeEditor } from "./editor.js";
 import { extractProposedPlan } from "./plan-parser.js";
-import { isDirectlyDisabledInPlanMode, planModeToolBlockReason } from "./policy.js";
+import {
+  configurePlanModePolicy,
+  isDirectlyDisabledInPlanMode,
+  planModeToolBlockReason,
+} from "./policy.js";
 import { appendPlanModePrompt } from "./prompt.js";
 import {
   createDefaultPlanModeState,
@@ -63,6 +69,25 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let previousEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]> | undefined;
   let editorInstalled = false;
   let activeWorkers = 0;
+  let loadedConfig: LoadedPlanModeConfig = {
+    readOnlyTools: [],
+    readOnlyCommands: {},
+    warnings: [],
+    globalPath: "",
+  };
+
+  async function reloadPolicy(ctx: ExtensionContext): Promise<void> {
+    loadedConfig = await loadPlanModeConfig({
+      cwd: ctx.cwd,
+      trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+    });
+    configurePlanModePolicy(loadedConfig);
+    configureBashPolicy(loadedConfig);
+    for (const warning of loadedConfig.warnings) {
+      if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+      else console.error(`[plan-mode] ${warning}`);
+    }
+  }
 
   const requestRender = (): void => activeTui?.requestRender();
   const emitMode = (): void =>
@@ -208,6 +233,102 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     handler: implementPlan,
   });
 
+  pi.registerCommand("plan-tools", {
+    description: "Review and configure read-only Pi tools and CLI commands for Plan Mode",
+    handler: async (_args, ctx) => {
+      if (state.mode === "plan") {
+        ctx.ui.notify(
+          "Plan Mode is active. Leave Plan Mode before changing its tool policy.",
+          "warning",
+        );
+        return;
+      }
+      if (!ctx.hasUI) {
+        ctx.ui.notify("/plan-tools requires interactive UI.", "warning");
+        return;
+      }
+      const scopeChoice = await ctx.ui.select("Where should approvals be stored?", [
+        "Global",
+        ...(typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted()
+          ? ["Project"]
+          : []),
+      ]);
+      if (!scopeChoice) return;
+      const path = scopeChoice === "Project" ? loadedConfig.projectPath : loadedConfig.globalPath;
+      if (!path) {
+        ctx.ui.notify(
+          "The project is not trusted, so project configuration is unavailable.",
+          "warning",
+        );
+        return;
+      }
+      const kind = await ctx.ui.select("What should Plan Mode allow?", [
+        "Pi tool",
+        "CLI program",
+        "Remove approval",
+        "Done",
+      ]);
+      if (kind === "Pi tool") {
+        const tools = pi.getAllTools().filter((tool) => !isDirectlyDisabledInPlanMode(tool.name));
+        const selected = await ctx.ui.select("Select an external Pi tool to allow", [
+          ...tools.map((tool) => `${tool.name} — ${tool.sourceInfo.source}`),
+          "Cancel",
+        ]);
+        const name = selected?.split(" — ")[0];
+        if (name && name !== "Cancel") {
+          const accepted = await ctx.ui.confirm(
+            "Confirm Plan Mode approval",
+            `Allow Pi tool '${name}'?`,
+          );
+          if (!accepted) return;
+          await updatePlanModeConfig(path, { addTools: [name] });
+          await reloadPolicy(ctx);
+          ctx.ui.notify(`Approved Pi tool '${name}' for Plan Mode.`, "info");
+        }
+      } else if (kind === "CLI program") {
+        const program = await ctx.ui.input("Program", "example-cli");
+        const commandText = await ctx.ui.input(
+          "Read-only subcommands (comma separated)",
+          "help, inspect, list",
+        );
+        if (!program || !commandText) return;
+        const commands = commandText
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean);
+        const accepted = await ctx.ui.confirm(
+          "Confirm Plan Mode approval",
+          `${program}: ${commands.join(", ")}`,
+        );
+        if (!accepted) return;
+        await updatePlanModeConfig(path, { addCommands: { [program.trim()]: commands } });
+        await reloadPolicy(ctx);
+        ctx.ui.notify(`Approved read-only commands for '${program.trim()}'.`, "info");
+      } else if (kind === "Remove approval") {
+        const programs = Object.keys(loadedConfig.readOnlyCommands);
+        const selected = await ctx.ui.select("Select an approval to remove", [
+          ...loadedConfig.readOnlyTools.map((name) => `tool:${name}`),
+          ...programs.flatMap((program) =>
+            (loadedConfig.readOnlyCommands[program] ?? []).map(
+              (command) => `command:${program}:${command}`,
+            ),
+          ),
+          "Cancel",
+        ]);
+        if (!selected || selected === "Cancel") return;
+        if (selected.startsWith("tool:"))
+          await updatePlanModeConfig(path, { removeTools: [selected.slice(5)] });
+        else if (selected.startsWith("command:")) {
+          const [, program, command] = selected.split(":");
+          if (!program || !command) return;
+          await updatePlanModeConfig(path, { removeCommands: { [program]: [command] } });
+        }
+        await reloadPolicy(ctx);
+        ctx.ui.notify("Plan Mode approval removed.", "info");
+      }
+    },
+  });
+
   pi.on("tool_call", (event) => {
     if (state.mode !== "plan") return;
     const reason = planModeToolBlockReason(event.toolName, event.input);
@@ -292,11 +413,15 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     activeWorkers = typeof status?.workers === "number" ? status.workers : 0;
   });
 
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
+    await reloadPolicy(ctx);
     synchronizeState(ctx);
     installEditorIndicator(ctx);
   });
-  pi.on("session_tree", (_event, ctx) => synchronizeState(ctx));
+  pi.on("session_tree", async (_event, ctx) => {
+    await reloadPolicy(ctx);
+    synchronizeState(ctx);
+  });
   pi.on("session_shutdown", (_event, ctx) => {
     restoreTools(state.disabledTools);
     if (editorInstalled && ctx.mode === "tui") ctx.ui.setEditorComponent(previousEditorFactory);

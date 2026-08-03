@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { configureBashPolicy } from "../bash-policy.js";
 import {
   bashBlockReason,
+  configurePlanModePolicy,
   isDirectlyDisabledInPlanMode,
   planModeToolBlockReason,
 } from "../policy.js";
@@ -109,5 +111,19 @@ describe("Plan Mode policy", () => {
     }
     expect(planModeToolBlockReason("todo", { action: "create" })).toContain("blocked");
     expect(planModeToolBlockReason("scratchpad", { action: "write" })).toContain("blocked");
+  });
+
+  it("supports exact generic tool and CLI approvals without weakening guardrails", () => {
+    configurePlanModePolicy({ readOnlyTools: ["functions.example_external_tool"] });
+    configureBashPolicy({ readOnlyCommands: { "example-cli": ["help", "inspect", "list"] } });
+    expect(planModeToolBlockReason("functions.example_external_tool", {})).toBeUndefined();
+    expect(planModeToolBlockReason("example_external_tool_extra", {})).toContain("Unreviewed");
+    expect(planModeToolBlockReason("write", {})).toContain("disabled");
+    expect(bashBlockReason("example-cli help inspect")).toBeUndefined();
+    expect(bashBlockReason("example-cli inspect item-123")).toBeUndefined();
+    expect(bashBlockReason("example-cli delete item-123")).toBeTruthy();
+    expect(
+      bashBlockReason("example-cli inspect item-123 && example-cli delete item-123"),
+    ).toBeTruthy();
   });
 });

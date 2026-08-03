@@ -14,6 +14,12 @@ const directlyMutatingTools = new Set([
   "memory_forget",
 ]);
 
+let configuredTools = new Set<string>();
+
+export function configurePlanModePolicy(config: { readOnlyTools?: string[] }): void {
+  configuredTools = new Set((config.readOnlyTools ?? []).map(normalizedToolName));
+}
+
 const readOnlyTools = new Set([
   "read",
   "grep",
@@ -69,6 +75,6 @@ export function planModeToolBlockReason(toolName: string, input: unknown): strin
       : "Todo mutation is blocked in Plan Mode; todos are not the authoritative plan state.";
   if (name === "scratchpad")
     return action(input) === "list" ? undefined : "Scratchpad mutation is blocked in Plan Mode.";
-  if (readOnlyTools.has(name)) return undefined;
+  if (readOnlyTools.has(name) || configuredTools.has(name)) return undefined;
   return `Unreviewed third-party tool '${name}' is blocked in Plan Mode. Add a narrowly reviewed read-only policy before using it.`;
 }

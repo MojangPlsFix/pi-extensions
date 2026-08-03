@@ -135,6 +135,17 @@ function rtkBlockReason(commandTokens: string[]): string | undefined {
   return `This rtk ${subcommand} command is not approved for read-only Plan Mode use.`;
 }
 
+let configuredCommands: Record<string, ReadonlySet<string>> = {};
+
+export function configureBashPolicy(config: { readOnlyCommands?: Record<string, string[]> }): void {
+  configuredCommands = Object.fromEntries(
+    Object.entries(config.readOnlyCommands ?? {}).map(([program, commands]) => [
+      program,
+      new Set(commands),
+    ]),
+  );
+}
+
 /** A conservative inspection allowlist with optional token-optimized RTK equivalents. */
 export function bashBlockReason(command: string): string | undefined {
   const trimmed = command.trim();
@@ -162,5 +173,7 @@ export function bashBlockReason(command: string): string | undefined {
       : `Arbitrary ${program} execution is blocked in Plan Mode.`;
   if (program === "npm" || program === "yarn" || program === "pnpm")
     return packageBlockReason(program, commandTokens.slice(1));
+  const configuredSubcommands = configuredCommands[program];
+  if (configuredSubcommands?.has(subcommand ?? "")) return undefined;
   return `Command '${program}' is not on the Plan Mode inspection allowlist.`;
 }

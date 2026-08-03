@@ -23,6 +23,7 @@ function token(accountId = "account-123"): string {
 function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>) {
   const handlers = new Map<string, Handler[]>();
   const statuses: Array<[string, string | undefined]> = [];
+  const footers: Array<((width: number) => string[]) | undefined> = [];
   const notifications: unknown[][] = [];
   const api = {
     on(name: string, handler: Handler) {
@@ -33,12 +34,34 @@ function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>
   const context = (provider: string) =>
     ({
       model: { provider },
+      sessionManager: {
+        getEntries: () => [],
+        getCwd: () => "/home/test/project",
+      },
+      getContextUsage: () => ({ contextWindow: 128_000, percent: 12.5 }),
       modelRegistry: {
         getProviderAuth: vi.fn(async () => undefined),
+        isUsingOAuth: () => false,
       },
       ui: {
         setStatus(key: string, value: string | undefined) {
           statuses.push([key, value]);
+        },
+        setFooter(footer: any) {
+          if (!footer) {
+            footers.push(undefined);
+            return;
+          }
+          const widget = footer(
+            { requestRender: vi.fn() },
+            { fg: (_color: string, value: string) => value },
+            {
+              getGitBranch: () => "main",
+              getExtensionStatuses: () => new Map<string, string>(),
+              getAvailableProviderCount: () => 1,
+            },
+          );
+          footers.push(widget.render);
         },
         theme: { fg: (_color: string, value: string) => value },
         notify: (...args: unknown[]) => notifications.push(args),
@@ -56,7 +79,7 @@ function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>
     for (const handler of handlers.get(name) ?? []) await handler(event, next);
     for (let index = 0; index < 8; index += 1) await Promise.resolve();
   };
-  return { api, context, emit, statuses, notifications };
+  return { api, context, emit, statuses, footers, notifications };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -231,7 +254,7 @@ describe("Usage meter lifecycle", () => {
       },
       codex,
     );
-    expect(subject.statuses.at(-1)?.[1]).toContain("Codex: 5h 42% left");
+    expect(subject.footers.at(-1)?.(100).at(-1)).toContain("5h 42% left");
     await subject.emit("agent_end", codex);
     await subject.emit("tool_result", codex);
     expect(fetchCodex).toHaveBeenCalledTimes(1);
@@ -284,7 +307,7 @@ describe("Usage meter lifecycle", () => {
     expect(fetchQuota).toHaveBeenCalledTimes(1);
     resolveCopilot?.({ remaining: 7, unlimited: false, unit: "ai_credits" });
     for (let index = 0; index < 8; index += 1) await Promise.resolve();
-    expect(subject.statuses.at(-1)?.[1]).toContain("Copilot: 7");
+    expect(subject.footers.at(-1)?.(100).at(-1)).toContain("7");
     await subject.emit("session_shutdown");
   });
 
@@ -297,18 +320,48 @@ describe("Usage meter lifecycle", () => {
 
     await subject.emit("session_start", copilot);
     expect(fetchQuota).toHaveBeenCalledTimes(1);
-    expect(subject.statuses.at(-1)?.[1]).toContain("Copilot: 4");
+    expect(subject.footers.at(-1)?.(100).at(-1)).toContain("4");
 
     await subject.emit("model_select", codex);
     expect(subject.statuses.at(-1)).toEqual(["pi-extensions:usage-meter", undefined]);
 
     await subject.emit("model_select", copilot);
     expect(fetchQuota).toHaveBeenCalledTimes(2);
-    expect(subject.statuses.at(-1)?.[1]).toContain("Copilot: 4");
+    expect(subject.footers.at(-1)?.(100).at(-1)).toContain("4");
 
     await subject.emit("session_shutdown");
     expect(subject.statuses.at(-1)).toEqual(["pi-extensions:usage-meter", undefined]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("renders Copilot and Codex usage as right-aligned footer rows", async () => {
+    const copilotSubject = harness(async () => ({
+      remaining: 81_055,
+      total: 150_000,
+      percentRemaining: 54,
+      unlimited: false,
+      unit: "ai_credits",
+    }));
+    const copilot = copilotSubject.context("github-copilot");
+    await copilotSubject.emit("session_start", copilot);
+    const copilotLine = copilotSubject.footers.at(-1)?.(60).at(-1) ?? "";
+    expect(copilotLine).toContain("81,055/150,000 (54% left)");
+    expect(copilotLine).toHaveLength(60);
+    expect(copilotLine.startsWith(" ")).toBe(true);
+
+    const codexSubject = harness(
+      async () => undefined,
+      async () => ({
+        primaryWindow: { usedPercent: 42, limitWindowSeconds: 18_000 },
+        secondaryWindow: { usedPercent: 19, limitWindowSeconds: 604_800 },
+      }),
+    );
+    const codex = codexSubject.context("openai-codex");
+    await codexSubject.emit("session_start", codex);
+    const codexLine = codexSubject.footers.at(-1)?.(60).at(-1) ?? "";
+    expect(codexLine).toContain("5h 58% left · weekly 81% left");
+    expect(codexLine).toHaveLength(60);
+    expect(codexLine.startsWith(" ")).toBe(true);
   });
 
   it("throttles repeated lifecycle events and treats missing authentication as a quiet no-op", async () => {

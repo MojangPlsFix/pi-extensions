@@ -21,12 +21,26 @@ startup requirement.
 
 ## Footer and command examples
 
-Compact footer output stays focused on the active allowance:
+The active provider usage appears on its own right-aligned footer row while Pi's
+normal directory, token, context, model, and extension-status rows remain
+visible:
 
 ```text
-Copilot: 42/300 premium requests (14% left)
-Codex: 5h 58% left · weekly 81% left
+~/projects/my-app (develop)
+↑12.4k ↓3.1k R84.2k $0.842 (sub) 18.6%/128k                 github-copilot/gpt-5.4
+                                                         81,055/150,000 (54% left)
 ```
+
+For Codex, the same layout uses the active rate-limit windows:
+
+```text
+~/projects/my-app (develop)
+↑12.4k ↓3.1k R84.2k $0.842 18.6%/128k                         openai-codex/gpt-5
+                                            5h 58% left · weekly 81% left
+```
+
+Normal usage is muted, low Copilot quota and reached Codex limits are shown in
+error styling, and approaching Codex limits use warning styling.
 
 `/usage-meter` forces a refresh for the active supported provider. It reports a
 concise unavailable message when authentication or provider data is absent and
