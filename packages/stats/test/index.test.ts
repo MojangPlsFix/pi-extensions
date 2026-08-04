@@ -1,15 +1,19 @@
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildReport,
+  captureCopilotSnapshot,
   collectStats,
+  copilotSnapshotPath,
   formatLiveProviderQuota,
   parseStatsArgs,
   periodRange,
+  registerCopilotSnapshots,
   registerStats,
   type StatsReport,
+  StatsViewer,
 } from "../index.js";
 
 const directories: string[] = [];
@@ -23,32 +27,49 @@ afterEach(async () => {
   );
 });
 
-describe("stats", () => {
-  it("calculates calendar periods and parses period arguments", () => {
-    const range = periodRange("week", new Date("2026-03-04T12:00:00"));
-    expect(range.start.getDay()).toBe(1);
-    expect(parseStatsArgs("month previous")).toEqual({ mode: "month", offset: -1 });
+describe("stats periods and historical records", () => {
+  it("uses Bitbucket-compatible aliases and Monday-based ranges", () => {
+    const now = new Date("2026-03-04T12:00:00");
+    const workweek = periodRange("week", now);
+    const calendarWeek = periodRange("all", now);
+    expect(workweek.end.getTime() - workweek.start.getTime()).toBe(5 * 24 * 60 * 60 * 1000);
+    expect(calendarWeek.end.getTime() - calendarWeek.start.getTime()).toBe(7 * 24 * 60 * 60 * 1000);
+    expect(parseStatsArgs("all previous")).toEqual({ mode: "all", offset: -1 });
+    expect(parseStatsArgs("week")).toEqual({ mode: "workweek", offset: 0 });
+    expect(parseStatsArgs("month -2")).toEqual({ mode: "month", offset: -2 });
     expect(parseStatsArgs("nonsense")).toBeUndefined();
   });
-  it("reads valid usage once while ignoring malformed and custom summary records", async () => {
+
+  it("reads normal usage and compatible historical summaries once while ignoring other custom rows", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-extensions-stats-"));
     directories.push(directory);
     await mkdir(join(directory, "subagents"));
     const timestamp = "2026-03-03T10:00:00.000Z";
-    const ignoredCustomType = ["session", "summary"].join("-");
     await writeFile(
       join(directory, "main.jsonl"),
       [
         `{"type":"session","id":"main","cwd":"/project"}`,
         `{"type":"message","timestamp":"${timestamp}","message":{"role":"assistant","provider":"test","model":"m","usage":{"input":10,"output":5,"cost":0.01}}}`,
         `{"type":"message","timestamp":"${timestamp}","message":{"role":"toolResult","usage":{}}}`,
-        "not json",
         JSON.stringify({
           type: "custom",
-          customType: ignoredCustomType,
+          customType: "session-summary",
           timestamp,
-          usage: { input: 999 },
+          data: { usage: { input: 7, cost: 0.02 }, usageAttached: false },
         }),
+        JSON.stringify({
+          type: "custom",
+          customType: "session-summary",
+          timestamp,
+          data: { usage: { input: 999 }, usageAttached: true },
+        }),
+        JSON.stringify({
+          type: "custom",
+          customType: "unrelated-summary",
+          timestamp,
+          usage: { input: 1000 },
+        }),
+        "not json",
       ].join("\n"),
     );
     await writeFile(
@@ -59,11 +80,13 @@ describe("stats", () => {
       ].join("\n"),
     );
     const report = await collectStats({ mode: "week", now: new Date("2026-03-04"), directory });
-    expect(report.totals.input).toBe(13);
+    expect(report.mode).toBe("workweek");
+    expect(report.totals.input).toBe(20);
     expect(report.subagents.input).toBe(3);
     // The zero-usage tool result is not a model response.
-    expect(report.totals.responses).toBe(2);
-    expect(buildReport(report)).toContain("Subagents (included above)");
+    expect(report.totals.responses).toBe(3);
+    expect(report.models.get("github-copilot/gpt-5.4-nano")?.input).toBe(7);
+    expect(buildReport(report)).toContain("SUBAGENTS (included above)");
   });
 
   it("scans normal, hidden, and legacy Subagent roots without double-counting nested legacy files", async () => {
@@ -128,6 +151,106 @@ const emptyReport = (): StatsReport => ({
   unreadableFiles: 0,
 });
 
+describe("Bitbucket report layout", () => {
+  it("renders complete daily rows, credits, sections, and sorted buckets", () => {
+    const report = emptyReport();
+    report.copilotSnapshots = [
+      {
+        date: "2026-03-02",
+        capturedAt: "2026-03-02T08:00:00.000Z",
+        used: 81_055,
+        remaining: 68_945,
+        total: 150_000,
+        unit: "ai_credits",
+      },
+    ];
+    report.totals.input = 1_234;
+    report.totals.cost = 0.012345;
+    report.totals.responses = 2;
+    report.totals.sessions.add("main");
+    report.models.set("cheap", {
+      key: "cheap",
+      ...emptyTotals(),
+      cost: 0.01,
+      input: 100,
+    });
+    report.models.set("expensive", {
+      key: "expensive",
+      ...emptyTotals(),
+      cost: 1,
+      input: 1,
+    });
+    report.projects.set("/home/test/project", {
+      key: "/home/test/project",
+      ...emptyTotals(),
+      cost: 1,
+      input: 1,
+    });
+    const output = buildReport(report);
+    expect(output).toContain("SUMMARY");
+    expect(output).toContain("SUBAGENTS (included above)");
+    expect(output).toContain("DAILY");
+    expect(output).toContain("Start Credits");
+    expect(output).toContain("81,055");
+    expect(output).toContain("$0.0123");
+    expect(output.indexOf("expensive")).toBeLessThan(output.indexOf("cheap"));
+    expect(output).toContain("all workspaces");
+    expect(output.match(/^ {2}(Mon|Tue|Wed|Thu|Fri),/gm)).toHaveLength(5);
+  });
+
+  it("renders monthly weekly rows instead of daily rows", () => {
+    const report = emptyReport();
+    report.mode = "month";
+    report.offset = -1;
+    report.start = new Date("2026-02-01T00:00:00Z");
+    report.end = new Date("2026-03-01T00:00:00Z");
+    const output = buildReport(report);
+    expect(output).toContain("Calendar month · 1 month ago");
+    expect(output).toContain("WEEKLY");
+    expect(output).not.toContain("Start Credits");
+    expect(output.match(/^ {2}Week /gm)?.length).toBeGreaterThan(3);
+  });
+});
+
+describe("Copilot snapshots", () => {
+  it("captures one optional daily checkpoint in the configured agent directory", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-extensions-copilot-"));
+    directories.push(root);
+    const env = { ...process.env, PI_CODING_AGENT_DIR: root };
+    const fetchQuota = vi.fn().mockResolvedValue({
+      remaining: 68_945,
+      total: 150_000,
+      unlimited: false,
+      unit: "ai_credits" as const,
+    });
+    const now = new Date("2026-03-02T08:00:00");
+    await captureCopilotSnapshot(fetchQuota, env, now);
+    await captureCopilotSnapshot(fetchQuota, env, now);
+    expect(fetchQuota).toHaveBeenCalledTimes(1);
+    const store = JSON.parse(await readFile(copilotSnapshotPath(env), "utf8")) as {
+      snapshots: Array<{ date: string; used: number }>;
+    };
+    expect(store.snapshots).toHaveLength(1);
+    expect(store.snapshots[0]).toMatchObject({ date: "2026-03-02", used: 81_055 });
+  });
+
+  it("does not fetch for a non-Copilot active model", async () => {
+    const on = new Map<string, (event: unknown, ctx: any) => void>();
+    const fetchQuota = vi.fn();
+    const wait = registerCopilotSnapshots(
+      {
+        on(name: string, handler: (event: unknown, ctx: any) => void) {
+          on.set(name, handler);
+        },
+      } as never,
+      fetchQuota,
+    );
+    on.get("session_start")?.({}, { model: { provider: "openai-codex" } });
+    await wait();
+    expect(fetchQuota).not.toHaveBeenCalled();
+  });
+});
+
 function commandHarness(options: Parameters<typeof registerStats>[1], provider = "openai-codex") {
   let command: { handler: (args: string, ctx: any) => Promise<void> } | undefined;
   registerStats(
@@ -149,24 +272,16 @@ function commandHarness(options: Parameters<typeof registerStats>[1], provider =
   return { command: () => command!, context, editor };
 }
 
-describe("live provider quota", () => {
-  it("formats successful Copilot and Codex snapshots separately from local totals", () => {
-    const copilot = formatLiveProviderQuota({
-      provider: "github-copilot",
-      snapshot: {
-        provider: "github-copilot",
-        quota: {
-          remaining: 42,
-          total: 300,
-          percentRemaining: 14,
-          unlimited: false,
-          unit: "premium_requests",
-        },
-      },
-    });
-    expect(copilot).toContain("Current provider quota (live; not included in period totals)");
-    expect(copilot).toContain("Copilot: 42/300 premium requests (14% left)");
+describe("legacy command test hook", () => {
+  it("does not request live provider usage in the shipped stats command", async () => {
+    const subject = commandHarness({ collect: vi.fn(async () => emptyReport()) });
+    await subject.command().handler("", subject.context);
+    const output = subject.editor.mock.calls[0]?.[1] as string;
+    expect(output).toContain("SUMMARY");
+    expect(output).not.toContain("Current provider quota");
+  });
 
+  it("keeps opt-in live quota formatting separate from the normal stats command", async () => {
     const codex = formatLiveProviderQuota({
       provider: "openai-codex",
       snapshot: {
@@ -179,40 +294,23 @@ describe("live provider quota", () => {
       },
     });
     expect(codex).toContain("Codex · Pro");
-    expect(codex).toContain("5h: 58% left");
-    expect(codex).toContain("Weekly: 81% left");
-    const report = buildReport(emptyReport(), { liveProviderQuota: codex });
-    expect(report).toContain("Total: 0 tokens · 0 responses · $0.0000 · 0 sessions");
-    expect(report).toContain("not included in period totals");
-  });
+    expect(buildReport(emptyReport(), { liveProviderQuota: codex })).toContain(
+      "not included in period totals",
+    );
 
-  it("renders local history when quota retrieval fails", async () => {
     const subject = commandHarness({
       collect: vi.fn(async () => emptyReport()),
       fetchQuota: vi.fn(async () => {
         throw new Error("provider unavailable");
       }),
     });
-    await subject.command().handler("", subject.context);
+    await subject.command().handler("week", subject.context);
     const output = subject.editor.mock.calls[0]?.[1] as string;
-    expect(output).toContain("Total: 0 tokens");
+    expect(output).toContain("SUMMARY");
     expect(output).toContain("Codex quota unavailable.");
   });
 
-  it("does not call the quota router for unsupported providers", async () => {
-    const fetchQuota = vi.fn();
-    const subject = commandHarness(
-      { collect: vi.fn(async () => emptyReport()), fetchQuota },
-      "anthropic",
-    );
-    await subject.command().handler("week", subject.context);
-    expect(fetchQuota).not.toHaveBeenCalled();
-    expect(subject.editor.mock.calls[0]?.[1]).toContain(
-      "Live quota is not supported for anthropic.",
-    );
-  });
-
-  it("starts local history and provider quota collection concurrently", async () => {
+  it("starts injected history and quota collection concurrently", async () => {
     let releaseCollect: (() => void) | undefined;
     let releaseQuota: (() => void) | undefined;
     let collectStarted = false;
@@ -238,5 +336,43 @@ describe("live provider quota", () => {
     releaseCollect?.();
     releaseQuota?.();
     await pending;
+  });
+});
+
+describe("StatsViewer", () => {
+  it("supports scrolling, period arrows, mode switching, and close keys", async () => {
+    const rendered: string[] = [];
+    const navigated: number[] = [];
+    const modes: string[] = [];
+    let closed = 0;
+    const viewer = new StatsViewer(
+      { terminal: { rows: 10 }, requestRender: vi.fn() },
+      { fg: (_color: string, text: string) => text, bold: (text: string) => text },
+      { matches: (data: string, key: string) => data === key } as never,
+      "workweek",
+      Array.from({ length: 30 }, (_, index) => `line ${index}`).join("\n"),
+      () => {
+        closed += 1;
+      },
+      async (delta) => {
+        navigated.push(delta);
+        return "historical";
+      },
+      async (mode) => {
+        modes.push(mode);
+        return "monthly";
+      },
+    );
+    rendered.push(...viewer.render(80));
+    viewer.handleInput("down");
+    viewer.handleInput("\u001b[D");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    viewer.handleInput("m");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    viewer.handleInput("q");
+    expect(rendered.length).toBeGreaterThan(2);
+    expect(navigated).toEqual([-1]);
+    expect(modes).toEqual(["month"]);
+    expect(closed).toBe(1);
   });
 });

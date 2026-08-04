@@ -27,7 +27,7 @@ pi update --extensions
 | [Context Size](packages/context-size/) | Temporarily limits the active model's context window and shows the selected limit in the status area. | `/context`, `/context 128k`, `/context auto` | Any model |
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private bounded cache and sends the model a file reference instead. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Displays the selected model's input, cache, output, and long-context API prices in Pi's model selector. | Automatic | Interactive model selector |
-| [Stats](packages/stats/) | Summarizes local Pi usage by period, model, project, and Subagent contribution, with a separate live provider-quota snapshot. | `/stats`, `/stats week`, `/stats month`, `/stats previous` | Local session history; live quota for supported providers |
+| [Stats](packages/stats/) | Restores the Bitbucket-style local Pi usage report with summaries, daily/weekly rows, model/project breakdowns, Subagent subsets, and optional Copilot start-credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history; optional Copilot snapshots only |
 | [Subagents](packages/subagents/) | Runs model-configurable isolated Explorer or Worker sessions with explicit lifecycle, hidden transcripts, reports, and a complete activity overlay. | `/agents`, `/agents help`, `subagent_spawn`, `subagent_send`, `subagent_wait`, `subagent_list`, `subagent_read`, `subagent_interrupt`, `subagent_close` | RPC by default; child integrations auto-detected |
 | [UV](packages/uv/) | Replaces Pi's Bash tool with a UV-aware wrapper and redirects unsafe `pip`, Poetry, `venv`, and bytecode commands toward UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Sole owner of the always-visible Pi-themed, task-first Subagent activity block and animated `Hackeln...` summary. | Automatic | Running, ready, and recent Subagents |
@@ -44,6 +44,22 @@ All 14 extension entrypoints are installed together. Missing optional tools do n
 - **RTK 0.23+** and a working **UV** executable are auto-detected only for Worker children; either can be absent without blocking spawn, and native Pi Bash remains the fallback.
 
 Search intentionally defaults Copilot CLI retrieval to `gpt-5.6-luna` with reasoning effort `none`; Codex uses native `/codex/alpha/search`. Both return bounded, untrusted external evidence with safe normalized sources while the active parent model handles substantive analysis. Retrieval consumption is provider-accounted because neither backend exposes usage or cost for inclusion in Pi's local totals.
+
+### Stats periods and viewer
+
+`/stats` and `/stats workweek` show the current Monday-Friday workweek; `/stats week` is an
+alias. `/stats all` shows the Monday-Sunday calendar week, and `/stats month` shows the local
+calendar month. Add `previous` or a negative offset such as `-2` to browse historical selected
+periods. In the TUI, the read-only stats modal supports `↑`/`↓` scrolling, PageUp/PageDown,
+Home/End, `←`/`→` historical navigation, `m`/`w` month/workweek switching, and `Esc`/`q` close.
+
+Stats includes a `SUMMARY`, a `SUBAGENTS (included above)` subset, complete daily rows for week
+views, monthly `WEEKLY` rows, and cost/token/response/session model and project tables. For an
+active `github-copilot` model it may record one daily account-level checkpoint at
+`<agent-dir>/copilot-credit-snapshots.json`; the daily table labels that independent value
+`Start Credits`. Copilot credits never enter Pi totals, and non-Copilot stats runs do not invoke
+Copilot quota retrieval. The standalone `/usage-meter` extension remains responsible for live
+provider quota display.
 
 ## Skills
 
