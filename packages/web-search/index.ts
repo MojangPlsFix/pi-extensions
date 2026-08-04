@@ -14,6 +14,7 @@ import {
   maximumSources,
   normalizeSearchParams,
   type SearchBackend,
+  type SearchDetails,
   type SearchParams,
   searchParameters,
   sourcesFromText,
@@ -28,8 +29,9 @@ export {
 } from "./codex-backend.js";
 export {
   buildCopilotArguments,
-  copilotAvailable,
+  copilotSearchTimeoutMs,
   copilotSpawnOptions,
+  DEFAULT_COPILOT_SEARCH_TIMEOUT_MS,
   runCopilotSearch,
 } from "./copilot-backend.js";
 export { renderSearchCall, renderSearchResult } from "./renderers.js";
@@ -48,6 +50,7 @@ export {
   DEFAULT_COPILOT_SEARCH_MODEL,
   normalizeCodexSources,
   normalizeSearchParams,
+  promptFor,
   redactSensitiveText,
   sourcesFromText,
 } from "./search.js";
@@ -76,29 +79,28 @@ export default function searchExtension(pi: ExtensionAPI): void {
       const model =
         normalized.model ??
         (backend === "copilot-cli" ? DEFAULT_COPILOT_SEARCH_MODEL : (ctx.model?.id ?? "unknown"));
-      const progress =
-        backend === "copilot-cli"
-          ? "Searching with Copilot CLI…"
-          : "Searching with Codex native search…";
-      onUpdate?.({
-        content: [{ type: "text", text: progress }],
-        details: {
-          backend,
-          kind: normalized.kind,
-          model,
-          queryCount: normalized.requests.length,
-          resultCount: 0,
-          sourceCount: 0,
-          truncated: false,
-          outputTruncated: false,
-          sourcesTruncated: false,
-          providerAccounted: true,
-          usageStatus: "provider-accounted",
-          costIncludedInPi: false,
-          sourceUrls: [],
-          preview: "",
-        },
-      });
+      const progressDetails: SearchDetails = {
+        backend,
+        kind: normalized.kind,
+        model,
+        queryCount: normalized.requests.length,
+        resultCount: 0,
+        sourceCount: 0,
+        truncated: false,
+        outputTruncated: false,
+        sourcesTruncated: false,
+        providerAccounted: true,
+        usageStatus: "provider-accounted",
+        costIncludedInPi: false,
+        sourceUrls: [],
+        preview: "",
+      };
+      let lastStatus: string | undefined;
+      const forwardStatus = (status: string) => {
+        if (status === lastStatus) return;
+        lastStatus = status;
+        onUpdate?.({ content: [{ type: "text", text: status }], details: progressDetails });
+      };
       let result: BackendSearchResult;
       if (backend === "copilot-cli") {
         const output = await runCopilotSearch(
@@ -106,7 +108,7 @@ export default function searchExtension(pi: ExtensionAPI): void {
           normalized,
           signal,
           "copilot",
-          undefined,
+          forwardStatus,
           ctx.cwd,
         );
         const extracted = sourcesFromText(output);
@@ -124,6 +126,8 @@ export default function searchExtension(pi: ExtensionAPI): void {
           ctx.model,
           () => ctx.modelRegistry.getProviderAuth("openai-codex"),
           signal,
+          undefined,
+          forwardStatus,
         );
       }
       return {

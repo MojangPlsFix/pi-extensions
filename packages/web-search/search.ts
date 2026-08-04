@@ -248,9 +248,17 @@ function normalizeDomainFilter(value: string): string {
 export function promptFor(params: NormalizedSearchParams): string {
   const constraints = [
     "Return concise retrieved evidence with source URLs; do not present unsupported conclusions.",
-    params.kind === "web"
-      ? "Use current external web sources; do not inspect local repository files."
-      : "Prefer official documentation, release notes, specifications, and primary repositories.",
+    ...(params.kind === "web"
+      ? [
+          "Use current external web sources; do not inspect local repository files.",
+          "Use live web research with the native github-mcp-server/web_search tool to answer the request.",
+          "You MUST use github-mcp-server/web_search before answering any request involving current, recent, or time-sensitive facts. Do not answer those facts from memory. Search at least one relevant current source, and search more when the user asks for source verification.",
+          "If github-mcp-server/web_search is unavailable or fails, return an explicit error and do not provide an unverified fallback answer from memory.",
+          "Use the minimum number of web tool calls needed. Extract only the facts relevant to the request; do not quote or reproduce full page contents.",
+        ]
+      : [
+          "Prefer official documentation, release notes, specifications, and primary repositories.",
+        ]),
     params.recencyFilter ? `Prefer sources from the last ${params.recencyFilter}.` : "",
     params.domainFilter?.length ? `Domain constraints: ${params.domainFilter.join(", ")}.` : "",
     params.includeContent ? "Open relevant source pages rather than relying only on snippets." : "",

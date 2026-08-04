@@ -18,7 +18,7 @@ The TUI immediately identifies the selected backend, then shows a compact comple
 
 The extension does not contact either backend during Pi startup.
 
-For Copilot, install the CLI and run `copilot login`. Its inexpensive retrieval defaults remain `--model gpt-5.6-luna --effort none`; arguments are validated, passed without a shell, and cancellation reaches the child process.
+For Copilot, install the CLI and run `copilot login`. Its inexpensive retrieval defaults remain `--model gpt-5.6-luna --effort none`; arguments are validated, passed without a shell, and cancellation reaches the child process. Web searches instruct Copilot to use the native `github-mcp-server/web_search` tool and refuse to return an unverified fallback when that call is missing or fails. Each search is limited to 180,000 ms by default; set `PI_COPILOT_SEARCH_TIMEOUT_MS` to a positive integer to change the limit. A timed-out child is terminated with `SIGTERM` and escalated to `SIGKILL` after a short grace period.
 
 For Codex, authenticate with `/login openai-codex`. Pi resolves and refreshes OAuth immediately before the native request, and sends that credential only to the trusted HTTPS `chatgpt.com` endpoint. Authentication failures, unsafe endpoint overrides, HTTP failures, malformed responses, empty results, and unsupported providers produce explicit errors without exposing credentials, request headers, OAuth claims, or backend payloads.
 

@@ -9,12 +9,15 @@ import searchExtension, {
   buildCodexHeaders,
   buildCodexSearchRequest,
   buildCopilotArguments,
+  copilotSearchTimeoutMs,
   copilotSpawnOptions,
   DEFAULT_COPILOT_SEARCH_EFFORT,
   DEFAULT_COPILOT_SEARCH_MODEL,
+  DEFAULT_COPILOT_SEARCH_TIMEOUT_MS,
   extractCodexAccountId,
   normalizeCodexResponse,
   normalizeSearchParams,
+  promptFor,
   redactSensitiveText,
   renderSearchCall,
   renderSearchResult,
@@ -28,6 +31,7 @@ import searchExtension, {
 const temporaryDirectories: string[] = [];
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   await Promise.all(
     temporaryDirectories.splice(0).map((directory) => rm(directory, { recursive: true })),
   );
@@ -39,7 +43,7 @@ async function fakeCopilot(): Promise<string> {
   const executable = join(directory, "copilot");
   await writeFile(
     executable,
-    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(0);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nif (prompt.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nif (prompt.includes('wait')) setTimeout(() => console.log(JSON.stringify({type:'assistant.message',data:{content:'done'}})), 5000);\nelse console.log(JSON.stringify({type:'assistant.message',data:{content: prompt.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\n`,
+    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(97);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nconst request = prompt.split('Request:\\n').at(-1) || '';\nconst emitAnswer = () => console.log(JSON.stringify({type:'assistant.message',data:{content: request.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\nif (request.includes('web-fail')) {\n  console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n  console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',result:{isError:true}}}));\n  emitAnswer();\n} else if (request.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nelse if (request.includes('wait')) setTimeout(() => emitAnswer(), 5000);\nelse {\n  const web = prompt.includes('github-mcp-server/web_search') && !request.includes('skip-web');\n  if (web) {\n    console.log(JSON.stringify({type:'assistant.turn_start',data:{}}));\n    console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n    console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));\n  }\n  emitAnswer();\n}\n`,
   );
   await chmod(executable, 0o755);
   return executable;
@@ -136,6 +140,17 @@ describe("unified search interface", () => {
     ).toThrow("Invalid domain");
   });
 
+  it("includes native web-search guidance without changing code-search prompts", () => {
+    const webPrompt = promptFor(normalizeSearchParams({ query: "latest release" }));
+    expect(webPrompt).toContain("native github-mcp-server/web_search tool");
+    expect(webPrompt).toContain("Search at least one relevant current source");
+    expect(webPrompt).toContain("minimum number of web tool calls needed");
+    expect(webPrompt).toContain("do not provide an unverified fallback answer from memory");
+    expect(promptFor(normalizeSearchParams({ query: "API docs", kind: "code" }))).not.toContain(
+      "github-mcp-server/web_search",
+    );
+  });
+
   it("routes only the two supported providers", () => {
     expect(backendForProvider("github-copilot")).toBe("copilot-cli");
     expect(backendForProvider("openai-codex")).toBe("codex-native");
@@ -156,6 +171,13 @@ describe("unified search interface", () => {
 });
 
 describe("Copilot CLI backend", () => {
+  it("does not run a --version preflight before the real search spawn", async () => {
+    const executable = await fakeCopilot();
+    await expect(
+      runCopilotSearch("code", { query: "docs" }, undefined, executable),
+    ).resolves.toContain("done");
+  });
+
   it("reports a useful capability error for a missing CLI", async () => {
     await expect(
       runCopilotSearch("web", { query: "latest release" }, undefined, "definitely-not-copilot"),
@@ -203,6 +225,32 @@ describe("Copilot CLI backend", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
+  it("uses the configured timeout and reports a safe timeout status", async () => {
+    const executable = await fakeCopilot();
+    vi.stubEnv("PI_COPILOT_SEARCH_TIMEOUT_MS", "20");
+    const statuses: string[] = [];
+    await expect(
+      runCopilotSearch("code", { query: "wait" }, undefined, executable, (status) =>
+        statuses.push(status),
+      ),
+    ).rejects.toThrow("timed out after 20ms");
+    expect(statuses).toContain("Copilot search timed out after 20ms; stopping…");
+    expect(copilotSearchTimeoutMs({})).toBe(DEFAULT_COPILOT_SEARCH_TIMEOUT_MS);
+    expect(copilotSearchTimeoutMs({ PI_COPILOT_SEARCH_TIMEOUT_MS: "invalid" })).toBe(
+      DEFAULT_COPILOT_SEARCH_TIMEOUT_MS,
+    );
+  });
+
+  it("requires a successful native web_search invocation for web mode", async () => {
+    const executable = await fakeCopilot();
+    await expect(
+      runCopilotSearch("web", { query: "skip-web" }, undefined, executable),
+    ).rejects.toThrow("without invoking github-mcp-server/web_search");
+    await expect(
+      runCopilotSearch("web", { query: "web-fail" }, undefined, executable),
+    ).rejects.toThrow("github-mcp-server/web_search failed");
+  });
+
   it("marks Copilot source extraction as truncated after its bounded URL limit", () => {
     const extracted = sourcesFromText(
       Array.from({ length: 21 }, (_, index) => `https://example.com/${index}`).join(" "),
@@ -227,7 +275,12 @@ describe("Copilot CLI backend", () => {
           model: { provider: "github-copilot", id: "parent-model" },
         },
       );
-      expect(updates[0]?.content?.[0]?.text).toBe("Searching with Copilot CLI…");
+      expect(updates.map((update) => update.content?.[0]?.text)).toEqual([
+        "Searching with Copilot CLI…",
+        `Copilot started · ${DEFAULT_COPILOT_SEARCH_MODEL}`,
+        "Copilot is using github-mcp-server/web_search…",
+        "Copilot finished github-mcp-server/web_search",
+      ]);
       expect(result.content[0]?.text).toContain("Untrusted external search results");
       expect(result.details).toMatchObject({
         backend: "copilot-cli",
