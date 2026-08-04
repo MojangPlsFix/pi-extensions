@@ -80,6 +80,18 @@ describe("package manifest", () => {
     );
   });
 
+  it("declares the shared skills and the bro skill", async () => {
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
+      pi?: { skills?: string[] };
+    };
+    expect(manifest.pi?.skills).toEqual([
+      "./packages/web-search/skills",
+      "./packages/subagents/skills",
+      "./packages/bro/skills",
+    ]);
+    expect(await readFile("packages/bro/skills/bro/SKILL.md", "utf8")).toContain("name: bro");
+  });
+
   it("links referenced third-party projects and their licenses", async () => {
     const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
     for (const url of [

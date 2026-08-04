@@ -31,7 +31,8 @@
     ],
     "skills": [
       "./packages/web-search/skills",
-      "./packages/subagents/skills"
+      "./packages/subagents/skills",
+      "./packages/bro/skills"
     ]
   },
   "scripts": {

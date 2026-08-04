@@ -61,7 +61,11 @@ expect(
 expect(new Set(normalized).size === normalized.length, "duplicate extension entrypoint");
 expect(
   JSON.stringify(packageJson.pi?.skills) ===
-    JSON.stringify(["./packages/web-search/skills", "./packages/subagents/skills"]),
+    JSON.stringify([
+      "./packages/web-search/skills",
+      "./packages/subagents/skills",
+      "./packages/bro/skills",
+    ]),
   "pi.skills differs from reviewed resources",
 );
 
@@ -77,12 +81,23 @@ for (const entrypoint of expectedEntrypoints) {
   }
 }
 
-for (const skillDirectory of ["packages/web-search/skills", "packages/subagents/skills"]) {
+for (const skillDirectory of [
+  "packages/web-search/skills",
+  "packages/subagents/skills",
+  "packages/bro/skills",
+]) {
   try {
     await access(resolve(skillDirectory));
   } catch {
     failures.push(`missing skill directory: ${skillDirectory}`);
   }
+}
+
+try {
+  const broSkill = await readFile("packages/bro/skills/bro/SKILL.md", "utf8");
+  expect(/^name: bro$/m.test(broSkill), "bro skill must declare name: bro");
+} catch {
+  failures.push("missing bro skill: packages/bro/skills/bro/SKILL.md");
 }
 
 for (const name of ["preinstall", "install", "postinstall", "prepare"]) {

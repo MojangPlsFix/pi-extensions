@@ -45,6 +45,14 @@ All 14 extension entrypoints are installed together. Missing optional tools do n
 
 Search intentionally defaults Copilot CLI retrieval to `gpt-5.6-luna` with reasoning effort `none`; Codex uses native `/codex/alpha/search`. Both return bounded, untrusted external evidence with safe normalized sources while the active parent model handles substantive analysis. Retrieval consumption is provider-accounted because neither backend exposes usage or cost for inclusion in Pi's local totals.
 
+## Skills
+
+| Skill | Purpose |
+| --- | --- |
+| `bro` | Restate the last message in plain human language without jargon. |
+| `subagent-orchestration` | Coordinate isolated Explorer and Worker Subagents. |
+| `web-search` | Guide bounded current web and documentation research. |
+
 ## Configuration
 
 For inexpensive parallel investigation and a high-effort implementation owner, this recommended Subagent setup can be copied to `~/.pi/agent/subagents/config.json`:
