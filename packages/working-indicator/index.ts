@@ -102,13 +102,15 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
 
   const subscribed = pi.events.on(events.subagentsStatus, (data: unknown) => {
     status = normalized(data);
+    ctx?.ui.setWorkingVisible(status.active === 0);
     component?.update(status);
   });
   const unsubscribeStatus = typeof subscribed === "function" ? subscribed : () => {};
 
   pi.on("session_start", (_event, extensionContext) => {
     ctx = extensionContext;
-    // Parent streaming keeps Pi's native row; Subagent counts live only in our inline component.
+    // Start each session with Pi's native row visible; active subagents hide it below.
+    ctx.ui.setWorkingVisible(true);
     ctx.ui.setWorkingMessage("Hackeln...");
     // Native Pi owns parent-turn animation and accent styling.
     ctx.ui.setWorkingIndicator();
@@ -128,6 +130,7 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
     component?.dispose();
     component = undefined;
     ctx?.ui.setWidget(widgetKey, undefined);
+    ctx?.ui.setWorkingVisible(true);
     ctx?.ui.setWorkingMessage();
     ctx?.ui.setWorkingIndicator();
     ctx = undefined;
