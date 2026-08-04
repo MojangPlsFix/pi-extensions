@@ -13,6 +13,17 @@ export type HerdrPaneLayout = {
   tabId: string;
   panes: Array<{ paneId: string; rect: HerdrPaneRect }>;
 };
+export type HerdrPaneContext = {
+  paneId: string;
+  tabId: string;
+  workspaceId: string;
+};
+export type HerdrTabInfo = {
+  tabId: string;
+  workspaceId?: string;
+  label?: string;
+};
+export type HerdrParentContext = HerdrPaneContext & { tabLabel: string };
 export type HerdrTab = { tabId: string; paneId: string };
 export type HerdrPaneMetadata = {
   agent: string;
@@ -102,6 +113,33 @@ function paneId(output: string): string {
   return match[1];
 }
 
+function paneContext(output: string): HerdrPaneContext {
+  const value = jsonObject(output);
+  const result = member(value, "result");
+  const pane = member(result, "pane") ?? member(value, "pane");
+  const paneId = stringMember(pane, "pane_id", "paneId", "id");
+  const tabId = stringMember(pane, "tab_id", "tabId");
+  const workspaceId = stringMember(pane, "workspace_id", "workspaceId");
+  if (paneId && tabId && workspaceId) return { paneId, tabId, workspaceId };
+  throw new Error(
+    `Herdr did not return the parent pane context: ${output.trim() || "(empty response)"}`,
+  );
+}
+
+function tabInfo(output: string): HerdrTabInfo {
+  const value = jsonObject(output);
+  const result = member(value, "result");
+  const tab = member(result, "tab") ?? member(value, "tab");
+  const tabId = stringMember(tab, "tab_id", "tabId", "id") ?? stringMember(result, "tab_id");
+  if (!tabId)
+    throw new Error(`Herdr did not return a tab id: ${output.trim() || "(empty response)"}`);
+  return {
+    tabId,
+    workspaceId: stringMember(tab, "workspace_id", "workspaceId"),
+    label: stringMember(tab, "label", "name"),
+  };
+}
+
 function createdTab(output: string): HerdrTab {
   const value = jsonObject(output);
   const result = member(value, "result");
@@ -172,15 +210,28 @@ export class HerdrClient {
     return HerdrClient.environmentState(env) === "complete";
   }
 
-  async verify(parentPaneId: string): Promise<void> {
-    await this.run(["pane", "current", "--pane", parentPaneId], 5_000);
+  async verify(parentPaneId: string): Promise<HerdrPaneContext> {
+    const { stdout } = await this.run(["pane", "current", "--pane", parentPaneId], 5_000);
+    return paneContext(stdout);
   }
 
-  async createTab(label: string, cwd: string, env: Record<string, string> = {}): Promise<HerdrTab> {
+  async getTab(tabId: string): Promise<HerdrTabInfo> {
+    const { stdout } = await this.run(["tab", "get", tabId], 5_000);
+    return tabInfo(stdout);
+  }
+
+  async createTab(
+    label: string,
+    cwd: string,
+    workspaceId: string,
+    env: Record<string, string> = {},
+  ): Promise<HerdrTab> {
     const environment = Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`]);
     const { stdout } = await this.run([
       "tab",
       "create",
+      "--workspace",
+      workspaceId,
       "--label",
       label,
       "--cwd",

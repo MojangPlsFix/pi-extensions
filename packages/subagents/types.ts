@@ -84,6 +84,8 @@ export type AgentSnapshot = {
   sessionDir: string;
   sessionFile?: string;
   herdrPaneId?: string;
+  herdrWorkspaceId?: string;
+  herdrParentTabId?: string;
   herdrTabId?: string;
   requestedModel?: string;
   requestedThinking?: string;
@@ -116,6 +118,8 @@ export type ManagedAgent = {
   /** Present only for the traditional invisible RPC transport. */
   process?: ChildProcessWithoutNullStreams;
   herdrPaneId?: string;
+  herdrWorkspaceId?: string;
+  herdrParentTabId?: string;
   herdrTabId?: string;
   stderr: string;
   output: string;
@@ -172,6 +176,8 @@ export function agentSnapshot(agent: ManagedAgent, now = Date.now()): AgentSnaps
     sessionDir: agent.sessionDir,
     sessionFile: agent.sessionFile,
     herdrPaneId: agent.herdrPaneId,
+    herdrWorkspaceId: agent.herdrWorkspaceId,
+    herdrParentTabId: agent.herdrParentTabId,
     herdrTabId: agent.herdrTabId,
     requestedModel: agent.requestedModel,
     requestedThinking: agent.requestedThinking,

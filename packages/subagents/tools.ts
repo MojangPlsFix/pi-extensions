@@ -5,7 +5,7 @@ import { discoverAgents } from "./agents.js";
 import { loadSubagentConfig, MAX_ACTIVE, MAX_WORKERS, resolveAgentModelPolicy } from "./config.js";
 import { HerdrClient } from "./herdr-client.js";
 import type { SubagentManager } from "./manager.js";
-import { formatAgent, resourceDiagnostics } from "./renderers.js";
+import { formatAgent, herdrConnection, resourceDiagnostics } from "./renderers.js";
 import type { AgentSnapshot } from "./types.js";
 
 function snapshots(details: unknown): AgentSnapshot[] {
@@ -27,7 +27,7 @@ function toolSummary(agents: AgentSnapshot[]): string {
   return agents
     .map(
       (agent) =>
-        `${agent.status === "running" ? "●" : "○"} ${formatAgent(agent)} · ${agent.backend}${agent.herdrPaneId ? ` pane ${agent.herdrPaneId}` : ""} · ${agent.latestActivity ?? "waiting…"}`,
+        `${agent.status === "running" ? "●" : "○"} ${formatAgent(agent)} · ${agent.backend}${herdrConnection(agent) ? ` · ${herdrConnection(agent)}` : ""} · ${agent.latestActivity ?? "waiting…"}`,
     )
     .join("\n");
 }
@@ -73,6 +73,7 @@ function resultRenderer(
         `Task history:\n${agent.taskHistory.map((task, index) => `${index + 1}. ${task}`).join("\n") || "(none)"}`,
         `Requested: ${agent.requestedModel ?? "default"} · ${agent.requestedThinking ?? "default"}`,
         `Effective: ${agent.effectiveModel ?? "pending confirmation"} · ${agent.effectiveThinking ?? "pending confirmation"}`,
+        herdrConnection(agent) ? `Transport: ${herdrConnection(agent)}` : "",
         ...resourceDiagnostics(agent),
         `Started: ${agent.startedAt}${agent.finishedAt ? `\nFinished: ${agent.finishedAt}` : ""}`,
         `Activity:\n${agent.activity.map((entry) => `${entry.at} · ${entry.kind} · ${entry.text}`).join("\n") || "(none)"}`,

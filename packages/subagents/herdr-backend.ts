@@ -1,9 +1,9 @@
-import { basename } from "node:path";
 import type { SubagentBackend } from "./backend.js";
 import {
   type HerdrClient,
   type HerdrPaneLayout,
   type HerdrPaneRect,
+  type HerdrParentContext,
   isHerdrLayoutUnavailable,
   isMissingHerdrPane,
 } from "./herdr-client.js";
@@ -108,7 +108,7 @@ export class HerdrBackend implements SubagentBackend {
 
   constructor(
     private readonly client: HerdrClient,
-    private readonly parentPaneId: string,
+    private readonly parent: HerdrParentContext,
     private readonly cwd: string,
     private readonly childEnvironment: (agent: ManagedAgent) => Record<string, string>,
     private readonly childArgs: (agent: ManagedAgent) => string[],
@@ -135,15 +135,15 @@ export class HerdrBackend implements SubagentBackend {
     let pane: string | undefined;
     try {
       if (!this.verified) {
-        await this.client.verify(this.parentPaneId);
+        await this.client.verify(this.parent.paneId);
         this.verified = true;
       }
 
       if (this.panes.size === 0) {
-        const project = basename(this.cwd) || "project";
         const tab = await this.client.createTab(
-          `Subagents · ${project}`,
+          this.parent.tabLabel,
           this.cwd,
+          this.parent.workspaceId,
           this.childEnvironment(agent),
         );
         this.tabId = tab.tabId;
@@ -152,10 +152,10 @@ export class HerdrBackend implements SubagentBackend {
       } else {
         const selected = await this.selectSplit();
         if (!selected) {
-          const project = basename(this.cwd) || "project";
           const tab = await this.client.createTab(
-            `Subagents · ${project}`,
+            this.parent.tabLabel,
             this.cwd,
+            this.parent.workspaceId,
             this.childEnvironment(agent),
           );
           this.tabId = tab.tabId;
@@ -174,6 +174,8 @@ export class HerdrBackend implements SubagentBackend {
       }
 
       agent.herdrPaneId = pane;
+      agent.herdrWorkspaceId = this.parent.workspaceId;
+      agent.herdrParentTabId = this.parent.tabId;
       agent.herdrTabId = this.tabId;
       this.panes.set(pane, agent);
       await this.client.start(agent.id, pane, this.childArgs(agent));
@@ -233,6 +235,8 @@ export class HerdrBackend implements SubagentBackend {
     this.metadataSequences.delete(pane);
     if (owner?.herdrPaneId === pane) {
       owner.herdrPaneId = undefined;
+      owner.herdrWorkspaceId = undefined;
+      owner.herdrParentTabId = undefined;
       owner.herdrTabId = undefined;
     }
     if (owner) this.stopObserving(owner);
@@ -321,7 +325,13 @@ export class HerdrBackend implements SubagentBackend {
           idle: agent.status === "closed" ? "closed" : "ready",
           done: agent.status === "closed" ? "closed" : "ready",
         },
-        tokens: { role, model },
+        tokens: {
+          role,
+          model,
+          workspace: token(this.parent.workspaceId, "unknown"),
+          parentTab: token(this.parent.tabId, "unknown"),
+          subagentTab: token(agent.herdrTabId ?? this.tabId, "unknown"),
+        },
         seq,
       });
     } catch (cause) {

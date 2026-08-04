@@ -89,6 +89,17 @@ export function formatAgent(agent: ManagedAgent | AgentSnapshot): string {
   return `${agent.name} (${mode}) · ${agent.status} · ${model} · ${thinking}${tokens ? ` · ${tokens.toLocaleString()} tokens` : ""}${agent.usage.cost ? ` · $${agent.usage.cost.toFixed(4)}` : ""}`;
 }
 
+export function herdrConnection(agent: ManagedAgent | AgentSnapshot): string | undefined {
+  if (agent.backend !== "herdr") return undefined;
+  const fields = [
+    agent.herdrWorkspaceId ? `workspace ${agent.herdrWorkspaceId}` : "",
+    agent.herdrParentTabId ? `parent tab ${agent.herdrParentTabId}` : "",
+    agent.herdrTabId ? `tab ${agent.herdrTabId}` : "",
+    agent.herdrPaneId ? `pane ${agent.herdrPaneId}` : "",
+  ].filter(Boolean);
+  return fields.length ? fields.join(" · ") : undefined;
+}
+
 function colorForStatus(
   status: AgentSnapshot["status"],
 ): "muted" | "success" | "warning" | "error" | "dim" {
@@ -292,7 +303,7 @@ export class AgentsViewer {
         ...displayLines(selected.task).map((line) => this.theme.fg("text", `  ${line}`)),
         this.theme.fg(
           "dim",
-          `Backend: ${selected.backend}${selected.herdrPaneId ? ` · pane ${selected.herdrPaneId}` : ""}`,
+          `Backend: ${selected.backend}${herdrConnection(selected) ? ` · ${herdrConnection(selected)}` : ""}`,
         ),
         this.theme.fg(
           "dim",
@@ -384,7 +395,7 @@ export function completionMessageRenderer(
     role,
     theme.fg(
       "dim",
-      `Backend: ${agent.backend}${agent.herdrPaneId ? ` · pane ${agent.herdrPaneId}` : ""}`,
+      `Backend: ${agent.backend}${herdrConnection(agent) ? ` · ${herdrConnection(agent)}` : ""}`,
     ),
     theme.fg("dim", `Transcript: ${agent.sessionFile ?? agent.sessionDir}`),
     ...resourceDiagnostics(agent).map((line) => theme.fg("dim", line)),

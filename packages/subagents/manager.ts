@@ -27,7 +27,7 @@ import {
   SESSION_ROOT,
 } from "./config.js";
 import { HerdrBackend } from "./herdr-backend.js";
-import { HerdrClient } from "./herdr-client.js";
+import { HerdrClient, type HerdrParentContext } from "./herdr-client.js";
 import { formatAgent } from "./renderers.js";
 import { RpcBackend } from "./rpc-backend.js";
 import type { RpcEvent } from "./rpc-client.js";
@@ -56,12 +56,18 @@ function modelName(ctx: ExtensionContext): string | undefined {
   return model?.id ? (model.provider ? `${model.provider}/${model.id}` : model.id) : undefined;
 }
 
+export function subagentTabLabel(parentTabLabel: string | undefined): string {
+  const label = parentTabLabel?.trim();
+  return label ? `${label} - Subagents` : "Subagents";
+}
+
 export class SubagentManager {
   readonly store = new AgentStore();
   private planMode = false;
   private readonly rpc: RpcBackend;
   private herdr?: HerdrBackend;
   private verifiedHerdrClient?: HerdrClient;
+  private verifiedHerdrContext?: HerdrParentContext;
   private readonly pollers = new Map<string, SessionPoller>();
   private readonly contextDirs = new Map<string, string>();
   private readonly operationTails = new Map<string, Promise<unknown>>();
@@ -559,11 +565,11 @@ export class SubagentManager {
   }
 
   private ensureHerdr(ctx: ExtensionContext, contextDir: string): void {
-    if (!process.env.HERDR_PANE_ID)
-      throw new Error("Herdr is detected but HERDR_PANE_ID is unavailable.");
+    if (!this.verifiedHerdrContext)
+      throw new Error("Herdr parent context is unavailable; cannot bind Subagents to its tab.");
     this.herdr ??= new HerdrBackend(
       this.verifiedHerdrClient ?? new HerdrClient(),
-      process.env.HERDR_PANE_ID,
+      this.verifiedHerdrContext,
       ctx.cwd,
       // Never serialize parent credentials through Herdr's --env arguments.
       (child) => childIsolationOverrides(this.contextDirs.get(child.id) ?? contextDir, child),
@@ -626,7 +632,36 @@ export class SubagentManager {
     const parentPaneId = process.env.HERDR_PANE_ID!;
     const client = new HerdrClient();
     try {
-      await client.verify(parentPaneId);
+      const parent = await client.verify(parentPaneId);
+      const expectedWorkspace = process.env.HERDR_WORKSPACE_ID;
+      if (expectedWorkspace && expectedWorkspace !== parent.workspaceId)
+        throw new Error(
+          `Herdr parent workspace mismatch: environment says ${expectedWorkspace}, pane belongs to ${parent.workspaceId}.`,
+        );
+      const expectedTab = process.env.HERDR_TAB_ID;
+      if (expectedTab && expectedTab !== parent.tabId)
+        throw new Error(
+          `Herdr parent tab mismatch: environment says ${expectedTab}, pane belongs to ${parent.tabId}.`,
+        );
+
+      let tabLabel: string | undefined;
+      let tabWorkspace: string | undefined;
+      try {
+        const tab = await client.getTab(parent.tabId);
+        tabLabel = tab.label?.trim() || undefined;
+        tabWorkspace = tab.workspaceId;
+      } catch {
+        // Parent tab labels are best-effort; workspace affinity comes from pane context.
+      }
+      if (tabWorkspace && tabWorkspace !== parent.workspaceId)
+        throw new Error(
+          `Herdr parent tab workspace mismatch: tab belongs to ${tabWorkspace}, pane belongs to ${parent.workspaceId}.`,
+        );
+
+      this.verifiedHerdrContext = {
+        ...parent,
+        tabLabel: subagentTabLabel(tabLabel),
+      };
       this.verifiedHerdrClient = client;
       return "herdr";
     } catch (cause) {

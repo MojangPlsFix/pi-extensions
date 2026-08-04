@@ -31,7 +31,35 @@ describe("Herdr capability checks", () => {
     expect(command).not.toContain("must-not-reach-herdr-arguments");
     delete process.env.FAKE_SECRET;
   });
-  it("creates a non-focused dedicated tab and returns its root pane", async () => {
+  it("reads the parent pane context and parent tab label", async () => {
+    const calls: string[][] = [];
+    const client = new HerdrClient(async (args) => {
+      calls.push(args);
+      return {
+        stdout:
+          args[0] === "pane"
+            ? '{"result":{"pane":{"pane_id":"pane-parent","tab_id":"workspace:t1","workspace_id":"workspace"}}}'
+            : '{"result":{"tab":{"tab_id":"workspace:t1","workspace_id":"workspace","label":"Orchestrator"}}}',
+        stderr: "",
+      };
+    });
+
+    await expect(client.verify("pane-parent")).resolves.toEqual({
+      paneId: "pane-parent",
+      tabId: "workspace:t1",
+      workspaceId: "workspace",
+    });
+    await expect(client.getTab("workspace:t1")).resolves.toEqual({
+      tabId: "workspace:t1",
+      workspaceId: "workspace",
+      label: "Orchestrator",
+    });
+    expect(calls).toEqual([
+      ["pane", "current", "--pane", "pane-parent"],
+      ["tab", "get", "workspace:t1"],
+    ]);
+  });
+  it("creates a non-focused workspace-bound tab and returns its root pane", async () => {
     const calls: string[][] = [];
     const client = new HerdrClient(async (args) => {
       calls.push(args);
@@ -43,7 +71,7 @@ describe("Herdr capability checks", () => {
     });
 
     await expect(
-      client.createTab("Subagents · project", "/work/project", { CHILD: "yes" }),
+      client.createTab("Orchestrator - Subagents", "/work/project", "workspace", { CHILD: "yes" }),
     ).resolves.toEqual({
       tabId: "tab-1",
       paneId: "root-1",
@@ -51,8 +79,10 @@ describe("Herdr capability checks", () => {
     expect(calls[0]).toEqual([
       "tab",
       "create",
+      "--workspace",
+      "workspace",
       "--label",
-      "Subagents · project",
+      "Orchestrator - Subagents",
       "--cwd",
       "/work/project",
       "--env",
@@ -117,14 +147,12 @@ describe("Herdr capability checks", () => {
     ]);
     expect(calls[1]).toEqual(["agent", "focus", "pane-1"]);
   });
-  it("verifies the control plane without creating a pane", async () => {
-    const calls: string[][] = [];
-    const client = new HerdrClient(async (args) => {
-      calls.push(args);
-      return { stdout: "ok", stderr: "" };
-    });
-    await client.verify("parent");
-    expect(calls).toEqual([["pane", "current", "--pane", "parent"]]);
+  it("rejects a parent pane response without workspace identity", async () => {
+    const client = new HerdrClient(async () => ({
+      stdout: '{"result":{"pane":{"pane_id":"parent","tab_id":"workspace:t1"}}}',
+      stderr: "",
+    }));
+    await expect(client.verify("parent")).rejects.toThrow("parent pane context");
   });
   it("retries agent start while a freshly split pane is not yet an available shell", async () => {
     let attempts = 0;

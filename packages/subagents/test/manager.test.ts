@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
-import { SubagentManager } from "../manager.js";
+import { SubagentManager, subagentTabLabel } from "../manager.js";
 import { RpcBackend } from "../rpc-backend.js";
 import { consumeSessionRecord } from "../session-poller.js";
 import { emptyUsage, type ManagedAgent } from "../types.js";
@@ -55,6 +55,12 @@ function managerHarness() {
 }
 
 describe("SubagentManager follow-up lifecycle", () => {
+  it("derives a neutral parent-aware Herdr tab label", () => {
+    expect(subagentTabLabel("Orchestrator")).toBe("Orchestrator - Subagents");
+    expect(subagentTabLabel("  ")).toBe("Subagents");
+    expect(subagentTabLabel(undefined)).toBe("Subagents");
+  });
+
   it("restarts a completed agent poller before a successful follow-up", async () => {
     const { manager } = managerHarness();
     const subject = agent();

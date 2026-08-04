@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import { boundedDisplayText, HerdrBackend, taskPaneTitle } from "../herdr-backend.js";
-import type { HerdrClient, HerdrPaneLayout, HerdrPaneMetadata } from "../herdr-client.js";
+import type {
+  HerdrClient,
+  HerdrPaneLayout,
+  HerdrPaneMetadata,
+  HerdrParentContext,
+} from "../herdr-client.js";
 import { emptyUsage, type ManagedAgent } from "../types.js";
 
 function agent(id: string, task = "inspect"): ManagedAgent {
@@ -58,10 +63,19 @@ function backendClient(overrides: Partial<HerdrClient> = {}): HerdrClient {
   } as unknown as HerdrClient;
 }
 
+function parentContext(tabLabel = "Orchestrator"): HerdrParentContext {
+  return {
+    paneId: "parent",
+    tabId: "workspace:t1",
+    workspaceId: "workspace",
+    tabLabel: `${tabLabel} - Subagents`,
+  };
+}
+
 function backend(client: HerdrClient, warning = vi.fn()): HerdrBackend {
   return new HerdrBackend(
     client,
-    "parent",
+    parentContext(),
     "/work/alpha",
     () => ({}),
     () => [],
@@ -73,7 +87,7 @@ function backend(client: HerdrClient, warning = vi.fn()): HerdrBackend {
 }
 
 describe("HerdrBackend dedicated tab topology", () => {
-  it("creates a non-focused project tab, uses its root pane, and serializes spawns", async () => {
+  it("creates a non-focused parent-labeled workspace tab, uses its root pane, and serializes spawns", async () => {
     const calls: string[] = [];
     let releaseFirstStart = () => {};
     const firstStartBlocked = new Promise<void>((resolve) => {
@@ -111,16 +125,30 @@ describe("HerdrBackend dedicated tab topology", () => {
       }),
     });
     const subject = backend(client);
+    const firstAgent = agent("explorer-a");
+    const secondAgent = agent("explorer-b");
 
-    const first = subject.spawn(agent("explorer-a"), "first task");
-    const second = subject.spawn(agent("explorer-b"), "second task");
+    const first = subject.spawn(firstAgent, "first task");
+    const second = subject.spawn(secondAgent, "second task");
     await firstStartSeen;
 
-    expect(calls).toEqual(["tab-Subagents · alpha", "start-pane-1"]);
+    expect(calls).toEqual(["tab-Orchestrator - Subagents", "start-pane-1"]);
     releaseFirstStart();
     await Promise.all([first, second]);
+    expect(firstAgent).toMatchObject({
+      herdrWorkspaceId: "workspace",
+      herdrParentTabId: "workspace:t1",
+      herdrTabId: "tab-1",
+      herdrPaneId: "pane-1",
+    });
+    expect(client.createTab).toHaveBeenCalledWith(
+      "Orchestrator - Subagents",
+      "/work/alpha",
+      "workspace",
+      {},
+    );
     expect(calls).toEqual([
-      "tab-Subagents · alpha",
+      "tab-Orchestrator - Subagents",
       "start-pane-1",
       "metadata-pane-1",
       "prompt-pane-1",
@@ -200,7 +228,7 @@ describe("HerdrBackend dedicated tab topology", () => {
     const onError = vi.fn();
     const subject = new HerdrBackend(
       client,
-      "parent",
+      parentContext(),
       "/project",
       () => ({}),
       () => [],
@@ -310,7 +338,13 @@ describe("Herdr pane metadata", () => {
         idle: "ready",
         done: "ready",
       },
-      tokens: { role: "Explorer", model: "provider/a-model-with-a-name" },
+      tokens: {
+        role: "Explorer",
+        model: "provider/a-model-with-a-name",
+        workspace: "workspace",
+        parentTab: "workspace:t1",
+        subagentTab: "tab-1",
+      },
       seq: 1,
     });
     expect(reportMetadata.mock.calls[1]![1]).toMatchObject({

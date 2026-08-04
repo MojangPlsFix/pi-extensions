@@ -4,7 +4,7 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import { describe, expect, it, vi } from "vitest";
 import type { SubagentsStatusEvent } from "../../../shared/events.js";
 import { SubagentActivityComponent } from "../../working-indicator/index.js";
-import { AgentsViewer, activityViewLines } from "../renderers.js";
+import { AgentsViewer, activityViewLines, herdrConnection } from "../renderers.js";
 import { type AgentSnapshot, emptyUsage } from "../types.js";
 
 function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
@@ -98,6 +98,20 @@ describe("task-first Subagent rendering", () => {
     expect(text).toContain("explorer · running · 00:12");
     expect(text).not.toContain("reading manager.ts");
     expect(lines.every((line) => visibleWidth(line) <= 42)).toBe(true);
+  });
+
+  it("shows the Herdr parent-to-child placement mapping", () => {
+    expect(
+      herdrConnection(
+        snapshot({
+          backend: "herdr",
+          herdrWorkspaceId: "wF",
+          herdrParentTabId: "wF:t7",
+          herdrTabId: "wF:tX",
+          herdrPaneId: "wF:p1D",
+        }),
+      ),
+    ).toBe("workspace wF · parent tab wF:t7 · tab wF:tX · pane wF:p1D");
   });
 
   it("bounds inline rows to four while /agents keeps complete history", () => {

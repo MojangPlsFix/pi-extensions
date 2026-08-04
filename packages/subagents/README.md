@@ -98,7 +98,11 @@ Completion cards use Pi's normal custom-message shell. Compact cards show the ta
 
 RPC is the normal backend and requires no Herdr installation. A complete explicit Herdr environment (`HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`) selects Herdr only after control-plane verification. An incomplete or broken explicit environment blocks spawning instead of silently falling back.
 
-Herdr creates one non-focused tab named `Subagents · <project>`. It never steals focus automatically. One through four open children use the tab's root pane and an adaptive layout: before every split Subagents queries current geometry, chooses the largest owned pane by area, and splits at `0.5` right when the pane is at least twice as wide as tall, otherwise down. Geometry is queried again after closures.
+Herdr creates one non-focused tab in the parent workspace and labels it from the parent tab: `<parent tab label> - Subagents` (for example, `Orchestrator - Subagents`). If the parent tab label is unavailable, the neutral fallback is `Subagents`; the cwd, project name, and username are never used in the visible label. The parent-to-child mapping remains available in `/agents` and pane metadata as the parent workspace/tab, Subagents tab, and pane IDs.
+
+It never steals focus automatically. One through four open children use the tab's root pane and an adaptive layout: before every split Subagents queries current geometry, chooses the largest owned pane by area, and splits at `0.5` right when the pane is at least twice as wide as tall, otherwise down. Geometry is queried again after closures.
+
+Herdr's public CLI currently has no tab insertion or reorder operation, so a newly created Subagents tab is appended after existing tabs in the workspace. Exact placement immediately after the orchestrator requires a future Herdr `--after`/tab-move capability; Subagents does not use undocumented reordering shortcuts.
 
 Pane titles are bounded task labels such as `Explorer · Trace auth flow`, not internal IDs or full prompts. Guidance and redirects update the title. Metadata reports display role, investigating/implementing/ready/blocked/closed labels, bounded model data, and monotonic sequence numbers. Canonical IDs remain internal for reliable targeting. Use `f` in `/agents` to focus a pane.
 
