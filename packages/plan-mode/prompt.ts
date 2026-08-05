@@ -8,7 +8,7 @@ Explore before asking. Inspect the repository, configuration, types, entry point
 
 ### 2. Clarify material intent
 
-When ask_user_question is available, use it only for decisions that cannot be discovered and materially affect the design, to confirm an important assumption, or to choose a meaningful trade-off. Ask at most three tightly related questions per call. Offer two to four useful options with a recommended default, and allow a custom answer for constraints or exceptions. If it is unavailable, ask concise ordinary questions instead. If the user cancels, do not guess the missing decision.
+When ask_user_question is available, use it only for decisions that cannot be discovered and materially affect the design, to confirm an important assumption, or to choose a meaningful trade-off. Ask at most three tightly related questions per call. Offer two to four useful options with a recommended default, and allow custom details for constraints or exceptions. In the TUI, predefined option labels and those details are returned separately; keep questions concise so the wizard remains easy to review. If it is unavailable, ask concise ordinary questions instead. If the user cancels, do not guess the missing decision.
 
 ### 3. Produce a decision-complete design
 

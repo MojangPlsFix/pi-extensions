@@ -45,7 +45,7 @@ function result(details: AskDetails) {
 }
 
 export function appendStructuredQuestionInstructions(systemPrompt: string): string {
-  return `${systemPrompt}\n\n## Structured user questions\nWhen progress depends on a user decision, missing requirement, preference, or clarification, use the ask_user_question tool instead of asking in ordinary prose. Offer concise options, use multiSelect when several choices may apply, and permit a custom answer when the user may need to state constraints or exceptions. Do not use the tool for rhetorical questions.`;
+  return `${systemPrompt}\n\n## Structured user questions\nWhen progress depends on a user decision, missing requirement, preference, or clarification, use the ask_user_question tool instead of asking in ordinary prose. Offer concise options, use multiSelect when several choices may apply, and permit custom details when the user may need to state constraints or exceptions. In the interactive TUI, the user can press Tab on a highlighted option to add details; keep predefined option labels distinct from those details. Do not use the tool for rhetorical questions.`;
 }
 
 export default function askUserQuestionExtension(pi: ExtensionAPI): void {
@@ -57,10 +57,12 @@ export default function askUserQuestionExtension(pi: ExtensionAPI): void {
     name: "ask_user_question",
     label: "Ask User",
     description:
-      "Ask structured, reviewable user questions rather than guessing; supports choices, multi-select, and custom answers.",
+      "Ask structured, reviewable user questions rather than guessing; supports choices, multi-select, and separate custom details.",
     parameters: AskUserQuestionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return result(await executeQuestions(params, ctx.hasUI ? ctx.ui : undefined));
+      return result(
+        await executeQuestions(params, ctx.hasUI ? ctx.ui : undefined, { tui: ctx.mode === "tui" }),
+      );
     },
     renderCall(args, theme: Theme) {
       const count = Array.isArray(args.questions) ? args.questions.length : 0;

@@ -10,7 +10,107 @@ function scriptedUI(responses: Array<string | boolean | undefined>): QuestionUI 
   };
 }
 
+function tuiHarness() {
+  let component: { handleInput(data: string): void; render(width: number): string[] } | undefined;
+  const custom = <T>(factory: any): Promise<T> =>
+    new Promise<T>((resolve) => {
+      component = factory(
+        { requestRender() {} },
+        {
+          fg: (_color: string, text: string) => text,
+          bg: (_color: string, text: string) => text,
+          bold: (text: string) => text,
+        },
+        {},
+        (value: unknown) => resolve(value as T),
+      );
+    });
+  return {
+    ui: { ...scriptedUI([]), custom },
+    get component() {
+      return component;
+    },
+  };
+}
+
 describe("ask_user_question", () => {
+  it("keeps predefined answer and TUI details separate", async () => {
+    const harness = tuiHarness();
+    const result = executeQuestions(
+      {
+        questions: [{ question: "Color?", options: [{ label: "a" }] }],
+      },
+      harness.ui,
+      { tui: true },
+    );
+    await Promise.resolve();
+    expect(harness.component).toBeDefined();
+
+    harness.component!.handleInput("\t");
+    for (const character of "and I want it pink") harness.component!.handleInput(character);
+    harness.component!.handleInput("\r");
+    await expect(result).resolves.toMatchObject({
+      cancelled: false,
+      answers: [{ kind: "option", answer: "a", custom: "and I want it pink" }],
+    });
+  });
+
+  it("reviews an empty multi-select as unanswered and preserves a null answer on Proceed", async () => {
+    const harness = tuiHarness();
+    const result = executeQuestions(
+      {
+        questions: [{ question: "Targets?", multiSelect: true, options: [{ label: "Linux" }] }],
+      },
+      harness.ui,
+      { tui: true },
+    );
+    await Promise.resolve();
+    expect(harness.component).toBeDefined();
+
+    harness.component!.handleInput("\u001b[B");
+    harness.component!.handleInput("\u001b[B");
+    harness.component!.handleInput("\r");
+    expect(harness.component!.render(80).join("\\n")).toContain("Unanswered: Q1");
+    harness.component!.handleInput("\u001b[C");
+    harness.component!.handleInput("\r");
+
+    await expect(result).resolves.toMatchObject({
+      cancelled: false,
+      answers: [{ kind: "multi", answer: null, selected: [] }],
+    });
+  });
+
+  it("does not submit a committed option after changing its highlight without recommitting", async () => {
+    const harness = tuiHarness();
+    const result = executeQuestions(
+      {
+        questions: [
+          { question: "First?", options: [{ label: "a" }, { label: "b" }] },
+          { question: "Second?", options: [{ label: "x" }] },
+        ],
+      },
+      harness.ui,
+      { tui: true },
+    );
+    await Promise.resolve();
+    expect(harness.component).toBeDefined();
+
+    harness.component!.handleInput("\r");
+    harness.component!.handleInput("\u001b[D");
+    harness.component!.handleInput("\u001b[B");
+    harness.component!.handleInput("\u001b[C");
+    harness.component!.handleInput("\r");
+    harness.component!.handleInput("\u001b[C");
+    harness.component!.handleInput("\r");
+
+    await expect(result).resolves.toMatchObject({
+      cancelled: false,
+      answers: [
+        { kind: "option", answer: null },
+        { kind: "option", answer: "x" },
+      ],
+    });
+  });
   it("returns a reviewed single selection", async () => {
     const details = await executeQuestions(
       { questions: [{ question: "Ship?", options: [{ label: "Yes", preview: "release" }] }] },

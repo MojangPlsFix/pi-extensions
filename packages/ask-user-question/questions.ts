@@ -1,4 +1,4 @@
-import { askMany, askOne, type QuestionUI } from "./question-ui.js";
+import { executeQuestionUI, type QuestionUI } from "./question-ui.js";
 
 const reservedLabels = new Set(["other…", "done", "add custom answer…", "edit custom answer…"]);
 
@@ -70,20 +70,16 @@ export function validateQuestions(questions: Question[]): AskError | undefined {
   return undefined;
 }
 
-export async function executeQuestions(params: unknown, ui?: QuestionUI): Promise<AskDetails> {
+export async function executeQuestions(
+  params: unknown,
+  ui?: QuestionUI,
+  options: { tui?: boolean } = {},
+): Promise<AskDetails> {
   if (!ui) return { answers: [], cancelled: false, error: "no_ui" };
   const questions = parseQuestions(params);
   if (!questions) return { answers: [], cancelled: false, error: "malformed_parameters" };
   const error = validateQuestions(questions);
   if (error) return { answers: [], cancelled: false, error };
 
-  const answers: Answer[] = [];
-  for (const [questionIndex, question] of questions.entries()) {
-    const answer = question.multiSelect
-      ? await askMany(question, questionIndex, ui)
-      : await askOne(question, questionIndex, ui);
-    if (!answer) return { answers, cancelled: true };
-    answers.push(answer);
-  }
-  return { answers, cancelled: false };
+  return executeQuestionUI(questions, ui, options.tui === true);
 }
