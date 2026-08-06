@@ -6,7 +6,7 @@ Web Search registers one `search` tool for bounded web and programming-documenta
 - `openai-codex` uses native `POST /codex/alpha/search` with refreshed Pi OAuth.
 - Other providers return an actionable availability error. The tool does not use a silent fallback.
 
-The extension does not retain `web_search` or `code_search` aliases. Use the optional `kind: "web" | "code"` value to select retrieval type. The input also accepts `prompt`, `query`, or `queries`, recency and domain filters, source-page inspection, an output budget, and a model override. `reasoningEffort` applies only to the Copilot CLI backend.
+The extension does not retain `web_search` or `code_search` aliases. Use the optional `kind: "web" | "code"` value to select retrieval type. The input also accepts `prompt`, `query`, or `queries`, recency and domain filters, source-page inspection, an output budget, and a model override. `reasoningEffort` is retained for compatibility. Copilot always uses effort `none`.
 
 ## Retrieval and feedback
 
@@ -18,7 +18,11 @@ The TUI identifies the selected backend first. It then shows a compact completio
 
 The extension does not contact either backend during Pi startup.
 
-For Copilot, install the CLI and run `copilot login`. Retrieval uses `gpt-5.6-luna` with effort `none` by default. The extension validates arguments and passes them without a shell. Cancellation reaches the child process. Web searches require Copilot to use the native `github-mcp-server/web_search` tool. The extension does not return an unverified fallback when that call is missing or fails. Each search runs for at most 180,000 milliseconds by default. Set `PI_COPILOT_SEARCH_TIMEOUT_MS` to a positive integer to change the limit. A timed-out child receives `SIGTERM`. The extension sends `SIGKILL` after a short grace period when needed.
+For Copilot, install the CLI and run `copilot login`. Retrieval uses `gpt-5.6-luna` with effort `none` for every search.
+
+The extension validates arguments and passes them without a shell. Cancellation reaches the child process. Web searches require Copilot to use the native `github-mcp-server/web_search` tool. Web mode exposes only web retrieval tools. It enables `web_fetch` when `includeContent` is true. This prevents unrelated tools from adding work to a search. The extension does not return an unverified fallback when the web search fails.
+
+The timeout is an inactivity limit of 600,000 milliseconds (10 minutes) by default. Copilot output resets the timer. Set `PI_COPILOT_SEARCH_TIMEOUT_MS` to a positive integer to change the limit. A timed-out child receives `SIGTERM`. The extension sends `SIGKILL` after a short grace period when needed.
 
 For Codex, authenticate with `/login openai-codex`. Pi refreshes OAuth immediately before the native request. It sends the credential only to the trusted HTTPS `chatgpt.com` endpoint. Authentication failures, unsafe endpoint overrides, HTTP failures, malformed responses, empty results, and unsupported providers produce clear errors. The extension does not expose credentials, request headers, OAuth claims, or raw backend payloads.
 

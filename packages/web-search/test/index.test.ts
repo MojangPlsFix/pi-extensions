@@ -43,7 +43,7 @@ async function fakeCopilot(): Promise<string> {
   const executable = join(directory, "copilot");
   await writeFile(
     executable,
-    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(97);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nconst request = prompt.split('Request:\\n').at(-1) || '';\nconst emitAnswer = () => console.log(JSON.stringify({type:'assistant.message',data:{content: request.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\nif (request.includes('web-fail')) {\n  console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n  console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',result:{isError:true}}}));\n  emitAnswer();\n} else if (request.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nelse if (request.includes('wait')) setTimeout(() => emitAnswer(), 5000);\nelse {\n  const web = prompt.includes('github-mcp-server/web_search') && !request.includes('skip-web');\n  if (web) {\n    console.log(JSON.stringify({type:'assistant.turn_start',data:{}}));\n    console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n    console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));\n  }\n  emitAnswer();\n}\n`,
+    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(97);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nconst request = prompt.split('Request:\\n').at(-1) || '';\nconst emitAnswer = () => console.log(JSON.stringify({type:'assistant.message',data:{content: request.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\nif (request.includes('web-fail')) {\n  console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n  console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',result:{isError:true}}}));\n  emitAnswer();\n} else if (request.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nelse if (request.includes('progress-wait')) {\n  let ticks = 0;\n  const interval = setInterval(() => {\n    console.log(JSON.stringify({type:'assistant.message',data:{content:'progress'}}));\n    if (++ticks === 4) { clearInterval(interval); emitAnswer(); }\n  }, 50);\n} else if (request.includes('wait')) setTimeout(() => emitAnswer(), 5000);\nelse {\n  const web = prompt.includes('github-mcp-server/web_search') && !request.includes('skip-web');\n  if (web) {\n    console.log(JSON.stringify({type:'assistant.turn_start',data:{}}));\n    console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n    console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));\n  }\n  emitAnswer();\n}\n`,
   );
   await chmod(executable, 0o755);
   return executable;
@@ -143,8 +143,9 @@ describe("unified search interface", () => {
   it("includes native web-search guidance without changing code-search prompts", () => {
     const webPrompt = promptFor(normalizeSearchParams({ query: "latest release" }));
     expect(webPrompt).toContain("native github-mcp-server/web_search tool");
+    expect(webPrompt).toContain("Use no extended reasoning");
     expect(webPrompt).toContain("Search at least one relevant current source");
-    expect(webPrompt).toContain("minimum number of web tool calls needed");
+    expect(webPrompt).toContain("no more than 8 web tool calls");
     expect(webPrompt).toContain("do not provide an unverified fallback answer from memory");
     expect(promptFor(normalizeSearchParams({ query: "API docs", kind: "code" }))).not.toContain(
       "github-mcp-server/web_search",
@@ -184,7 +185,7 @@ describe("Copilot CLI backend", () => {
     ).rejects.toThrow("Install and authenticate");
   });
 
-  it("uses cheap defaults unless model and effort are explicit", () => {
+  it("always uses no reasoning for Copilot retrieval", () => {
     expect(buildCopilotArguments("code", { query: "docs" })).toEqual(
       expect.arrayContaining([
         "--model",
@@ -193,13 +194,28 @@ describe("Copilot CLI backend", () => {
         DEFAULT_COPILOT_SEARCH_EFFORT,
       ]),
     );
+    expect(buildCopilotArguments("web", { query: "docs" })).toEqual(
+      expect.arrayContaining(["--available-tools=web_search"]),
+    );
+    expect(buildCopilotArguments("web", { query: "docs", includeContent: true })).toEqual(
+      expect.arrayContaining(["--available-tools=web_search,web_fetch"]),
+    );
+    expect(buildCopilotArguments("code", { query: "docs" })).not.toContain(
+      "--available-tools=web_search",
+    );
     expect(
       buildCopilotArguments("code", {
         query: "docs",
         model: "gpt-5.4",
         reasoningEffort: "high",
       }),
-    ).toEqual(expect.arrayContaining(["--model", "gpt-5.4", "--effort", "high"]));
+    ).toEqual(expect.arrayContaining(["--model", "gpt-5.4", "--effort", "none"]));
+    expect(
+      buildCopilotArguments("code", {
+        query: "docs",
+        reasoningEffort: "high",
+      }),
+    ).not.toContain("high");
   });
 
   it("emits backend-specific progress, bounds output, and keeps CLI payloads out of errors", async () => {
@@ -233,12 +249,20 @@ describe("Copilot CLI backend", () => {
       runCopilotSearch("code", { query: "wait" }, undefined, executable, (status) =>
         statuses.push(status),
       ),
-    ).rejects.toThrow("timed out after 20ms");
-    expect(statuses).toContain("Copilot search timed out after 20ms; stopping…");
+    ).rejects.toThrow("timed out after 20ms without output");
+    expect(statuses).toContain("Copilot search timed out after 20ms without output; stopping…");
     expect(copilotSearchTimeoutMs({})).toBe(DEFAULT_COPILOT_SEARCH_TIMEOUT_MS);
     expect(copilotSearchTimeoutMs({ PI_COPILOT_SEARCH_TIMEOUT_MS: "invalid" })).toBe(
       DEFAULT_COPILOT_SEARCH_TIMEOUT_MS,
     );
+  });
+
+  it("resets the inactivity timeout when Copilot continues to emit output", async () => {
+    const executable = await fakeCopilot();
+    vi.stubEnv("PI_COPILOT_SEARCH_TIMEOUT_MS", "250");
+    await expect(
+      runCopilotSearch("code", { query: "progress-wait" }, undefined, executable),
+    ).resolves.toContain("done");
   });
 
   it("requires a successful native web_search invocation for web mode", async () => {

@@ -11,7 +11,7 @@ import {
   type SearchParams,
 } from "./search.js";
 
-export const DEFAULT_COPILOT_SEARCH_TIMEOUT_MS = 180_000;
+export const DEFAULT_COPILOT_SEARCH_TIMEOUT_MS = 600_000;
 const COPILOT_SEARCH_KILL_GRACE_MS = 5_000;
 const MAX_NODE_TIMEOUT_MS = 2_147_483_647;
 
@@ -37,7 +37,12 @@ export function copilotSearchTimeoutMs(environment: NodeJS.ProcessEnv = process.
 export function buildCopilotArguments(mode: SearchMode, params: SearchParams): string[] {
   const normalized = normalizeSearchParams({ ...params, kind: mode });
   const model = normalized.model ?? DEFAULT_COPILOT_SEARCH_MODEL;
-  const effort = normalized.reasoningEffort ?? DEFAULT_COPILOT_SEARCH_EFFORT;
+  // Search is retrieval-only. Never allow a caller to raise Copilot reasoning effort.
+  const effort = DEFAULT_COPILOT_SEARCH_EFFORT;
+  const availableTools =
+    mode === "web"
+      ? `--available-tools=web_search${normalized.includeContent ? ",web_fetch" : ""}`
+      : undefined;
   return [
     "-p",
     promptFor(normalized),
@@ -49,6 +54,7 @@ export function buildCopilotArguments(mode: SearchMode, params: SearchParams): s
     model,
     "--effort",
     effort,
+    ...(availableTools ? [availableTools] : []),
     "--output-format",
     "json",
   ];
@@ -296,6 +302,28 @@ export async function runCopilotSearch(
     if (event) handleCopilotEvent(event, state, model, onStatus);
   };
 
+  let timedOut = false;
+  let childClosed = false;
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  let killHandle: NodeJS.Timeout | undefined;
+  const timeoutMs = copilotSearchTimeoutMs();
+  const stopForTimeout = () => {
+    if (childClosed) return;
+    timedOut = true;
+    onStatus?.(`Copilot search timed out after ${timeoutMs}ms without output; stopping…`);
+    child.kill("SIGTERM");
+    killHandle = setTimeout(() => {
+      if (!childClosed) child.kill("SIGKILL");
+    }, COPILOT_SEARCH_KILL_GRACE_MS);
+    killHandle.unref?.();
+  };
+  const resetTimeout = () => {
+    if (childClosed || timedOut) return;
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+    timeoutHandle = setTimeout(stopForTimeout, timeoutMs);
+    timeoutHandle.unref?.();
+  };
+
   const stdoutStream = child.stdout;
   const stderrStream = child.stderr;
   if (!stdoutStream || !stderrStream) {
@@ -305,6 +333,7 @@ export async function runCopilotSearch(
   stdoutStream.setEncoding("utf8");
   stderrStream.setEncoding("utf8");
   stdoutStream.on("data", (chunk: string) => {
+    resetTimeout();
     stdout = (stdout + chunk).slice(-maximumOutputCharacters * 2);
     stdoutRemainder = (stdoutRemainder + chunk).slice(-maximumOutputCharacters * 2);
     let newlineIndex = stdoutRemainder.indexOf("\n");
@@ -316,13 +345,7 @@ export async function runCopilotSearch(
     }
   });
   // Consume stderr to avoid filling the pipe, but never expose backend stderr.
-  stderrStream.on("data", () => undefined);
-
-  let timedOut = false;
-  let childClosed = false;
-  let timeoutHandle: NodeJS.Timeout | undefined;
-  let killHandle: NodeJS.Timeout | undefined;
-  const timeoutMs = copilotSearchTimeoutMs();
+  stderrStream.on("data", () => resetTimeout());
 
   try {
     let exitCode: number | null;
@@ -342,17 +365,7 @@ export async function runCopilotSearch(
             resolve(code);
           }
         });
-        timeoutHandle = setTimeout(() => {
-          if (childClosed) return;
-          timedOut = true;
-          onStatus?.(`Copilot search timed out after ${timeoutMs}ms; stopping…`);
-          child.kill("SIGTERM");
-          killHandle = setTimeout(() => {
-            if (!childClosed) child.kill("SIGKILL");
-          }, COPILOT_SEARCH_KILL_GRACE_MS);
-          killHandle.unref?.();
-        }, timeoutMs);
-        timeoutHandle.unref?.();
+        resetTimeout();
       });
     } catch (error) {
       if (signal?.aborted) throw abortError();
@@ -365,7 +378,7 @@ export async function runCopilotSearch(
 
     if (timedOut) {
       throw new Error(
-        `Copilot CLI search timed out after ${timeoutMs}ms. Increase PI_COPILOT_SEARCH_TIMEOUT_MS or retry later.`,
+        `Copilot CLI search timed out after ${timeoutMs}ms without output. Retry with a narrower request, omit page inspection, or increase PI_COPILOT_SEARCH_TIMEOUT_MS.`,
       );
     }
     if (exitCode !== 0)

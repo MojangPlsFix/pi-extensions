@@ -24,13 +24,14 @@ The local `copilot` CLI and `copilot login` are required only when the Search in
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
 - `PI_DISABLE_COPILOT_COMPACTION_BASE_URL_FIX=1`: disables the Copilot compaction workaround.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
+- `PI_COPILOT_SEARCH_TIMEOUT_MS`: Copilot CLI inactivity limit in milliseconds. Copilot output resets the timer. The default is 600,000 (10 minutes).
 - `PI_SUBAGENT_CONTEXT_MODE_DIR`: explicit local Context Mode installation for optional child integration.
 - `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`: documented Pi locations for Stats and trusted user-global Subagent definitions. New Subagent transcripts use `<agent-dir>/subagents/sessions`. Stats also scans normal and legacy session trees.
 - `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`: together select the Herdr backend. A partial set produces a configuration error.
 
 ## Optional capabilities
 
-- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`. It then requests the trusted GitHub Copilot quota endpoint. The Copilot CLI is required only when `search` runs under `github-copilot`. Its default model is `gpt-5.6-luna` with effort `none`, unless you override it.
+- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`. It then requests the trusted GitHub Copilot quota endpoint. The Copilot CLI is required only when `search` runs under `github-copilot`. Its model is `gpt-5.6-luna` with effort `none` for every search.
 - **OpenAI Codex OAuth:** Usage Meter and Search require OpenAI Codex OAuth under `openai-codex`. Run `/login openai-codex`. Pi refreshes the credential for each direct request. Usage Meter requests subscription quota from the trusted HTTPS `chatgpt.com/backend-api/wham/usage` endpoint. Neither feature needs the Codex CLI. Both features reject plaintext and custom-host endpoints.
 - **Context Mode:** Subagents discover Context Mode only when it is installed. A missing installation does not block normal RPC Subagents. Children use the reviewed narrow bridge, not the full Context Mode extension.
 - **RTK:** Worker children detect RTK 0.23.0 or newer. A missing, old, failed, or timed-out probe does not block a Worker. Native command execution remains available.

@@ -59,7 +59,7 @@ export default function searchExtension(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "search",
     label: "Search",
-    description: `Retrieve external evidence using the active provider: GitHub Copilot uses the local Copilot CLI (${DEFAULT_COPILOT_SEARCH_MODEL}/${DEFAULT_COPILOT_SEARCH_EFFORT} defaults), while OpenAI Codex uses native /codex/alpha/search with refreshed OAuth. Other providers return an availability error. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
+    description: `Retrieve external evidence using the active provider: GitHub Copilot uses the local Copilot CLI (${DEFAULT_COPILOT_SEARCH_MODEL} with effort ${DEFAULT_COPILOT_SEARCH_EFFORT} for every search), while OpenAI Codex uses native /codex/alpha/search with refreshed OAuth. Other providers return an availability error. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
     promptSnippet:
       "Search current web sources or programming documentation through the active provider",
     parameters: searchParameters,

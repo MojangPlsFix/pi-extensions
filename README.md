@@ -43,7 +43,7 @@ The package installs all 14 extension entrypoints. Missing optional tools do not
 - **Context Mode:** Subagents discover Context Mode only for the optional child integration.
 - **RTK and UV:** Worker children detect RTK 0.23 or newer and a working UV executable. A missing tool does not block a Worker. Native Pi Bash remains the fallback.
 
-Search uses `gpt-5.6-luna` with no reasoning effort by default for Copilot CLI retrieval. Codex uses native `/codex/alpha/search`. Both backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because neither backend exposes usage or cost for local Pi totals.
+Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrieval. Codex uses native `/codex/alpha/search`. Both backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because neither backend exposes usage or cost for local Pi totals.
 
 ### Stats periods and viewer
 
