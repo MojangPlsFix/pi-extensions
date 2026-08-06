@@ -1,7 +1,11 @@
 # Ask User Question
 
-Registers `ask_user_question`, a compact structured dialog for decisions that should not be guessed.
+`ask_user_question` gives the model a structured dialog for decisions that it should not guess.
 
-The tool supports one-choice and multi-select questions, optional free-form answers, review before submission, and cancellation. In the TUI it uses one wizard for all questions: Tab opens details for the highlighted option, Enter commits, and left/right moves between questions while preserving selections and custom drafts. If a question was skipped, the review screen offers Go back or Proceed. Predefined answers retain their option label while custom details are returned separately; choosing only a custom answer retains `kind: "custom"`, and multi-select answers retain `selected` plus optional `custom`. Non-TUI UI modes keep the select/editor fallback. If Pi has no interactive UI (for example a non-interactive RPC client), it returns a clear `no_ui` result instead of blocking or failing startup.
+The tool supports one-choice, multi-select, and custom questions. It supports review before submission and cancellation. In the TUI, one wizard handles all questions. Use Tab to add details to the highlighted option. Use Enter to submit. Use left and right to move between questions while Pi keeps selections and custom drafts.
 
-Plan Mode can refer to this tool when it is installed, but Plan Mode remains usable when this feature is disabled.
+When you skip a question, the review screen offers Go back or Proceed. Predefined answers keep their option label. Custom details return in a separate field. A custom-only answer uses `kind: "custom"`. A multi-select answer uses `selected` and an optional `custom` field.
+
+Non-TUI modes use the select and editor fallback. A client without interactive UI, such as a non-interactive RPC client, receives a clear `no_ui` result. The tool does not block or fail startup.
+
+Plan Mode can reference this tool when it is installed. Plan Mode remains usable when this feature is disabled.

@@ -1,59 +1,70 @@
 # Configuration
 
-All resources are delivered by one Pi package and can be enabled or disabled with `pi config`. There are no home/work profiles or automatic environment classification.
+One Pi package delivers all resources. Use `pi config` to enable or disable them. The package has no home or work profiles and does not classify environments automatically.
 
 ## Provider-aware behavior
 
-- Usage Meter acts while the active model provider is `github-copilot` or `openai-codex`; the Copilot compaction workaround remains limited to `github-copilot`.
-- The single `search` tool routes at execution time: `github-copilot` uses the authenticated local Copilot CLI, while `openai-codex` uses native `/codex/alpha/search` with Pi's refreshed OAuth. Other providers receive an explicit availability error; there is no cross-provider fallback.
-- Subagents resolve model and thinking policy at spawn time: per-agent `~/.pi/agent/subagents/config.json`, trusted custom-agent frontmatter, Subagent defaults, then a parent snapshot. `inherit` explicitly selects the parent value. Luna is opt-in.
+- Usage Meter runs with the active `github-copilot` or `openai-codex` provider. The Copilot compaction fix runs only with `github-copilot`.
+- The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
+- Subagents resolve the model and thinking policy when they start. Resolution checks per-agent `~/.pi/agent/subagents/config.json`, trusted custom-agent frontmatter, Subagent defaults, and the parent snapshot, in that order. `inherit` selects the parent value. Luna is opt-in.
+
+### Subagent model providers
+
+Subagent model IDs include the provider name. Children start Pi with the selected model. They do not run the `copilot` executable.
+
+| Pi provider | Example Subagent model | Authentication |
+| --- | --- | --- |
+| GitHub Copilot | `github-copilot/gpt-5.6-luna` | Pi's GitHub Copilot login flow or `COPILOT_GITHUB_TOKEN` |
+| OpenAI Codex | `openai-codex/gpt-5.6-luna` | `/login openai-codex` |
+
+The local `copilot` CLI and `copilot login` are required only when the Search integration uses the Copilot CLI. Subagent Workers that use Pi's `github-copilot` provider do not need them.
 
 ## Configuration variables
 
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
-- `PI_DISABLE_COPILOT_COMPACTION_BASE_URL_FIX=1`: disable the Copilot compaction workaround.
+- `PI_DISABLE_COPILOT_COMPACTION_BASE_URL_FIX=1`: disables the Copilot compaction workaround.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
 - `PI_SUBAGENT_CONTEXT_MODE_DIR`: explicit local Context Mode installation for optional child integration.
-- `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`: Pi's documented locations used by Stats and trusted user-global Subagent definitions. New Subagent transcripts live under `<agent-dir>/subagents/sessions`; Stats also scans normal and legacy session trees.
-- `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`: together opt an active Herdr pane into the Subagent backend. A partial set is treated as a configuration error.
+- `PI_CODING_AGENT_DIR` and `PI_CODING_AGENT_SESSION_DIR`: documented Pi locations for Stats and trusted user-global Subagent definitions. New Subagent transcripts use `<agent-dir>/subagents/sessions`. Stats also scans normal and legacy session trees.
+- `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`: together select the Herdr backend. A partial set produces a configuration error.
 
 ## Optional capabilities
 
-- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`, then requests the trusted GitHub Copilot quota endpoint. The Copilot CLI itself is required only when `search` runs under `github-copilot`; its backend defaults to `gpt-5.6-luna` with effort `none` unless overridden.
-- **OpenAI Codex OAuth:** Required when Usage Meter or Search runs under `openai-codex`. Use `/login openai-codex`; Pi resolves and refreshes the credential for each direct request. Usage Meter requests subscription quota directly from the trusted HTTPS `chatgpt.com/backend-api/wham/usage` endpoint, with no Codex CLI dependency. Both features reject plaintext and custom-host endpoints.
-- **Context Mode:** Subagents discover it only when installed. Missing Context Mode does not prevent ordinary RPC subagents. Children use only the reviewed narrow bridge, never the full Context Mode extension.
-- **RTK:** Worker children auto-detect RTK 0.23.0 or newer. Missing, outdated, failed, or timed-out probes are nonfatal and native command execution remains available.
-- **UV:** Worker children require both the packaged UV extension and a successful `uv --version` probe. Unavailable UV falls back to native Pi Bash.
-- **Herdr:** Attached-pane support is selected only after explicit environment and control-plane checks succeed. Normal Subagents use RPC. Current Herdr creates one non-focused `Subagents · <project>` tab, queries geometry for adaptive one-to-four-pane placement, reports bounded task metadata, supports explicit focus from `/agents`, and closes the tab with its final pane. Older installations fall back to adjacent splitting with a visible capability warning.
+- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`. It then requests the trusted GitHub Copilot quota endpoint. The Copilot CLI is required only when `search` runs under `github-copilot`. Its default model is `gpt-5.6-luna` with effort `none`, unless you override it.
+- **OpenAI Codex OAuth:** Usage Meter and Search require OpenAI Codex OAuth under `openai-codex`. Run `/login openai-codex`. Pi refreshes the credential for each direct request. Usage Meter requests subscription quota from the trusted HTTPS `chatgpt.com/backend-api/wham/usage` endpoint. Neither feature needs the Codex CLI. Both features reject plaintext and custom-host endpoints.
+- **Context Mode:** Subagents discover Context Mode only when it is installed. A missing installation does not block normal RPC Subagents. Children use the reviewed narrow bridge, not the full Context Mode extension.
+- **RTK:** Worker children detect RTK 0.23.0 or newer. A missing, old, failed, or timed-out probe does not block a Worker. Native command execution remains available.
+- **UV:** Worker children require the packaged UV extension and a successful `uv --version` probe. When UV is unavailable, Pi uses native Bash.
+- **Herdr:** Attached-pane support requires explicit environment variables and successful control-plane checks. Normal Subagents use RPC. Herdr creates one non-focused `Subagents · <project>` tab, queries geometry for one to four panes, reports bounded task metadata, supports focus through `/agents`, and closes the tab after its final pane closes. Older Herdr versions use adjacent splits and show a capability warning.
 
-Search reports the selected backend immediately and returns bounded output labeled as untrusted external content. Codex structured results are normalized to deduplicated titles, URLs, and snippets; credentials, encrypted output, unknown fields, and raw responses are excluded. Expanded TUI output shows only a bounded source list and short preview. Truncation is explicit.
+Search reports its backend and returns bounded output marked as untrusted external content. Codex results contain deduplicated titles, URLs, and snippets. The extension excludes credentials, encrypted output, unknown fields, and raw responses. The TUI shows a bounded source list and a short preview. The extension marks truncated output.
 
-Copilot CLI and Codex native search can consume provider subscription quota, but their retrieval responses expose no token or monetary usage. Search therefore returns no Pi `usage` or fabricated cost and marks consumption as `provider-accounted`, outside Pi's local totals. Usage Meter and `/stats` display provider quota only as a live snapshot; they never add balances, percentages, or limits to Pi's local token and cost totals. OAuth tokens and authenticated quota payloads are not logged or persisted.
+Copilot CLI and native Codex Search can use provider subscription quota. Neither backend exposes token or monetary usage for this retrieval. Search therefore returns no Pi `usage` or fabricated cost. It marks retrieval as `provider-accounted`, outside Pi's local totals. Usage Meter and `/stats` show provider quota as a live snapshot. They do not add balances, percentages, or limits to Pi's local token and cost totals. The package does not log or persist OAuth tokens or authenticated quota payloads.
 
 ## Subagent configuration
 
-Create `~/.pi/agent/subagents/config.json` (or the corresponding path beneath `PI_CODING_AGENT_DIR`) when roles should use different models. A recommended development setup is:
+Create `~/.pi/agent/subagents/config.json`, or the matching path under `PI_CODING_AGENT_DIR`, when roles need different models. This setup is suitable for development:
 
 ```json
 {
   "agents": {
     "explorer": {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "github-copilot/gpt-5.6-luna",
       "thinking": "low"
     },
     "worker": {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "github-copilot/gpt-5.6-luna",
       "thinking": "high"
     }
   }
 }
 ```
 
-Explorer Luna/low is suitable for inexpensive parallel investigation and review; Worker Luna/high is suitable for the persistent implementation owner. This is a recommended example, not a hard-coded requirement, and the provider must be configured and authenticated. Resolution happens when each child spawns. Open children keep their original model and thinking level. Run `/reload` after editing configuration, then use `subagent_list` or `/agents` to verify the effective model of a newly spawned child.
+Explorer Luna with low thinking uses less quota for parallel investigation and review. Worker Luna with high thinking suits the persistent implementation owner. This example uses GitHub Copilot because it is the active provider on this PC. A Codex installation can replace the model prefix with `openai-codex` and use `/login openai-codex`. This setup is a recommendation, not a requirement. Configure and authenticate the selected provider. Pi resolves the model when each child starts. Existing children keep their model and thinking level. Run `/reload` after you edit the file. Use `subagent_list` or `/agents` to verify a new child.
 
-Configured models and provider authentication are preflighted before child files, processes, or Herdr layouts are allocated. Up to four running/completed children may remain open, including one Worker. Use `subagent_close` or `x` in `/agents` to release completed capacity. Failed and interrupted children release automatically.
+Before Subagents allocates child files, processes, tabs, or panes, it checks the selected model and provider authentication. Up to four children can remain open. Only one can be a Worker. Use `subagent_close` or `x` in `/agents` to release capacity. Failed and interrupted children release capacity automatically.
 
-Optional child resources are configured under `resources` in `defaults` or an agent entry. Built-in mode defaults resolve first, followed by `defaults.resources`, the mode entry, and the exact custom-agent entry. `contextMode`, `rtk`, and `uv` accept `"auto"`, `"enabled"`, or `"disabled"`; requested integrations that are missing only produce diagnostics and never block spawning.
+Optional child resources use `resources` in `defaults` or an agent entry. Resolution checks built-in mode defaults, `defaults.resources`, the mode entry, and the exact custom-agent entry, in that order. `contextMode`, `rtk`, and `uv` accept `"auto"`, `"enabled"`, or `"disabled"`. A missing requested integration produces a diagnostic. It does not block spawning.
 
 ```json
 {
@@ -84,8 +95,8 @@ Optional child resources are configured under `resources` in `defaults` or an ag
 }
 ```
 
-Explorers cannot enable Context execution, Todos, RTK, or UV. Workers may explicitly enable Web Search. Explorer search retrieval uses separately provider-accounted usage. Arbitrary extension and skill paths are prohibited. Capability diagnostics appear in spawn, list, and read results and in expanded `/agents` details.
+Explorers cannot enable Context execution, Todos, RTK, or UV. Workers can enable Web Search. Explorer Search uses separate provider-accounted quota. Arbitrary extension and skill paths are not allowed. Capability diagnostics appear in spawn, list, and read results and in expanded `/agents` details.
 
-The always-visible task-first activity widget is not controlled by Ctrl+O; `/agents` contains full history, reports, Herdr focus, and cleanup. New transcripts are hidden from `/resume` at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the unchanged legacy `<agent-dir>/sessions/subagents` location, so migration is optional.
+The activity widget shows task-first child status. `/agents` contains full history, reports, Herdr focus, and cleanup. New transcripts stay hidden from `/resume` at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the unchanged legacy `<agent-dir>/sessions/subagents` location. You do not need to migrate legacy transcripts.
 
-See feature-level READMEs for specific commands, lifecycle, and security limits. Pi Memory and Session Summary are not supplied by this package.
+See feature-level READMEs for command details, lifecycle rules, and security limits. Pi Memory and Session Summary are not part of this package.

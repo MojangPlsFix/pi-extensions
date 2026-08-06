@@ -1,46 +1,48 @@
 # Subagents
 
-Subagents runs isolated, persistent child Pi sessions for parallel investigation and focused implementation. The parent remains responsible for decisions, review, and integration.
+Subagents run isolated, persistent child Pi sessions for parallel investigation and focused implementation. The parent remains responsible for decisions, review, and integration.
 
 ## Roles
 
-- **Explorer** is the default for read-only code investigation, architecture, documentation, and current web research. Its reviewed tool set does not include file mutation.
-- **Worker** is only for delegated tasks that must modify files. At most one Worker may remain open, and Workers cannot start or resume while Plan Mode is active.
-- Trusted custom agents may be defined as Markdown files in `~/.pi/agent/subagents/agents/`. Project-controlled definitions are intentionally ignored.
+- **Explorer** is the default read-only role. It investigates code, architecture, documentation, and current web topics. Its reviewed tools do not include file mutation.
+- **Worker** handles delegated file changes. At most one Worker can remain open. Workers cannot start or resume while Plan Mode is active.
+- Trusted custom agents can use Markdown files in `~/.pi/agent/subagents/agents/`. The package ignores project-controlled definitions.
 
-Children cannot recursively start Subagents or ask the user directly. They return questions and blockers to the parent.
+Children cannot start their own Subagents or ask users questions. They return questions and blockers to the parent.
 
 ## Models and thinking levels
 
-Model policy is resolved once when the child spawns:
+Pi resolves model policy when the child starts. It checks these sources in order:
 
-1. per-agent settings;
-2. trusted custom-agent frontmatter;
-3. Subagent defaults;
-4. the parent model and thinking level at spawn time.
+1. Per-agent settings.
+2. Trusted custom-agent frontmatter.
+3. Subagent defaults.
+4. The parent model and thinking level at spawn time.
 
-Create `~/.pi/agent/subagents/config.json` to configure roles. This recommended development setup uses inexpensive Luna/low Explorers for parallel investigation and review, and a Luna/high Worker as the persistent implementation owner:
+Create `~/.pi/agent/subagents/config.json` to configure roles. This development setup uses Luna with low thinking for inexpensive investigation and Luna with high thinking for the persistent implementation owner:
 
 ```json
 {
   "agents": {
     "explorer": {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "github-copilot/gpt-5.6-luna",
       "thinking": "low"
     },
     "worker": {
-      "model": "openai-codex/gpt-5.6-luna",
+      "model": "github-copilot/gpt-5.6-luna",
       "thinking": "high"
     }
   }
 }
 ```
 
-This is a reproducible recommendation, not a hard-coded requirement. The selected provider must be configured and authenticated. Model resolution occurs when a child spawns; existing open children retain their original model and thinking level. Run `/reload` after changing the file, then use `subagent_list` or `/agents` to verify the effective model of newly spawned children.
+This setup is a recommendation, not a hard-coded requirement. The example uses Pi's built-in `github-copilot` provider. Authenticate it through Pi's GitHub Copilot login flow or `COPILOT_GITHUB_TOKEN`. A Codex installation can use `openai-codex/gpt-5.6-luna` after `/login openai-codex`. The `copilot` CLI and `copilot login` are required only for the separate Search integration. They are not required for Subagent children.
 
-`inherit` explicitly takes the parent snapshot immediately; later parent model changes do not affect an open child. Luna is opt-in—there is no built-in Luna default. Before allocating transcript directories, child processes, tabs, or panes, Subagents verifies that an explicitly resolved model exists and that Pi can resolve its provider authentication. Invalid configuration or missing auth fails with an actionable error.
+Pi resolves a model when a child starts. Existing children keep their model and thinking level. `inherit` takes the parent snapshot at that time. Later parent model changes do not affect an open child. Luna is opt-in. Pi has no built-in Luna default.
 
-Custom definition frontmatter may include `model` and `thinking`:
+Before it allocates transcript directories, child processes, tabs, or panes, Subagents checks that Pi can resolve the selected model and provider authentication. Invalid configuration or missing authentication produces an actionable error.
+
+Custom definition frontmatter can include `model` and `thinking`:
 
 ```md
 ---
@@ -57,82 +59,84 @@ Review the delegated scope and return evidence without modifying files.
 
 | Tool | Purpose |
 | --- | --- |
-| `subagent_spawn` | Start an Explorer by default or an explicitly selected trusted role. Returns after prompt acceptance. |
-| `subagent_send` | Queue non-destructive guidance or resume a completed/open child. |
-| `subagent_wait` | Wait for one or all currently running children to settle. |
-| `subagent_list` | Show roles, model policy, capacity, backend capabilities, lifecycle guidance, and all known children. |
-| `subagent_read` | Read the latest report, status, usage, and diagnostics. |
-| `subagent_interrupt` | Interrupt a running child and immediately release its open capacity. |
-| `subagent_close` | Explicitly terminate transport and pane state while retaining the report for later reads. |
+| `subagent_spawn` | Starts an Explorer by default or a trusted role that you select. It returns after prompt acceptance. |
+| `subagent_send` | Queues non-destructive guidance or resumes an open child. |
+| `subagent_wait` | Waits for one or all running children to settle. |
+| `subagent_list` | Shows roles, model policy, capacity, backend capabilities, lifecycle guidance, and known children. |
+| `subagent_read` | Reads the latest report, status, usage, and diagnostics. |
+| `subagent_interrupt` | Stops a running child and releases its open capacity. |
+| `subagent_close` | Terminates transport and pane state while it keeps the report available. |
 
-Continue independent parent work after spawning when useful instead of waiting immediately. Read completed reports and close agents when no follow-up is needed.
+Continue independent parent work after you spawn a child. Read completed reports. Close children when you do not need follow-up.
 
 ## Lifecycle and capacity
 
-Up to four Subagents may remain **open**, with at most one open Worker.
+Up to four Subagents can remain open. Only one can be a Worker.
 
-- `running`: an active turn; open and consuming capacity.
-- `completed`: report ready and retained for follow-ups; still open and consuming capacity.
-- `failed` / `interrupted`: recent history; transport and capacity are released immediately.
-- `closed`: report remains readable; transport is gone and capacity is free.
+- `running`: the child has an active turn and uses capacity.
+- `completed`: the report is ready. The child remains open and uses capacity.
+- `failed` or `interrupted`: recent history remains. Transport and capacity release at once.
+- `closed`: the report remains readable. Transport ends and capacity becomes free.
 
-Parent quit, reload, `/new`, `/resume`, and session replacement close every child. Cleanup awaits poller cancellation, RPC termination (including forced-kill fallback), Herdr pane/tab closure, and temporary Context Mode/Todo directory removal.
+Parent quit, reload, `/new`, `/resume`, and session replacement close every child. Cleanup waits for poller cancellation, RPC termination, forced-kill fallback, Herdr pane and tab closure, and temporary Context Mode and Todo directory removal.
 
 ## Activity UI and `/agents`
 
-The working-indicator extension is the sole owner of the Pi-styled inline activity block. It is task-first, uses native theme tokens, shows running children first, then completed/open children, then recent failed/interrupted/closed history, and is limited to four rows. Terminal history is contextual: after the final running or completed agent closes, the inline block disappears while complete history remains in `/agents`. Wide terminals include role, status, model, effort, duration, and current activity; narrow terminals progressively remove low-priority metadata while preserving the task. Animation stops when no child is running. Ctrl+O only expands tool output and does not hide this live block.
+The working-indicator extension owns the Pi-styled inline activity block. It shows running children first, then completed open children, then recent failed, interrupted, or closed history. It shows at most four rows.
 
-Completion cards use Pi's normal custom-message shell. Compact cards show the task, role/status, model, duration, usage, and a report preview; Ctrl+O expands the full report and diagnostics.
+Wide terminals show role, status, model, effort, duration, and current activity. Narrow terminals remove lower-priority metadata but keep the task. Animation stops when no child runs. Ctrl+O expands tool output. It does not hide the activity block.
 
-`/agents` is the complete interactive history. `/agents help` documents the controls:
+Completion cards use Pi's normal custom-message shell. Compact cards show the task, role, status, model, duration, usage, and a report preview. Ctrl+O expands the full report and diagnostics.
 
-- Up/Down: navigate.
+`/agents` shows complete interactive history. `/agents help` documents these controls:
+
+- Up and Down: navigate.
 - Enter: guide or resume an open child.
 - `s`: stop and redirect a running child.
 - `f`: focus its Herdr pane.
 - `x`: close the child and release capacity.
-- `?`: help.
+- `?`: show help.
 - Escape: close the overlay.
 
 ## Herdr
 
-RPC is the normal backend and requires no Herdr installation. A complete explicit Herdr environment (`HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`) selects Herdr only after control-plane verification. An incomplete or broken explicit environment blocks spawning instead of silently falling back.
+RPC is the normal backend. It does not require Herdr. A complete explicit Herdr environment with `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH` selects Herdr after control-plane verification. An incomplete or broken explicit environment blocks spawning. It does not silently select RPC.
 
-Herdr creates one non-focused tab in the parent workspace and labels it from the parent tab: `<parent tab label> - Subagents` (for example, `Orchestrator - Subagents`). If the parent tab label is unavailable, the neutral fallback is `Subagents`; the cwd, project name, and username are never used in the visible label. The parent-to-child mapping remains available in `/agents` and pane metadata as the parent workspace/tab, Subagents tab, and pane IDs.
+Herdr creates one non-focused tab in the parent workspace. It labels the tab from the parent tab, such as `<parent tab label> - Subagents`. If the parent label is unavailable, it uses `Subagents`. The visible label never uses the cwd, project name, or username. `/agents` and pane metadata keep the parent workspace, Subagents tab, and pane IDs.
 
-It never steals focus automatically. One through four open children use the tab's root pane and an adaptive layout: before every split Subagents queries current geometry, chooses the largest owned pane by area, and splits at `0.5` right when the pane is at least twice as wide as tall, otherwise down. Geometry is queried again after closures.
+Herdr never takes focus by itself. One to four open children use the tab root pane and an adaptive layout. Before each split, Subagents checks current geometry. It selects the largest owned pane and splits right at `0.5` when the pane is at least twice as wide as tall. Otherwise, it splits down. It checks geometry again after closures.
 
-Herdr's public CLI currently has no tab insertion or reorder operation, so a newly created Subagents tab is appended after existing tabs in the workspace. Exact placement immediately after the orchestrator requires a future Herdr `--after`/tab-move capability; Subagents does not use undocumented reordering shortcuts.
+Herdr's public CLI has no tab insertion or reorder operation. A new Subagents tab appears after existing workspace tabs. Exact placement after the orchestrator needs a future Herdr `--after` or tab-move capability. Subagents does not use undocumented reorder commands.
 
-Pane titles are bounded task labels such as `Explorer · Trace auth flow`, not internal IDs or full prompts. Guidance and redirects update the title. Metadata reports display role, investigating/implementing/ready/blocked/closed labels, bounded model data, and monotonic sequence numbers. Canonical IDs remain internal for reliable targeting. Use `f` in `/agents` to focus a pane.
+Pane titles use bounded task labels such as `Explorer · Trace auth flow`. They do not use internal IDs or full prompts. Guidance and redirects update the title. Metadata shows the role, an investigating, implementing, ready, blocked, or closed state, bounded model data, and a monotonic sequence number. Canonical IDs remain internal. Use `f` in `/agents` to focus a pane.
 
-Externally deleted panes are treated as released rather than retried forever. The dedicated tab closes after its final owned pane is released. Older Herdr versions without rich layout/metadata APIs use adjacent splits and emit a visible capability warning.
+When another process deletes a pane, Subagents treats it as released. It does not retry forever. The dedicated tab closes after its last owned pane releases. Older Herdr versions use adjacent splits and show a capability warning.
 
 ## Sessions and Stats
 
-New child transcripts are hidden from Pi's built-in `/resume` picker:
+New child transcripts stay hidden from Pi's `/resume` picker:
 
 ```text
 ~/.pi/agent/subagents/sessions/<parent>/<child>/
 ```
 
-Stats scans normal Pi sessions, this hidden tree, and the legacy `~/.pi/agent/sessions/subagents/` tree without double-counting. Legacy transcripts are not moved automatically. To migrate them, stop Pi first, back up both trees, and move individual parent directories manually; migration is optional because Stats continues to read both locations.
+Stats scans normal Pi sessions, this hidden tree, and the legacy `~/.pi/agent/sessions/subagents/` tree. It does not count a child twice. Legacy transcripts stay in place. To migrate them, stop Pi, back up both trees, and move individual parent directories by hand. Migration is optional because Stats reads both locations.
 
-Pi does not expose an extension hook for adding nested children to the built-in `/resume` picker, so durable cross-parent restoration and nested resume are deferred.
+Pi has no extension hook for nested children in the built-in `/resume` picker. Durable cross-parent restoration and nested resume remain deferred.
 
 ## Optional child resources
 
-Child resources are selected by role and can be overridden with a `resources` object in `defaults`, a built-in mode entry, or an exact custom-agent entry. Resolution order is the built-in mode profile, `defaults.resources`, the mode entry (`agents.explorer` or `agents.worker`), then the exact custom-agent entry. Optional integration policies accept `"auto"`, `"enabled"`, or `"disabled"`: auto activates an installed capability, enabled requests it but only warns when unavailable, and disabled skips probing and loading.
+Child resources use a `resources` object in `defaults`, a built-in mode entry, or an exact custom-agent entry. Resolution checks the built-in mode profile, `defaults.resources`, the mode entry, and the exact custom-agent entry, in that order. Optional integrations accept `"auto"`, `"enabled"`, or `"disabled"`. `auto` activates an installed capability. `enabled` requests it and warns when it is unavailable. `disabled` skips probing and loading.
 
 | Resource | Explorer | Worker |
 | --- | --- | --- |
 | Context Mode | Auto-detect | Auto-detect |
-| Context execution | Never | When Context Mode is effective |
+| Context execution | Never | When Context Mode is active |
 | Web Search | Enabled | Disabled by default |
 | Todos | Disabled | Enabled |
 | RTK | Never | Auto-detect |
 | UV Bash policy | Never | Auto-detect |
-| Copilot compaction fix | Enabled, provider-gated | Enabled, provider-gated |
+| Copilot compaction fix | Enabled when the provider supports it | Enabled when the provider supports it |
 
 ```json
 {
@@ -163,10 +167,10 @@ Child resources are selected by role and can be overridden with a `resources` ob
 }
 ```
 
-Explorers remain read-only: Context execution, Todos, RTK, and UV cannot be enabled for them. Explorer Web Search is enabled by default; its retrieval calls consume separately provider-accounted usage. Workers may explicitly enable Web Search. Arbitrary child extension and skill paths are not accepted.
+Explorers remain read-only. They cannot enable Context execution, Todos, RTK, or UV. Explorer Web Search is enabled by default. Its retrieval calls use separate provider-accounted quota. Workers can enable Web Search. Arbitrary child extension and skill paths are not accepted.
 
-Context Mode uses only the package-owned narrow child bridge, not the full extension. Missing Context Mode never blocks spawning. RTK requires version 0.23.0 or newer and fails open; UV requires both the package extension and a working `uv` executable, otherwise native Pi Bash remains active. When both are effective, RTK rewrites before UV validates and executes. Todo and Context Mode state is temporary and isolated. The Copilot compaction fix remains gated by its provider-aware implementation.
+Context Mode uses only the package-owned narrow child bridge. It does not use the full extension. A missing Context Mode installation never blocks a child. RTK needs version 0.23.0 or newer and fails open. UV needs the package extension and a working `uv` executable. When UV is unavailable, native Pi Bash remains active. When both tools are active, RTK rewrites commands before UV validates and executes them. Todo and Context Mode state is temporary and isolated. The Copilot compaction fix remains provider-gated.
 
-Capability state is visible in spawn/read/list results, expanded completion cards, and `/agents`; for example, `UV: enabled → unavailable; native Bash active`.
+Capability state appears in spawn, read, and list results, expanded completion cards, and `/agents`. An example is `UV: enabled → unavailable; native Bash active`.
 
-Subagents are separate processes, not a security boundary. They inherit the user's process credentials so configured providers can authenticate. Review this extension, child prompts, trusted global definitions, delegated tasks, and Worker changes. Herdr receives only reviewed path overrides; parent credentials are not serialized into `herdr --env` arguments. Full prompts are never used as pane labels, but transcript content remains sensitive local data.
+Subagents use separate processes, not a security boundary. They inherit the user's process credentials so configured providers can authenticate. Review this extension, child prompts, trusted global definitions, delegated tasks, and Worker changes. Herdr receives only reviewed path overrides. Parent credentials never enter `herdr --env` arguments. Full prompts never become pane labels. Transcript content remains sensitive local data.

@@ -1,5 +1,19 @@
 # Todos
 
-Provides the `todo` tool and `/todos` interactive browser for durable, project-local work items stored under `.pi/todos`. Todos have Markdown details, tags, status, assignment, and file locking to coordinate concurrent Pi sessions.
+Todos provides the `todo` tool and the `/todos` interactive browser. It stores durable project work items under `.pi/todos`.
 
-Use `todo` actions `list`, `list-all`, `get`, `create`, `update`, `append`, `claim`, `release`, and `delete`. Closed items are retained and can be reopened through `update`. The extension uses only the current project's `.pi/todos` directory; it does not install commands or use external services.
+Items support status, tags, assignment, and file locking for concurrent Pi sessions. Closed items remain available. Use `update` to reopen an item.
+
+Use these actions with `todo`:
+
+- `list`
+- `list-all`
+- `get`
+- `create`
+- `update`
+- `append`
+- `claim`
+- `release`
+- `delete`
+
+The extension uses only the current project directory. It does not install commands or use external services.
