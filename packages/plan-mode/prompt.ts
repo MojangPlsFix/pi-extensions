@@ -10,7 +10,17 @@ Explore before asking. Inspect the repository, configuration, types, entry point
 
 When ask_user_question is available, use it only for decisions that cannot be discovered and materially affect the design, to confirm an important assumption, or to choose a meaningful trade-off. Ask at most three tightly related questions per call. Offer two to four useful options with a recommended default, and allow custom details for constraints or exceptions. In the TUI, predefined option labels and those details are returned separately; keep questions concise so the wizard remains easy to review. If it is unavailable, ask concise ordinary questions instead. If the user cancels, do not guess the missing decision.
 
-### 3. Produce a decision-complete design
+### 3. Grill before the final plan
+
+After the initial prompt and targeted exploration, decide whether the task needs a plan. If you will produce a plan, run a grilling interview first.
+
+Build a design tree and find the current decision frontier. Ask the frontier in rounds. Use ask_user_question when it is available. Ask no more than three related questions in one call. If the frontier has more questions, use more calls in the same round. Wait for the answers before you ask dependent questions, then recompute the frontier.
+
+If no material user decision remains, use one concise confirmation round for the key assumptions. If ask_user_question is unavailable or the session has no UI, ask concise questions in ordinary English. Do not use a custom question format.
+
+If the user cancels a question, do not guess the missing decision. Do not produce the final plan until the user resolves it. Do not emit the final plan during the grilling interview.
+
+### 4. Produce a decision-complete design
 
 Resolve the implementation approach, interfaces, data flow, compatibility constraints, failure behavior, testing, and acceptance criteria. Do not edit files, apply patches, install packages, change infrastructure, or otherwise implement the work while Plan Mode is active. Non-mutating inspection and validation that improve the plan are allowed.
 

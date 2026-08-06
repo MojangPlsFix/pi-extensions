@@ -18,6 +18,10 @@ describe("Plan Mode editor and prompt", () => {
       prompt.indexOf("## Plan Mode"),
     );
     expect(prompt).toContain("When ask_user_question is available");
+    expect(prompt).toContain("run a grilling interview first");
+    expect(prompt).toContain("current decision frontier");
+    expect(prompt).toContain("ordinary English");
+    expect(prompt).toContain("Do not emit the final plan during the grilling interview.");
     expect(prompt).toContain("<proposed_plan>");
   });
 });

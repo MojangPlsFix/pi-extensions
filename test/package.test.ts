@@ -87,8 +87,15 @@ describe("package manifest", () => {
       "./packages/subagents/skills",
       "./packages/bro/skills",
       "./packages/ste-writing/skills",
+      "./packages/grilling/skills",
     ]);
     expect(await readFile("packages/bro/skills/bro/SKILL.md", "utf8")).toContain("name: bro");
+    expect(await readFile("packages/grilling/skills/grilling/SKILL.md", "utf8")).toContain(
+      "name: grilling",
+    );
+    const grillMe = await readFile("packages/grilling/skills/grill-me/SKILL.md", "utf8");
+    expect(grillMe).toContain("name: grill-me");
+    expect(grillMe).toContain("disable-model-invocation: true");
   });
 
   it("links referenced third-party projects and their licenses", async () => {
@@ -110,7 +117,7 @@ describe("package manifest", () => {
       expect(notices).toContain(url);
   });
 
-  it("documents the recommended Luna Subagent roles everywhere users and agents look", async () => {
+  it("documents provider-qualified Luna Subagent roles everywhere users and agents look", async () => {
     const paths = [
       "README.md",
       "docs/configuration.md",
@@ -121,12 +128,15 @@ describe("package manifest", () => {
       const source = await readFile(path, "utf8");
       for (const expected of [
         "~/.pi/agent/subagents/config.json",
-        "openai-codex/gpt-5.6-luna",
+        "github-copilot/gpt-5.6-luna",
         '"thinking": "low"',
         '"thinking": "high"',
       ])
         expect(source, `${path} must contain ${expected}`).toContain(expected);
     }
+    const configuration = await readFile("docs/configuration.md", "utf8");
+    expect(configuration).toContain("openai-codex/gpt-5.6-luna");
+    expect(configuration).toContain("copilot login");
     const skill = await readFile(
       "packages/subagents/skills/subagent-orchestration/SKILL.md",
       "utf8",

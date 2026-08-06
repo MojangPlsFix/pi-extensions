@@ -56,6 +56,7 @@ Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily row
 
 | Skill | Purpose |
 | --- | --- |
+| [Grilling](packages/grilling/) | Runs a design-tree interview before a plan or decision. | `/skill:grilling`, `/skill:grill-me` | Any provider. The structured dialog is optional. |
 | `bro` | Restates the last message in plain human language. |
 | `subagent-orchestration` | Coordinates isolated Explorer and Worker Subagents. |
 | `ste-writing` | Rewrites prose in ASD-STE100 Simplified Technical English. |

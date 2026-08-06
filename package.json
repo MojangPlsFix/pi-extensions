@@ -32,7 +32,8 @@
       "./packages/web-search/skills",
       "./packages/subagents/skills",
       "./packages/bro/skills",
-      "./packages/ste-writing/skills"
+      "./packages/ste-writing/skills",
+      "./packages/grilling/skills"
     ]
   },
   "scripts": {

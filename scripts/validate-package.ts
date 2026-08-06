@@ -17,6 +17,28 @@ const expectedEntrypoints = [
   "packages/usage-meter/index.ts",
 ];
 
+const expectedSkills = [
+  "./packages/web-search/skills",
+  "./packages/subagents/skills",
+  "./packages/bro/skills",
+  "./packages/ste-writing/skills",
+  "./packages/grilling/skills",
+];
+
+const expectedSkillFiles = [
+  { path: "packages/bro/skills/bro/SKILL.md", name: "bro", requiresManualInvocation: false },
+  {
+    path: "packages/grilling/skills/grilling/SKILL.md",
+    name: "grilling",
+    requiresManualInvocation: false,
+  },
+  {
+    path: "packages/grilling/skills/grill-me/SKILL.md",
+    name: "grill-me",
+    requiresManualInvocation: true,
+  },
+] as const;
+
 const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {
   private?: unknown;
   type?: unknown;
@@ -59,13 +81,7 @@ expect(
 );
 expect(new Set(normalized).size === normalized.length, "duplicate extension entrypoint");
 expect(
-  JSON.stringify(packageJson.pi?.skills) ===
-    JSON.stringify([
-      "./packages/web-search/skills",
-      "./packages/subagents/skills",
-      "./packages/bro/skills",
-      "./packages/ste-writing/skills",
-    ]),
+  JSON.stringify(packageJson.pi?.skills) === JSON.stringify(expectedSkills),
   "pi.skills differs from reviewed resources",
 );
 
@@ -81,12 +97,7 @@ for (const entrypoint of expectedEntrypoints) {
   }
 }
 
-for (const skillDirectory of [
-  "packages/web-search/skills",
-  "packages/subagents/skills",
-  "packages/bro/skills",
-  "packages/ste-writing/skills",
-]) {
+for (const skillDirectory of expectedSkills.map((entry) => entry.replace(/^\.\//, ""))) {
   try {
     await access(resolve(skillDirectory));
   } catch {
@@ -94,11 +105,21 @@ for (const skillDirectory of [
   }
 }
 
-try {
-  const broSkill = await readFile("packages/bro/skills/bro/SKILL.md", "utf8");
-  expect(/^name: bro$/m.test(broSkill), "bro skill must declare name: bro");
-} catch {
-  failures.push("missing bro skill: packages/bro/skills/bro/SKILL.md");
+for (const skill of expectedSkillFiles) {
+  try {
+    const source = await readFile(skill.path, "utf8");
+    expect(
+      new RegExp(`^name: ${skill.name}$`, "m").test(source),
+      `${skill.name} skill must declare name: ${skill.name}`,
+    );
+    if (skill.requiresManualInvocation)
+      expect(
+        /^disable-model-invocation: true$/m.test(source),
+        "grill-me skill must disable model invocation",
+      );
+  } catch {
+    failures.push(`missing skill: ${skill.path}`);
+  }
 }
 
 for (const name of ["preinstall", "install", "postinstall", "prepare"]) {
