@@ -54,7 +54,6 @@ export const BUILTIN_RESOURCE_PROFILES: Record<Mode, ResolvedChildResourcePolicy
     todos: false,
     rtk: "disabled",
     uv: "disabled",
-    copilotCompactionFix: true,
   },
   worker: {
     contextMode: "auto",
@@ -63,7 +62,6 @@ export const BUILTIN_RESOURCE_PROFILES: Record<Mode, ResolvedChildResourcePolicy
     todos: true,
     rtk: "auto",
     uv: "auto",
-    copilotCompactionFix: true,
   },
 };
 
@@ -82,15 +80,9 @@ const RESOURCE_KEYS = [
   "todos",
   "rtk",
   "uv",
-  "copilotCompactionFix",
 ] as const;
 const POLICY_KEYS = new Set(["contextMode", "rtk", "uv"]);
-const BOOLEAN_RESOURCE_KEYS = new Set([
-  "contextExecution",
-  "webSearch",
-  "todos",
-  "copilotCompactionFix",
-]);
+const BOOLEAN_RESOURCE_KEYS = new Set(["contextExecution", "webSearch", "todos"]);
 const MODELS_KEYS = new Set(["model", "thinking", "resources"]);
 
 function policy(value: unknown, location: string): AgentModelPolicy {
@@ -142,7 +134,6 @@ function resourceOverrides(value: unknown, location: string): AgentResourceOverr
       if (key === "contextExecution") result.contextExecution = valueForKey;
       else if (key === "webSearch") result.webSearch = valueForKey;
       else if (key === "todos") result.todos = valueForKey;
-      else if (key === "copilotCompactionFix") result.copilotCompactionFix = valueForKey;
     }
   }
   return result;
@@ -292,7 +283,6 @@ export function effectiveAgentResources(
     todos: requested.todos && detected.todos,
     rtk: requested.rtk !== "disabled" && detected.rtk,
     uv: requested.uv !== "disabled" && detected.uv,
-    copilotCompactionFix: requested.copilotCompactionFix && detected.copilotCompactionFix,
   };
 }
 

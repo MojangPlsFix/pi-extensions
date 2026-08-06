@@ -136,7 +136,6 @@ Child resources use a `resources` object in `defaults`, a built-in mode entry, o
 | Todos | Disabled | Enabled |
 | RTK | Never | Auto-detect |
 | UV Bash policy | Never | Auto-detect |
-| Copilot compaction fix | Enabled when the provider supports it | Enabled when the provider supports it |
 
 ```json
 {
@@ -148,8 +147,7 @@ Child resources use a `resources` object in `defaults`, a built-in mode entry, o
         "webSearch": true,
         "todos": false,
         "rtk": "disabled",
-        "uv": "disabled",
-        "copilotCompactionFix": true
+        "uv": "disabled"
       }
     },
     "worker": {
@@ -159,8 +157,7 @@ Child resources use a `resources` object in `defaults`, a built-in mode entry, o
         "webSearch": false,
         "todos": true,
         "rtk": "auto",
-        "uv": "auto",
-        "copilotCompactionFix": true
+        "uv": "auto"
       }
     }
   }
@@ -169,7 +166,7 @@ Child resources use a `resources` object in `defaults`, a built-in mode entry, o
 
 Explorers remain read-only. They cannot enable Context execution, Todos, RTK, or UV. Explorer Web Search is enabled by default. Its retrieval calls use separate provider-accounted quota. Workers can enable Web Search. Arbitrary child extension and skill paths are not accepted.
 
-Context Mode uses only the package-owned narrow child bridge. It does not use the full extension. A missing Context Mode installation never blocks a child. RTK needs version 0.23.0 or newer and fails open. UV needs the package extension and a working `uv` executable. When UV is unavailable, native Pi Bash remains active. When both tools are active, RTK rewrites commands before UV validates and executes them. Todo and Context Mode state is temporary and isolated. The Copilot compaction fix remains provider-gated.
+Context Mode uses only the package-owned narrow child bridge. It does not use the full extension. A missing Context Mode installation never blocks a child. RTK needs version 0.23.0 or newer and fails open. UV needs the package extension and a working `uv` executable. When UV is unavailable, native Pi Bash remains active. When both tools are active, RTK rewrites commands before UV validates and executes them. Todo and Context Mode state is temporary and isolated.
 
 Capability state appears in spawn, read, and list results, expanded completion cards, and `/agents`. An example is `UV: enabled → unavailable; native Bash active`.
 

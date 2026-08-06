@@ -44,14 +44,12 @@ export function reviewedResourcePaths(): {
   webSearch: string;
   webSearchSkill: string;
   uv: string;
-  compaction: string;
 } {
   return {
     todos: packageExtension("todos", "index.ts"),
     webSearch: packageExtension("web-search", "index.ts"),
     webSearchSkill: packageExtension("web-search", "skills", "web-search", "SKILL.md"),
     uv: packageExtension("uv", "index.ts"),
-    compaction: packageExtension("copilot-compaction-fix", "index.ts"),
   };
 }
 
@@ -63,7 +61,6 @@ function falseDetected(): ChildDetectedResources {
     todos: false,
     rtk: false,
     uv: false,
-    copilotCompactionFix: false,
   };
 }
 
@@ -105,7 +102,6 @@ export async function detectChildResources(
   if (requested.webSearch)
     detected.webSearch = exists(paths.webSearch) && exists(paths.webSearchSkill);
   if (requested.todos) detected.todos = exists(paths.todos);
-  if (requested.copilotCompactionFix) detected.copilotCompactionFix = exists(paths.compaction);
   if (requested.rtk !== "disabled")
     detected.rtk = await cachedProbe(cache, `rtk:${cwd}`, () => rtkProbe({ cwd }));
   if (requested.uv !== "disabled") {
@@ -135,11 +131,6 @@ export function childResourceWarnings(
     unavailableWarning("Todos", requested.todos, detected.todos),
     unavailableWarning("RTK", requested.rtk, detected.rtk),
     unavailableWarning("UV", requested.uv, detected.uv),
-    unavailableWarning(
-      "Copilot compaction fix",
-      requested.copilotCompactionFix,
-      detected.copilotCompactionFix,
-    ),
   ].filter((warning): warning is string => Boolean(warning));
 }
 
@@ -153,7 +144,6 @@ export function resourceState(agent: ManagedAgent): ChildEffectiveResources {
     todos: agent.definition.mode === "worker",
     rtk: agent.definition.mode === "worker" ? "auto" : "disabled",
     uv: agent.definition.mode === "worker" ? "auto" : "disabled",
-    copilotCompactionFix: true,
   };
   return effectiveAgentResources(
     requested,
@@ -164,7 +154,6 @@ export function resourceState(agent: ManagedAgent): ChildEffectiveResources {
       todos: true,
       rtk: false,
       uv: false,
-      copilotCompactionFix: true,
     },
   );
 }
@@ -180,7 +169,6 @@ export function childUtilityExtensions(agent?: ManagedAgent): string[] {
   // always pass their resolved resource state and therefore never give Explorer Todos.
   if (resources ? resources.todos : existsSync(paths.todos)) extensions.push(paths.todos);
   if (resources?.webSearch) extensions.push(paths.webSearch);
-  if (resources?.copilotCompactionFix) extensions.push(paths.compaction);
   if (resources?.rtk) extensions.push(join(extensionDirectory(), "child-rtk.ts"));
   else if (resources?.uv) extensions.push(paths.uv);
   return [...new Set(extensions)].filter((path) => existsSync(path));
@@ -244,7 +232,7 @@ export function childEnvironment(
 
 export function childPrompt(agent: AgentDefinition, resources?: ChildEffectiveResources): string {
   const resourceNote = resources
-    ? `Reviewed child resources: Context Mode ${resources.contextMode ? "available" : "unavailable"}; Context execution ${resources.contextExecution ? "available" : "disabled"}; Web Search ${resources.webSearch ? "available" : "unavailable"}; Todos ${resources.todos ? "available" : "disabled"}; RTK ${resources.rtk ? "available" : "disabled"}; UV ${resources.uv ? "available" : "native Bash"}; Copilot compaction fix ${resources.copilotCompactionFix ? "available" : "disabled"}.`
+    ? `Reviewed child resources: Context Mode ${resources.contextMode ? "available" : "unavailable"}; Context execution ${resources.contextExecution ? "available" : "disabled"}; Web Search ${resources.webSearch ? "available" : "unavailable"}; Todos ${resources.todos ? "available" : "disabled"}; RTK ${resources.rtk ? "available" : "disabled"}; UV ${resources.uv ? "available" : "native Bash"}.`
     : "Context Mode is optional. If it is available, use it for large material; otherwise use Pi's built-in read-only tools.";
   return [
     "You are an isolated persistent Pi subagent.",

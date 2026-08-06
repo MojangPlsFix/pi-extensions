@@ -4,7 +4,7 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 
 ## Provider-aware behavior
 
-- Usage Meter runs with the active `github-copilot` or `openai-codex` provider. The Copilot compaction fix runs only with `github-copilot`.
+- Usage Meter runs with the active `github-copilot` or `openai-codex` provider.
 - The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
 - Subagents resolve the model and thinking policy when they start. Resolution checks per-agent `~/.pi/agent/subagents/config.json`, trusted custom-agent frontmatter, Subagent defaults, and the parent snapshot, in that order. `inherit` selects the parent value. Luna is opt-in.
 
@@ -22,7 +22,6 @@ The local `copilot` CLI and `copilot login` are required only when the Search in
 ## Configuration variables
 
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
-- `PI_DISABLE_COPILOT_COMPACTION_BASE_URL_FIX=1`: disables the Copilot compaction workaround.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
 - `PI_COPILOT_SEARCH_TIMEOUT_MS`: Copilot CLI inactivity limit in milliseconds. Copilot output resets the timer. The default is 600,000 (10 minutes).
 - `PI_SUBAGENT_CONTEXT_MODE_DIR`: explicit local Context Mode installation for optional child integration.
@@ -77,8 +76,7 @@ Optional child resources use `resources` in `defaults` or an agent entry. Resolu
         "webSearch": true,
         "todos": false,
         "rtk": "disabled",
-        "uv": "disabled",
-        "copilotCompactionFix": true
+        "uv": "disabled"
       }
     },
     "worker": {
@@ -88,8 +86,7 @@ Optional child resources use `resources` in `defaults` or an agent entry. Resolu
         "webSearch": false,
         "todos": true,
         "rtk": "auto",
-        "uv": "auto",
-        "copilotCompactionFix": true
+        "uv": "auto"
       }
     }
   }

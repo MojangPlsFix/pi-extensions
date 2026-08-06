@@ -14,7 +14,6 @@ export type ChildResourcePolicy = {
   todos?: boolean;
   rtk?: OptionalIntegrationPolicy;
   uv?: OptionalIntegrationPolicy;
-  copilotCompactionFix?: boolean;
 };
 
 /** Fully resolved role policy used by a running child. */
@@ -28,7 +27,6 @@ export type ChildDetectedResources = {
   todos: boolean;
   rtk: boolean;
   uv: boolean;
-  copilotCompactionFix: boolean;
 };
 
 /** Capabilities actually exposed to the child. */

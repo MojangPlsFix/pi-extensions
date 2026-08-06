@@ -73,7 +73,6 @@ export function resourceDiagnostics(agent: ManagedAgent | AgentSnapshot): string
     `Todos: ${requestedText(requested.todos)} → ${state(effective.todos, requested.todos)}`,
     `RTK: ${requested.rtk} → ${state(effective.rtk, requested.rtk)}`,
     `UV: ${requested.uv} → ${state(effective.uv, requested.uv)}${mode === "worker" && !effective.uv ? "; native Bash active" : ""}`,
-    `Copilot compaction fix: ${requestedText(requested.copilotCompactionFix)} → ${state(effective.copilotCompactionFix, requested.copilotCompactionFix)}`,
   ];
   if (agent.resourceWarnings?.length) lines.push(`Warnings: ${agent.resourceWarnings.join(" ")}`);
   return lines;

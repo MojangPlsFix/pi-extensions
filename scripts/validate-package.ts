@@ -15,7 +15,6 @@ const expectedEntrypoints = [
   "packages/working-indicator/index.ts",
   "packages/web-search/index.ts",
   "packages/usage-meter/index.ts",
-  "packages/copilot-compaction-fix/index.ts",
 ];
 
 const packageJson = JSON.parse(await readFile("package.json", "utf8")) as {

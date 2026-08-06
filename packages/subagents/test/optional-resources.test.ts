@@ -75,7 +75,6 @@ function managed(
       todos: resources?.todos ?? false,
       rtk: resources?.rtk ?? false,
       uv: resources?.uv ?? false,
-      copilotCompactionFix: resources?.copilotCompactionFix ?? false,
     },
     resourceWarnings: [],
     activity: [],
@@ -133,7 +132,6 @@ describe("optional child resources", () => {
       todos: false,
       rtk: "disabled" as const,
       uv: "disabled" as const,
-      copilotCompactionFix: false,
     };
     let rtkCalls = 0;
     let uvCalls = 0;
@@ -206,7 +204,6 @@ describe("optional child resources", () => {
       todos: true,
       rtk: false,
       uv: true,
-      copilotCompactionFix: true,
     };
     expect(effectiveAgentResources(requested, detected)).toMatchObject({
       contextMode: true,
@@ -235,7 +232,6 @@ describe("optional child resources", () => {
       todos: false,
       rtk: false,
       uv: false,
-      copilotCompactionFix: true,
     });
     const defaultWorker = managed(worker, {
       contextMode: false,
@@ -244,7 +240,6 @@ describe("optional child resources", () => {
       todos: true,
       rtk: false,
       uv: false,
-      copilotCompactionFix: true,
     });
     const commonArgs = [
       "--no-extensions",
@@ -266,8 +261,6 @@ describe("optional child resources", () => {
       paths.webSearchSkill,
       "--extension",
       paths.webSearch,
-      "--extension",
-      paths.compaction,
     ]);
     expect(childPiArgs(defaultWorker)).toEqual([
       ...commonArgs,
@@ -275,8 +268,6 @@ describe("optional child resources", () => {
       "read,grep,find,ls,todo,bash,edit,write",
       "--extension",
       paths.todos,
-      "--extension",
-      paths.compaction,
     ]);
 
     const all = managed(worker, {
@@ -286,13 +277,11 @@ describe("optional child resources", () => {
       todos: true,
       rtk: true,
       uv: true,
-      copilotCompactionFix: true,
     });
     expect(childUtilityExtensions(all)).toEqual([
       contextExtension,
       paths.todos,
       paths.webSearch,
-      paths.compaction,
       rtkExtension,
     ]);
     expect(childSkillPaths(all)).toEqual([paths.webSearchSkill]);
@@ -314,8 +303,6 @@ describe("optional child resources", () => {
       "--extension",
       paths.webSearch,
       "--extension",
-      paths.compaction,
-      "--extension",
       rtkExtension,
     ]);
   });
@@ -328,13 +315,12 @@ describe("optional child resources", () => {
       todos: true,
       rtk: true,
       uv: true,
-      copilotCompactionFix: true,
     };
     const workerArgs = childPiArgs(managed(worker, resources));
     const tools = workerArgs[workerArgs.indexOf("--tools") + 1];
     expect(tools).toContain("ctx_execute,ctx_batch_execute");
     expect(tools).toContain("search");
-    expect(workerArgs.filter((arg) => arg === "--extension").length).toBe(5);
+    expect(workerArgs.filter((arg) => arg === "--extension").length).toBe(4);
     const explorerArgs = childPiArgs(
       managed(explorer, {
         ...resources,

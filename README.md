@@ -1,6 +1,6 @@
 # Pi Extensions
 
-This repository contains modular extensions for [Pi](https://pi.dev). Install all extensions from one Git repository. General features work with compatible providers. Provider-specific features stay inactive when the provider is unavailable.
+This repository contains modular extensions for [Pi](https://pi.dev). It supports Pi 0.84+. Install all extensions from one Git repository. General features work with compatible providers. Provider-specific features stay inactive when the provider is unavailable.
 
 > **Security:** Pi extensions run with your user permissions. Review this repository and each update before you install it.
 
@@ -33,9 +33,8 @@ pi update --extensions
 | [Working Indicator](packages/working-indicator/) | Owns the visible Pi-styled Subagent activity block and the animated `Hackeln...` summary. | Automatic | Running, ready, and recent Subagents |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
-| [Copilot Compaction Fix](packages/copilot-compaction-fix/) | Applies a Copilot-specific fix for compaction and branch-summary requests. | Automatic | Active `github-copilot` model |
 
-The package installs all 14 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 13 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Usage Meter and Search use OpenAI Codex OAuth for `openai-codex`. Run `/login openai-codex`.

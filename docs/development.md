@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Node.js 22 or newer
-- A current Pi installation for runtime checks
+- Pi 0.84 or newer for runtime checks
 
 Install development tools with `npm install`. Pi supplies peer dependencies at run time. This package has no runtime dependencies and no install lifecycle scripts.
 

@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
 import contextSize from "../packages/context-size/index.js";
-import copilotCompactionFix from "../packages/copilot-compaction-fix/index.js";
 import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
 import notify from "../packages/notify/index.js";
@@ -57,7 +56,6 @@ const entrypoints = [
   workingIndicator,
   webSearch,
   usageMeter,
-  copilotCompactionFix,
 ];
 
 describe("package manifest", () => {

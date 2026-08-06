@@ -23,7 +23,6 @@ function snapshot(): AgentSnapshot {
       todos: true,
       rtk: "auto",
       uv: "enabled",
-      copilotCompactionFix: true,
     },
     detectedResources: {
       contextMode: true,
@@ -32,7 +31,6 @@ function snapshot(): AgentSnapshot {
       todos: true,
       rtk: true,
       uv: false,
-      copilotCompactionFix: true,
     },
     effectiveResources: {
       contextMode: true,
@@ -41,7 +39,6 @@ function snapshot(): AgentSnapshot {
       todos: true,
       rtk: true,
       uv: false,
-      copilotCompactionFix: true,
     },
     resourceWarnings: ["warning: UV unavailable; skipped."],
     activity: [],
