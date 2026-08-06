@@ -50,4 +50,18 @@ Write only the requested text. No preamble, no summary, no closing remarks.
 
 The mechanical rules above are lintable and are what removes slop. Full STE also needs human judgment (the right technical noun, whether a sentence "makes good sense") — a checker cannot certify that, and slop is not about that. This skill fixes the FORM of slop. It cannot make a hollow paragraph true.
 
+## Linter
+
+After you rewrite files in this package repository, run the companion linter before you return the text:
+
+```bash
+uv run --no-project python scripts/ste-lint.py <changed-markdown-files>
+```
+
+Run the command from the repository root. `uv run --no-project` uses UV without installing project dependencies. Use `npm run lint:docs` to check this repository's README and documentation files.
+
+The linter reports heuristic violations and returns success. Review each report. Fix relevant prose violations. Do not change code blocks, identifiers, or command syntax only to lower the score.
+
+The linter source is at [scripts/ste-lint.py](../../../../scripts/ste-lint.py).
+
 Free official standard (do not paste it in full; it is copyrighted): https://asd-ste100.org

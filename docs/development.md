@@ -14,10 +14,13 @@ npm run typecheck
 npm run lint
 npm test
 npm run validate:package
+npm run lint:docs
 npm run check
 ```
 
 `validate:package` checks the explicit Pi manifest, entrypoint shape, and install-safety rules.
+
+`lint:docs` runs `uv run --no-project python scripts/ste-lint.py` and reports heuristic STE violations in the README and documentation files. It does not block Pi runtime use.
 
 ## Local runtime check
 

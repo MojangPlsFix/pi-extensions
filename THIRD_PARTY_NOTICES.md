@@ -23,9 +23,9 @@ The projects below were used as references or inspiration. Their inclusion does 
 
 ## STE Writing Skill
 
-- Source: <https://raw.githubusercontent.com/woosal1337/blog/refs/heads/main/videos/ep01-the-cure-for-ai-slop/ste-writing-skill.md>
+- Sources: [ste-writing-skill.md](https://raw.githubusercontent.com/woosal1337/blog/main/videos/ep01-the-cure-for-ai-slop/ste-writing-skill.md) and [ste-lint.py](https://raw.githubusercontent.com/woosal1337/blog/main/videos/ep01-the-cure-for-ai-slop/ste-lint.py)
 - License: Not specified by the source repository.
-- Relationship: Included at the user's request as a Pi-compatible skill.
+- Relationship: The skill and optional documentation linter were included at the user's request.
 
 ## Pi Skills
 
