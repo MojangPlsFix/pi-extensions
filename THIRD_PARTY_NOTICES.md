@@ -21,6 +21,12 @@ The projects below were used as references or inspiration. Their inclusion does 
 - License: [Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE)
 - Relationship: The Usage Meter extension's direct ChatGPT quota request and rate-limit parsing were informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
 
+## STE Writing Skill
+
+- Source: <https://raw.githubusercontent.com/woosal1337/blog/refs/heads/main/videos/ep01-the-cure-for-ai-slop/ste-writing-skill.md>
+- License: Not specified by the source repository.
+- Relationship: Included at the user's request as a Pi-compatible skill.
+
 ## Pi Skills
 
 - Repository: <https://github.com/badlogic/pi-skills>

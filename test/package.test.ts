@@ -88,6 +88,7 @@ describe("package manifest", () => {
       "./packages/web-search/skills",
       "./packages/subagents/skills",
       "./packages/bro/skills",
+      "./packages/ste-writing/skills",
     ]);
     expect(await readFile("packages/bro/skills/bro/SKILL.md", "utf8")).toContain("name: bro");
   });

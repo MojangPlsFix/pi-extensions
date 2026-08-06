@@ -65,6 +65,7 @@ expect(
       "./packages/web-search/skills",
       "./packages/subagents/skills",
       "./packages/bro/skills",
+      "./packages/ste-writing/skills",
     ]),
   "pi.skills differs from reviewed resources",
 );
@@ -85,6 +86,7 @@ for (const skillDirectory of [
   "packages/web-search/skills",
   "packages/subagents/skills",
   "packages/bro/skills",
+  "packages/ste-writing/skills",
 ]) {
   try {
     await access(resolve(skillDirectory));

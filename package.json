@@ -32,7 +32,8 @@
     "skills": [
       "./packages/web-search/skills",
       "./packages/subagents/skills",
-      "./packages/bro/skills"
+      "./packages/bro/skills",
+      "./packages/ste-writing/skills"
     ]
   },
   "scripts": {

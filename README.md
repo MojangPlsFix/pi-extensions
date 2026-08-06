@@ -67,6 +67,7 @@ provider quota display.
 | --- | --- |
 | `bro` | Restate the last message in plain human language without jargon. |
 | `subagent-orchestration` | Coordinate isolated Explorer and Worker Subagents. |
+| `ste-writing` | Rewrite prose in ASD-STE100 Simplified Technical English. |
 | `web-search` | Guide bounded current web and documentation research. |
 
 ## Configuration
