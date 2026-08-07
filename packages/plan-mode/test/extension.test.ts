@@ -8,7 +8,16 @@ import planModeExtension from "../index.js";
 
 type Handler = (...args: any[]) => any;
 
-function harness(options: { hasUI?: boolean; selection?: string; selections?: string[] } = {}) {
+function harness(
+  options: {
+    hasUI?: boolean;
+    selection?: string;
+    selections?: string[];
+    allModels?: Array<{ provider: string; id: string }>;
+    availableModels?: Array<{ provider: string; id: string }>;
+    scopedModels?: Array<{ model: { provider: string; id: string } }>;
+  } = {},
+) {
   const selections = [...(options.selections ?? [])];
   const commands = new Map<string, Handler>();
   const completions = new Map<string, (prefix: string) => unknown>();
@@ -22,6 +31,7 @@ function harness(options: { hasUI?: boolean; selection?: string; selections?: st
     options?: { triggerTurn?: boolean };
   }> = [];
   const replacementMessages: string[] = [];
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
   let activeTools = ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"];
   const api = {
     registerCommand(
@@ -72,12 +82,16 @@ function harness(options: { hasUI?: boolean; selection?: string; selections?: st
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/tmp/session.jsonl" },
     modelRegistry: {
       refresh: async () => undefined,
-      getAll: () => [{ provider: "provider", id: "model" }],
+      getAll: () => options.allModels ?? [{ provider: "provider", id: "model" }],
+      getAvailable: () => options.availableModels ?? [{ provider: "provider", id: "model" }],
     },
-    scopedModels: [],
+    scopedModels: options.scopedModels ?? [],
     ui: {
       notify: () => undefined,
-      select: async () => selections.shift() ?? options.selection,
+      select: async (title: string, selectOptions: string[]) => {
+        selectCalls.push({ title, options: selectOptions });
+        return selections.shift() ?? options.selection;
+      },
       setEditorText: () => undefined,
     },
     newSession: async (sessionOptions: {
@@ -103,6 +117,7 @@ function harness(options: { hasUI?: boolean; selection?: string; selections?: st
     sent,
     sentMessages,
     replacementMessages,
+    selectCalls,
     context,
     activeTools: () => activeTools,
     emitExtensionEvent(name: string, data: unknown) {
@@ -213,6 +228,41 @@ describe("Plan Mode lifecycle", () => {
     expect(subject.entries.at(-1)?.data).toMatchObject({
       lastReview: { planSourceEntryId: "assistant-review", reviewerId: "plan-reviewer-1" },
     });
+  });
+
+  it("uses only available models and intersects scoped models", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["No, stay in Plan mode", "provider/available"],
+      allModels: [{ provider: "provider", id: "stale" }],
+      availableModels: [
+        { provider: "provider", id: "available" },
+        { provider: "provider", id: "unscoped" },
+      ],
+      scopedModels: [
+        { model: { provider: "provider", id: "available" } },
+        { model: { provider: "provider", id: "missing" } },
+      ],
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "assistant-review-filter",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Filter me\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    subject.onExtensionEvent("pi-extensions:plan-review", (request: any) => {
+      request.accept();
+      request.respond({ reviewerId: "reviewer", model: request.model, report: "Looks good." });
+    });
+
+    await subject.commands.get("plan-review")?.("", subject.context);
+
+    expect(subject.selectCalls.at(-1)?.options).toEqual(["provider/available"]);
   });
 
   it("implements an approved plan in current or fresh context", async () => {

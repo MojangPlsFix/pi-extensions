@@ -3,7 +3,8 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import type { TUI } from "@earendil-works/pi-tui";
+import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
+import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
 import { events, type PlanModeEvent, type SubagentsStatusEvent } from "../../shared/events.js";
 import { configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
@@ -36,6 +37,40 @@ type ReviewResult = {
   report?: string;
   error?: string;
 };
+
+class ReviewerModelSelector extends Container {
+  private readonly selectList: SelectList;
+
+  constructor(
+    private readonly tui: Pick<TUI, "requestRender">,
+    theme: Theme,
+    models: string[],
+    done: (model: string | undefined) => void,
+  ) {
+    super();
+    const items: SelectItem[] = models.map((model) => ({ value: model, label: model }));
+
+    this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+    this.addChild(new Text(theme.fg("accent", theme.bold("Select a model for this plan review"))));
+    this.selectList = new SelectList(items, 10, {
+      selectedPrefix: (text) => theme.fg("accent", text),
+      selectedText: (text) => theme.fg("accent", text),
+      description: (text) => theme.fg("muted", text),
+      scrollInfo: (text) => theme.fg("dim", text),
+      noMatch: (text) => theme.fg("warning", text),
+    });
+    this.selectList.onSelect = (item) => done(item.value);
+    this.selectList.onCancel = () => done(undefined);
+    this.addChild(this.selectList);
+    this.addChild(new Text(theme.fg("dim", "Enter confirm • Esc cancel")));
+    this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+  }
+
+  handleInput(data: string): void {
+    this.selectList.handleInput(data);
+    this.tui.requestRender();
+  }
+}
 
 function modelReference(model: unknown): string | undefined {
   if (!model || typeof model !== "object") return undefined;
@@ -113,21 +148,41 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     }
     try {
       await ctx.modelRegistry.refresh();
+      const available = ctx.modelRegistry
+        .getAvailable()
+        .map((model) => modelReference(model))
+        .filter((model): model is string => Boolean(model));
+      const availableSet = new Set(available);
       const scoped = (ctx.scopedModels ?? [])
         .map((entry) => modelReference(entry.model))
         .filter((model): model is string => Boolean(model));
-      const available = scoped.length
-        ? scoped
-        : ctx.modelRegistry
-            .getAll()
-            .map((model) => modelReference(model))
-            .filter((model): model is string => Boolean(model));
-      const models = [...new Set(available)].sort();
+      const models = [
+        ...new Set(
+          (ctx.scopedModels ?? []).length
+            ? scoped.filter((model) => availableSet.has(model))
+            : available,
+        ),
+      ].sort();
       if (!models.length) {
         ctx.ui.notify(`${reviewFailedPrefix}: no scoped or available models.`, "error");
         return undefined;
       }
-      const selected = await ctx.ui.select("Select a model for this plan review", models);
+      const selected =
+        ctx.mode === "tui"
+          ? await ctx.ui.custom<string | undefined>(
+              (tui, theme, _keybindings, done) =>
+                new ReviewerModelSelector(tui, theme, models, done),
+              {
+                overlay: true,
+                overlayOptions: {
+                  anchor: "center",
+                  width: "80%",
+                  maxHeight: 15,
+                  margin: 1,
+                },
+              },
+            )
+          : await ctx.ui.select("Select a model for this plan review", models);
       if (!selected) {
         ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
         return undefined;
