@@ -10,6 +10,8 @@ export interface PlanReviewState {
   planSourceEntryId: string;
   reviewerId: string;
   model: string;
+  /** Selected Pi thinking effort; absent on reviews persisted before effort selection existed. */
+  thinking?: string;
   reviewedAt: string;
   report: string;
 }
@@ -48,6 +50,7 @@ function isPlanReview(value: unknown): value is PlanReviewState {
     typeof review.planSourceEntryId === "string" &&
     typeof review.reviewerId === "string" &&
     typeof review.model === "string" &&
+    (review.thinking === undefined || typeof review.thinking === "string") &&
     typeof review.reviewedAt === "string" &&
     typeof review.report === "string"
   );

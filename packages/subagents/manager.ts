@@ -109,9 +109,11 @@ export class SubagentManager {
         task?: string;
         model?: string;
         ctx?: ExtensionContext;
+        thinking?: string;
         respond?: (result: {
           reviewerId?: string;
           model?: string;
+          thinking?: string;
           report?: string;
           error?: string;
         }) => void;
@@ -119,7 +121,11 @@ export class SubagentManager {
       };
       if (!request.task || !request.model || !request.ctx || !request.respond) return;
       request.accept?.();
-      void this.reviewPlan(request.task, request.model, request.ctx)
+      const review =
+        request.thinking === undefined
+          ? this.reviewPlan(request.task, request.model, request.ctx)
+          : this.reviewPlan(request.task, request.model, request.ctx, request.thinking);
+      void review
         .then((result) => request.respond?.(result))
         .catch((error: unknown) =>
           request.respond?.({ error: error instanceof Error ? error.message : String(error) }),
@@ -279,15 +285,26 @@ export class SubagentManager {
     task: string,
     explicitModel: string,
     ctx: ExtensionContext,
-  ): Promise<{ reviewerId?: string; model?: string; report?: string; error?: string }> {
+    explicitThinking?: string,
+  ): Promise<{
+    reviewerId?: string;
+    model?: string;
+    thinking?: string;
+    report?: string;
+    error?: string;
+  }> {
     let agent: ManagedAgent | undefined;
     try {
-      agent = await this.spawn("plan-reviewer", task, ctx, { model: explicitModel });
+      agent = await this.spawn("plan-reviewer", task, ctx, {
+        model: explicitModel,
+        ...(explicitThinking ? { thinking: explicitThinking } : {}),
+      });
       await this.wait(agent.id, false, undefined);
       const report = agent.output || agent.error || "(reviewer returned no report)";
       const result = {
         reviewerId: agent.id,
         model: agent.requestedModel ?? explicitModel,
+        ...(agent.requestedThinking ? { thinking: agent.requestedThinking } : {}),
         report,
         ...(agent.status === "failed" ? { error: agent.error ?? "Reviewer failed." } : {}),
       };

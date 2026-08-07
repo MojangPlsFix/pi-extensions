@@ -65,6 +65,7 @@ describe("SubagentManager follow-up lifecycle", () => {
       .mockResolvedValue({
         reviewerId: "plan-reviewer-1",
         model: "provider/model",
+        thinking: "high",
         report: "revise",
       });
     const accept = vi.fn();
@@ -72,6 +73,7 @@ describe("SubagentManager follow-up lifecycle", () => {
     emitEvent(events.planReview, {
       task: "review plan",
       model: "provider/model",
+      thinking: "high",
       ctx: { isIdle: () => true },
       accept,
       respond,
@@ -81,11 +83,15 @@ describe("SubagentManager follow-up lifecycle", () => {
     expect(respond).toHaveBeenCalledWith({
       reviewerId: "plan-reviewer-1",
       model: "provider/model",
+      thinking: "high",
       report: "revise",
     });
-    expect(review).toHaveBeenCalledWith("review plan", "provider/model", {
-      isIdle: expect.any(Function),
-    });
+    expect(review).toHaveBeenCalledWith(
+      "review plan",
+      "provider/model",
+      { isIdle: expect.any(Function) },
+      "high",
+    );
   });
 
   it("derives a neutral parent-aware Herdr tab label", () => {

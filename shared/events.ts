@@ -9,6 +9,22 @@ export type PlanModeEvent = {
   enabled: boolean;
 };
 
+/** Request for the optional Plan Mode reviewer service. Thinking is optional for old senders. */
+export type PlanReviewEvent = {
+  task: string;
+  model: string;
+  thinking?: string;
+  ctx: unknown;
+  accept?: () => void;
+  respond?: (result: {
+    reviewerId?: string;
+    model?: string;
+    thinking?: string;
+    report?: string;
+    error?: string;
+  }) => void;
+};
+
 export type SubagentActivitySnapshot = {
   id: string;
   name: string;

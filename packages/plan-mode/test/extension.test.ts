@@ -13,9 +13,29 @@ function harness(
     hasUI?: boolean;
     selection?: string;
     selections?: string[];
-    allModels?: Array<{ provider: string; id: string }>;
-    availableModels?: Array<{ provider: string; id: string }>;
-    scopedModels?: Array<{ model: { provider: string; id: string } }>;
+    allModels?: Array<{
+      provider: string;
+      id: string;
+      reasoning?: boolean;
+      thinkingLevelMap?: Record<string, string | null | undefined>;
+    }>;
+    availableModels?: Array<{
+      provider: string;
+      id: string;
+      reasoning?: boolean;
+      thinkingLevelMap?: Record<string, string | null | undefined>;
+    }>;
+    scopedModels?: Array<{
+      model: {
+        provider: string;
+        id: string;
+        reasoning?: boolean;
+        thinkingLevelMap?: Record<string, string | null | undefined>;
+      };
+    }>;
+    thinkingLevel?: string;
+    reasoning?: boolean;
+    thinkingLevelMap?: Record<string, string | null | undefined>;
   } = {},
 ) {
   const selections = [...(options.selections ?? [])];
@@ -82,10 +102,27 @@ function harness(
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/tmp/session.jsonl" },
     modelRegistry: {
       refresh: async () => undefined,
-      getAll: () => options.allModels ?? [{ provider: "provider", id: "model" }],
-      getAvailable: () => options.availableModels ?? [{ provider: "provider", id: "model" }],
+      getAll: () =>
+        options.allModels ?? [
+          {
+            provider: "provider",
+            id: "model",
+            reasoning: options.reasoning ?? false,
+            thinkingLevelMap: options.thinkingLevelMap,
+          },
+        ],
+      getAvailable: () =>
+        options.availableModels ?? [
+          {
+            provider: "provider",
+            id: "model",
+            reasoning: options.reasoning ?? false,
+            thinkingLevelMap: options.thinkingLevelMap,
+          },
+        ],
     },
     scopedModels: options.scopedModels ?? [],
+    thinkingLevel: options.thinkingLevel,
     ui: {
       notify: () => undefined,
       select: async (title: string, selectOptions: string[]) => {
@@ -193,7 +230,10 @@ describe("Plan Mode lifecycle", () => {
   it("uses the reviewer bridge without approving or implementing the plan", async () => {
     const subject = harness({
       hasUI: true,
-      selections: ["No, stay in Plan mode", "provider/model"],
+      selections: ["No, stay in Plan mode", "provider/model", "high"],
+      thinkingLevel: "high",
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh", max: "max" },
     });
     await emit(subject, "session_start", {});
     await subject.commands.get("plan")?.("", subject.context);
@@ -202,6 +242,7 @@ describe("Plan Mode lifecycle", () => {
       request.respond({
         reviewerId: "plan-reviewer-1",
         model: request.model,
+        thinking: request.thinking,
         report: "Add an integration test.",
       });
     });
@@ -215,6 +256,15 @@ describe("Plan Mode lifecycle", () => {
     });
     await emit(subject, "agent_settled", {});
     await subject.commands.get("plan-review")?.("", subject.context);
+    expect(subject.selectCalls.at(-1)?.options).toEqual([
+      "high",
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "xhigh",
+      "max",
+    ]);
     expect(subject.sent.some((message) => message.startsWith("plan-review:"))).toBe(true);
     expect(subject.sent).not.toContain("Implement the approved plan.");
     expect(subject.sentMessages.at(-1)).toMatchObject({
@@ -223,17 +273,22 @@ describe("Plan Mode lifecycle", () => {
     expect(subject.sentMessages.at(-1)?.content).toContain(
       "Plan Mode revision instruction: Treat this report as advisory.",
     );
+    expect(subject.sentMessages.at(-1)?.content).toContain("thinking: high");
     expect(subject.sentMessages.at(-1)?.content).toContain("revise the proposed plan if needed");
     expect(subject.sentMessages.at(-1)?.content).toContain("Do not approve or implement");
     expect(subject.entries.at(-1)?.data).toMatchObject({
-      lastReview: { planSourceEntryId: "assistant-review", reviewerId: "plan-reviewer-1" },
+      lastReview: {
+        planSourceEntryId: "assistant-review",
+        reviewerId: "plan-reviewer-1",
+        thinking: "high",
+      },
     });
   });
 
   it("uses only available models and intersects scoped models", async () => {
     const subject = harness({
       hasUI: true,
-      selections: ["No, stay in Plan mode", "provider/available"],
+      selections: ["No, stay in Plan mode", "provider/available", "off"],
       allModels: [{ provider: "provider", id: "stale" }],
       availableModels: [
         { provider: "provider", id: "available" },
@@ -262,7 +317,8 @@ describe("Plan Mode lifecycle", () => {
 
     await subject.commands.get("plan-review")?.("", subject.context);
 
-    expect(subject.selectCalls.at(-1)?.options).toEqual(["provider/available"]);
+    expect(subject.selectCalls.at(-2)?.options).toEqual(["provider/available"]);
+    expect(subject.selectCalls.at(-1)?.options).toEqual(["off"]);
   });
 
   it("implements an approved plan in current or fresh context", async () => {

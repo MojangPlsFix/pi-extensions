@@ -2,9 +2,16 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder, type Theme } from "@earendil-works/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text, type TUI } from "@earendil-works/pi-tui";
+import {
+  Container,
+  type SelectItem,
+  SelectList,
+  type TUI,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { events, type PlanModeEvent, type SubagentsStatusEvent } from "../../shared/events.js";
 import { configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
@@ -34,24 +41,39 @@ const reviewFailedPrefix = "Plan review failed";
 type ReviewResult = {
   reviewerId?: string;
   model?: string;
+  thinking?: string;
   report?: string;
   error?: string;
 };
 
-class ReviewerModelSelector extends Container {
+type ReviewerModel = {
+  reference: string;
+  model: {
+    reasoning?: unknown;
+    thinkingLevelMap?: Record<string, string | null | undefined>;
+  };
+};
+
+const thinkingLevels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type ReviewerThinking = (typeof thinkingLevels)[number];
+
+/**
+ * A regular custom selector replaces the editor instead of painting over the transcript.
+ * The explicit width bound keeps long model IDs inside a visible dialog while SelectList's
+ * maxVisible window retains its normal keyboard scrolling behavior.
+ */
+class BoundedSelectDialog extends Container {
   private readonly selectList: SelectList;
 
   constructor(
     private readonly tui: Pick<TUI, "requestRender">,
-    theme: Theme,
-    models: string[],
-    done: (model: string | undefined) => void,
+    private readonly theme: Theme,
+    private readonly title: string,
+    items: SelectItem[],
+    done: (value: string | undefined) => void,
+    defaultValue?: string,
   ) {
     super();
-    const items: SelectItem[] = models.map((model) => ({ value: model, label: model }));
-
-    this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
-    this.addChild(new Text(theme.fg("accent", theme.bold("Select a model for this plan review"))));
     this.selectList = new SelectList(items, 10, {
       selectedPrefix: (text) => theme.fg("accent", text),
       selectedText: (text) => theme.fg("accent", text),
@@ -59,11 +81,37 @@ class ReviewerModelSelector extends Container {
       scrollInfo: (text) => theme.fg("dim", text),
       noMatch: (text) => theme.fg("warning", text),
     });
+    if (defaultValue) {
+      const defaultIndex = items.findIndex((item) => item.value === defaultValue);
+      if (defaultIndex >= 0) this.selectList.setSelectedIndex(defaultIndex);
+    }
     this.selectList.onSelect = (item) => done(item.value);
     this.selectList.onCancel = () => done(undefined);
-    this.addChild(this.selectList);
-    this.addChild(new Text(theme.fg("dim", "Enter confirm • Esc cancel")));
-    this.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+  }
+
+  render(width: number): string[] {
+    const dialogWidth = Math.max(4, Math.min(width, Math.max(36, Math.floor(width * 0.8))));
+    const contentWidth = Math.max(1, dialogWidth - 4);
+    const leftPadding = " ".repeat(Math.max(0, Math.floor((width - dialogWidth) / 2)));
+    const content = [
+      this.theme.fg("accent", this.theme.bold(this.title)),
+      ...this.selectList.render(contentWidth),
+      this.theme.fg("dim", "Enter confirm • Esc cancel"),
+    ];
+    const fitLine = (line: string): string => {
+      const clipped = truncateToWidth(line, contentWidth, "…");
+      return `${clipped}${" ".repeat(Math.max(0, contentWidth - visibleWidth(clipped)))}`;
+    };
+    const top = this.theme.fg("accent", `╭${"─".repeat(dialogWidth - 2)}╮`);
+    const bottom = this.theme.fg("accent", `╰${"─".repeat(dialogWidth - 2)}╯`);
+    return [
+      top,
+      ...content.map(
+        (line) =>
+          `${this.theme.fg("accent", "│")} ${fitLine(line)} ${this.theme.fg("accent", "│")}`,
+      ),
+      bottom,
+    ].map((line) => `${leftPadding}${line}`);
   }
 
   handleInput(data: string): void {
@@ -79,6 +127,15 @@ function modelReference(model: unknown): string | undefined {
   return typeof value.provider === "string" && value.provider
     ? `${value.provider}/${value.id}`
     : value.id;
+}
+
+function supportedThinkingLevels(model: ReviewerModel["model"]): ReviewerThinking[] {
+  if (model.reasoning !== true) return ["off"];
+  return thinkingLevels.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    return level !== "xhigh" && level !== "max" ? true : mapped !== undefined;
+  });
 }
 
 type MessageEntryLike = {
@@ -141,7 +198,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     }
   }
 
-  async function selectReviewerModel(ctx: ExtensionCommandContext): Promise<string | undefined> {
+  async function selectReviewerModel(
+    ctx: ExtensionCommandContext,
+  ): Promise<{ model: string; thinking: ReviewerThinking } | undefined> {
     if (!ctx.hasUI) {
       ctx.ui.notify(`${reviewFailedPrefix}: interactive model selection is unavailable.`, "error");
       return undefined;
@@ -150,19 +209,26 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       await ctx.modelRegistry.refresh();
       const available = ctx.modelRegistry
         .getAvailable()
-        .map((model) => modelReference(model))
-        .filter((model): model is string => Boolean(model));
-      const availableSet = new Set(available);
+        .map((model) => {
+          const reference = modelReference(model);
+          return reference ? ({ reference, model } as ReviewerModel) : undefined;
+        })
+        .filter((model): model is ReviewerModel => Boolean(model));
+      const availableSet = new Set(available.map(({ reference }) => reference));
       const scoped = (ctx.scopedModels ?? [])
         .map((entry) => modelReference(entry.model))
         .filter((model): model is string => Boolean(model));
+      // Start with getAvailable() and intersect scopes by the complete provider/model reference.
       const models = [
-        ...new Set(
-          (ctx.scopedModels ?? []).length
-            ? scoped.filter((model) => availableSet.has(model))
-            : available,
-        ),
-      ].sort();
+        ...new Map(
+          ((ctx.scopedModels ?? []).length
+            ? available.filter(
+                ({ reference }) => scoped.includes(reference) && availableSet.has(reference),
+              )
+            : available
+          ).map((candidate) => [candidate.reference, candidate]),
+        ).values(),
+      ].sort((a, b) => a.reference.localeCompare(b.reference));
       if (!models.length) {
         ctx.ui.notify(`${reviewFailedPrefix}: no scoped or available models.`, "error");
         return undefined;
@@ -171,27 +237,60 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.mode === "tui"
           ? await ctx.ui.custom<string | undefined>(
               (tui, theme, _keybindings, done) =>
-                new ReviewerModelSelector(tui, theme, models, done),
-              {
-                overlay: true,
-                overlayOptions: {
-                  anchor: "center",
-                  width: "80%",
-                  maxHeight: 15,
-                  margin: 1,
-                },
-              },
+                new BoundedSelectDialog(
+                  tui,
+                  theme,
+                  "Select a model for this plan review",
+                  models.map(({ reference }) => ({ value: reference, label: reference })),
+                  done,
+                ),
             )
-          : await ctx.ui.select("Select a model for this plan review", models);
+          : await ctx.ui.select(
+              "Select a model for this plan review",
+              models.map(({ reference }) => reference),
+            );
       if (!selected) {
         ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
         return undefined;
       }
-      if (!models.includes(selected)) {
+      const selectedModel = models.find(({ reference }) => reference === selected);
+      if (!selectedModel) {
         ctx.ui.notify(`${reviewFailedPrefix}: selected model is unavailable.`, "error");
         return undefined;
       }
-      return selected;
+
+      const levels = supportedThinkingLevels(selectedModel.model);
+      const parentThinking = typeof ctx.thinkingLevel === "string" ? ctx.thinkingLevel : undefined;
+      const defaultThinking = levels.includes(parentThinking as ReviewerThinking)
+        ? (parentThinking as ReviewerThinking)
+        : (levels[0] ?? "off");
+      const thinkingOptions = [
+        defaultThinking,
+        ...levels.filter((level) => level !== defaultThinking),
+      ];
+      const thinking =
+        ctx.mode === "tui"
+          ? await ctx.ui.custom<string | undefined>(
+              (tui, theme, _keybindings, done) =>
+                new BoundedSelectDialog(
+                  tui,
+                  theme,
+                  `Select thinking level for ${selectedModel.reference}`,
+                  thinkingOptions.map((level) => ({ value: level, label: level })),
+                  done,
+                  defaultThinking,
+                ),
+            )
+          : await ctx.ui.select("Select thinking level for this plan review", thinkingOptions);
+      if (!thinking) {
+        ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
+        return undefined;
+      }
+      if (!levels.includes(thinking as ReviewerThinking)) {
+        ctx.ui.notify(`${reviewFailedPrefix}: selected thinking level is unavailable.`, "error");
+        return undefined;
+      }
+      return { model: selectedModel.reference, thinking: thinking as ReviewerThinking };
     } catch (error) {
       ctx.ui.notify(
         `${reviewFailedPrefix}: could not load available models: ${error instanceof Error ? error.message : String(error)}`,
@@ -204,6 +303,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   function requestPlanReview(
     task: string,
     model: string,
+    thinking: ReviewerThinking,
     ctx: ExtensionCommandContext,
   ): Promise<ReviewResult> {
     return new Promise((resolve) => {
@@ -217,6 +317,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       pi.events.emit(events.planReview, {
         task,
         model,
+        thinking,
         ctx,
         accept: () => {
           accepted = true;
@@ -427,8 +528,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`${reviewFailedPrefix}: a Worker is active.`, "error");
         return;
       }
-      const model = await selectReviewerModel(ctx);
-      if (!model) return;
+      const selection = await selectReviewerModel(ctx);
+      if (!selection) return;
       const sourceEntryId = state.latestPlan.sourceEntryId;
       const result = await requestPlanReview(
         [
@@ -438,7 +539,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
           "",
           state.latestPlan.markdown,
         ].join("\n\n"),
-        model,
+        selection.model,
+        selection.thinking,
         ctx,
       );
       if (result.error || !result.report || !result.reviewerId || !result.model) {
@@ -452,6 +554,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         planSourceEntryId: sourceEntryId,
         reviewerId: result.reviewerId,
         model: result.model,
+        thinking: result.thinking ?? selection.thinking,
         reviewedAt: new Date().toISOString(),
         report: result.report,
       };
@@ -461,7 +564,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         {
           customType: "plan-review",
           content: [
-            `Advisory plan review for ${sourceEntryId} using ${result.model}:`,
+            `Advisory plan review for ${sourceEntryId} using ${result.model} (thinking: ${review.thinking}):`,
             "",
             result.report,
             "",
