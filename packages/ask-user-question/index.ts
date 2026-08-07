@@ -1,6 +1,7 @@
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { events, type UserInteractionEvent } from "../../shared/events.js";
 import { type AskDetails, executeQuestions } from "./questions.js";
 
 export type { QuestionUI } from "./question-ui.js";
@@ -60,9 +61,22 @@ export default function askUserQuestionExtension(pi: ExtensionAPI): void {
       "Ask structured, reviewable user questions rather than guessing; supports choices, multi-select, and separate custom details.",
     parameters: AskUserQuestionParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      return result(
-        await executeQuestions(params, ctx.hasUI ? ctx.ui : undefined, { tui: ctx.mode === "tui" }),
-      );
+      pi.events.emit(events.userInteraction, {
+        active: true,
+        reason: "Ask User question wizard",
+      } satisfies UserInteractionEvent);
+      try {
+        return result(
+          await executeQuestions(params, ctx.hasUI ? ctx.ui : undefined, {
+            tui: ctx.mode === "tui",
+          }),
+        );
+      } finally {
+        pi.events.emit(events.userInteraction, {
+          active: false,
+          reason: "Ask User question wizard",
+        } satisfies UserInteractionEvent);
+      }
     },
     renderCall(args, theme: Theme) {
       const count = Array.isArray(args.questions) ? args.questions.length : 0;

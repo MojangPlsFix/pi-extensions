@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { executeQuestions, type QuestionUI } from "../index.js";
+import { events } from "../../../shared/events.js";
+import askUserQuestionExtension, { executeQuestions, type QuestionUI } from "../index.js";
 
 function scriptedUI(responses: Array<string | boolean | undefined>): QuestionUI {
   const next = (): string | boolean | undefined => responses.shift();
@@ -34,6 +35,33 @@ function tuiHarness() {
 }
 
 describe("ask_user_question", () => {
+  it("reports the whole question wizard as a user interaction", async () => {
+    const interactions: unknown[] = [];
+    let tool: any;
+    const api = {
+      events: {
+        emit(name: string, value: unknown) {
+          if (name === events.userInteraction) interactions.push(value);
+        },
+      },
+      on() {},
+      registerTool(candidate: any) {
+        tool = candidate;
+      },
+    };
+    askUserQuestionExtension(api as any);
+
+    await tool.execute("call-1", { questions: [] }, undefined, undefined, {
+      hasUI: false,
+      mode: "print",
+    });
+
+    expect(interactions).toEqual([
+      { active: true, reason: "Ask User question wizard" },
+      { active: false, reason: "Ask User question wizard" },
+    ]);
+  });
+
   it("keeps predefined answer and TUI details separate", async () => {
     const harness = tuiHarness();
     const result = executeQuestions(

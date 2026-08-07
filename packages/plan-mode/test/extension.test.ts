@@ -4,6 +4,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import { events } from "../../../shared/events.js";
 import planModeExtension from "../index.js";
 
 type Handler = (...args: any[]) => any;
@@ -237,6 +238,8 @@ describe("Plan Mode lifecycle", () => {
     });
     await emit(subject, "session_start", {});
     await subject.commands.get("plan")?.("", subject.context);
+    const interactions: Array<{ active: boolean; reason: string }> = [];
+    subject.onExtensionEvent(events.userInteraction, (event: any) => interactions.push(event));
     subject.onExtensionEvent("pi-extensions:plan-review", (request: any) => {
       request.accept();
       request.respond({
@@ -264,6 +267,14 @@ describe("Plan Mode lifecycle", () => {
       "medium",
       "xhigh",
       "max",
+    ]);
+    expect(interactions).toEqual([
+      { active: true, reason: "Plan Mode proposal approval" },
+      { active: false, reason: "Plan Mode proposal approval" },
+      { active: true, reason: "Plan Mode reviewer model selection" },
+      { active: false, reason: "Plan Mode reviewer model selection" },
+      { active: true, reason: "Plan Mode reviewer effort selection" },
+      { active: false, reason: "Plan Mode reviewer effort selection" },
     ]);
     expect(subject.sent.some((message) => message.startsWith("plan-review:"))).toBe(true);
     expect(subject.sent).not.toContain("Implement the approved plan.");

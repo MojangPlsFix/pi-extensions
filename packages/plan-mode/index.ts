@@ -13,7 +13,12 @@ import {
   Text,
   type TUI,
 } from "@earendil-works/pi-tui";
-import { events, type PlanModeEvent, type SubagentsStatusEvent } from "../../shared/events.js";
+import {
+  events,
+  type PlanModeEvent,
+  type SubagentsStatusEvent,
+  type UserInteractionEvent,
+} from "../../shared/events.js";
 import { configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
 import { PlanModeEditor } from "./editor.js";
@@ -222,19 +227,23 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       }
       const selected =
         ctx.mode === "tui"
-          ? await ctx.ui.custom<string | undefined>(
-              (tui, theme, _keybindings, done) =>
-                new BoundedSelectDialog(
-                  tui,
-                  theme,
-                  "Select a model for this plan review",
-                  models.map(({ reference }) => ({ value: reference, label: reference })),
-                  done,
-                ),
+          ? await waitForUser("Plan Mode reviewer model selection", () =>
+              ctx.ui.custom<string | undefined>(
+                (tui, theme, _keybindings, done) =>
+                  new BoundedSelectDialog(
+                    tui,
+                    theme,
+                    "Select a model for this plan review",
+                    models.map(({ reference }) => ({ value: reference, label: reference })),
+                    done,
+                  ),
+              ),
             )
-          : await ctx.ui.select(
-              "Select a model for this plan review",
-              models.map(({ reference }) => reference),
+          : await waitForUser("Plan Mode reviewer model selection", () =>
+              ctx.ui.select(
+                "Select a model for this plan review",
+                models.map(({ reference }) => reference),
+              ),
             );
       if (!selected) {
         ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
@@ -257,18 +266,22 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       ];
       const thinking =
         ctx.mode === "tui"
-          ? await ctx.ui.custom<string | undefined>(
-              (tui, theme, _keybindings, done) =>
-                new BoundedSelectDialog(
-                  tui,
-                  theme,
-                  `Select thinking level for ${selectedModel.reference}`,
-                  thinkingOptions.map((level) => ({ value: level, label: level })),
-                  done,
-                  defaultThinking,
-                ),
+          ? await waitForUser("Plan Mode reviewer effort selection", () =>
+              ctx.ui.custom<string | undefined>(
+                (tui, theme, _keybindings, done) =>
+                  new BoundedSelectDialog(
+                    tui,
+                    theme,
+                    `Select thinking level for ${selectedModel.reference}`,
+                    thinkingOptions.map((level) => ({ value: level, label: level })),
+                    done,
+                    defaultThinking,
+                  ),
+              ),
             )
-          : await ctx.ui.select("Select thinking level for this plan review", thinkingOptions);
+          : await waitForUser("Plan Mode reviewer effort selection", () =>
+              ctx.ui.select("Select thinking level for this plan review", thinkingOptions),
+            );
       if (!thinking) {
         ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
         return undefined;
@@ -319,6 +332,18 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   const requestRender = (): void => activeTui?.requestRender();
+  async function waitForUser<T>(reason: string, operation: () => Promise<T>): Promise<T> {
+    pi.events.emit(events.userInteraction, { active: true, reason } satisfies UserInteractionEvent);
+    try {
+      return await operation();
+    } finally {
+      pi.events.emit(events.userInteraction, {
+        active: false,
+        reason,
+      } satisfies UserInteractionEvent);
+    }
+  }
+
   const emitMode = (): void =>
     pi.events.emit(events.planMode, { enabled: state.mode === "plan" } satisfies PlanModeEvent);
 
@@ -583,12 +608,14 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify("/plan-tools requires interactive UI.", "warning");
         return;
       }
-      const scopeChoice = await ctx.ui.select("Where should approvals be stored?", [
-        "Global",
-        ...(typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted()
-          ? ["Project"]
-          : []),
-      ]);
+      const scopeChoice = await waitForUser("Plan Mode approval scope selection", () =>
+        ctx.ui.select("Where should approvals be stored?", [
+          "Global",
+          ...(typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted()
+            ? ["Project"]
+            : []),
+        ]),
+      );
       if (!scopeChoice) return;
       const path = scopeChoice === "Project" ? loadedConfig.projectPath : loadedConfig.globalPath;
       if (!path) {
@@ -598,23 +625,26 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         );
         return;
       }
-      const kind = await ctx.ui.select("What should Plan Mode allow?", [
-        "Pi tool",
-        "CLI program",
-        "Remove approval",
-        "Done",
-      ]);
+      const kind = await waitForUser("Plan Mode approval type selection", () =>
+        ctx.ui.select("What should Plan Mode allow?", [
+          "Pi tool",
+          "CLI program",
+          "Remove approval",
+          "Done",
+        ]),
+      );
       if (kind === "Pi tool") {
         const tools = pi.getAllTools().filter((tool) => !isDirectlyDisabledInPlanMode(tool.name));
-        const selected = await ctx.ui.select("Select an external Pi tool to allow", [
-          ...tools.map((tool) => `${tool.name} — ${tool.sourceInfo.source}`),
-          "Cancel",
-        ]);
+        const selected = await waitForUser("Plan Mode tool approval selection", () =>
+          ctx.ui.select("Select an external Pi tool to allow", [
+            ...tools.map((tool) => `${tool.name} — ${tool.sourceInfo.source}`),
+            "Cancel",
+          ]),
+        );
         const name = selected?.split(" — ")[0];
         if (name && name !== "Cancel") {
-          const accepted = await ctx.ui.confirm(
-            "Confirm Plan Mode approval",
-            `Allow Pi tool '${name}'?`,
+          const accepted = await waitForUser("Plan Mode tool approval confirmation", () =>
+            ctx.ui.confirm("Confirm Plan Mode approval", `Allow Pi tool '${name}'?`),
           );
           if (!accepted) return;
           await updatePlanModeConfig(path, { addTools: [name] });
@@ -622,19 +652,19 @@ export default function planModeExtension(pi: ExtensionAPI): void {
           ctx.ui.notify(`Approved Pi tool '${name}' for Plan Mode.`, "info");
         }
       } else if (kind === "CLI program") {
-        const program = await ctx.ui.input("Program", "example-cli");
-        const commandText = await ctx.ui.input(
-          "Read-only subcommands (comma separated)",
-          "help, inspect, list",
+        const program = await waitForUser("Plan Mode command approval program input", () =>
+          ctx.ui.input("Program", "example-cli"),
+        );
+        const commandText = await waitForUser("Plan Mode command approval details input", () =>
+          ctx.ui.input("Read-only subcommands (comma separated)", "help, inspect, list"),
         );
         if (!program || !commandText) return;
         const commands = commandText
           .split(",")
           .map((value) => value.trim())
           .filter(Boolean);
-        const accepted = await ctx.ui.confirm(
-          "Confirm Plan Mode approval",
-          `${program}: ${commands.join(", ")}`,
+        const accepted = await waitForUser("Plan Mode command approval confirmation", () =>
+          ctx.ui.confirm("Confirm Plan Mode approval", `${program}: ${commands.join(", ")}`),
         );
         if (!accepted) return;
         await updatePlanModeConfig(path, { addCommands: { [program.trim()]: commands } });
@@ -642,15 +672,17 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`Approved read-only commands for '${program.trim()}'.`, "info");
       } else if (kind === "Remove approval") {
         const programs = Object.keys(loadedConfig.readOnlyCommands);
-        const selected = await ctx.ui.select("Select an approval to remove", [
-          ...loadedConfig.readOnlyTools.map((name) => `tool:${name}`),
-          ...programs.flatMap((program) =>
-            (loadedConfig.readOnlyCommands[program] ?? []).map(
-              (command) => `command:${program}:${command}`,
+        const selected = await waitForUser("Plan Mode approval removal selection", () =>
+          ctx.ui.select("Select an approval to remove", [
+            ...loadedConfig.readOnlyTools.map((name) => `tool:${name}`),
+            ...programs.flatMap((program) =>
+              (loadedConfig.readOnlyCommands[program] ?? []).map(
+                (command) => `command:${program}:${command}`,
+              ),
             ),
-          ),
-          "Cancel",
-        ]);
+            "Cancel",
+          ]),
+        );
         if (!selected || selected === "Cancel") return;
         if (selected.startsWith("tool:"))
           await updatePlanModeConfig(path, { removeTools: [selected.slice(5)] });
@@ -708,11 +740,9 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
     approvalOpen = true;
     try {
-      const choice = await ctx.ui.select("Implement this plan?", [
-        implementCurrent,
-        implementFresh,
-        stayInPlanMode,
-      ]);
+      const choice = await waitForUser("Plan Mode proposal approval", () =>
+        ctx.ui.select("Implement this plan?", [implementCurrent, implementFresh, stayInPlanMode]),
+      );
       if (choice === implementCurrent) {
         consumePlan(latest.id);
         leave(ctx, false);

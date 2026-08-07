@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
+import { HerdrClient } from "../herdr-client.js";
 import { SubagentManager, subagentTabLabel } from "../manager.js";
 import { RpcBackend } from "../rpc-backend.js";
 import { consumeSessionRecord } from "../session-poller.js";
@@ -98,6 +99,62 @@ describe("SubagentManager follow-up lifecycle", () => {
     expect(subagentTabLabel("Orchestrator")).toBe("Orchestrator - Subagents");
     expect(subagentTabLabel("  ")).toBe("Subagents");
     expect(subagentTabLabel(undefined)).toBe("Subagents");
+  });
+
+  it("reports and restores waiting-for-user metadata on the verified parent pane", async () => {
+    const original = {
+      HERDR_ENV: process.env.HERDR_ENV,
+      HERDR_PANE_ID: process.env.HERDR_PANE_ID,
+      HERDR_SOCKET_PATH: process.env.HERDR_SOCKET_PATH,
+    };
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_PANE_ID = "parent-pane";
+    process.env.HERDR_SOCKET_PATH = "/tmp/herdr-control";
+    const verify = vi.spyOn(HerdrClient.prototype, "verify").mockResolvedValue({
+      paneId: "parent-pane",
+      tabId: "tab-parent",
+      workspaceId: "workspace-parent",
+    });
+    const reportMetadata = vi
+      .spyOn(HerdrClient.prototype, "reportMetadata")
+      .mockResolvedValue(undefined);
+    const { manager, emitEvent } = managerHarness();
+    try {
+      emitEvent(events.userInteraction, { active: true, reason: "Plan Mode proposal approval" });
+      emitEvent(events.userInteraction, { active: false, reason: "Plan Mode proposal approval" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+
+      expect(verify).toHaveBeenCalledTimes(2);
+      expect(reportMetadata).toHaveBeenCalledTimes(2);
+      expect(reportMetadata.mock.calls[0]?.[0]).toBe("parent-pane");
+      expect(reportMetadata.mock.calls[0]?.[1]).toMatchObject({
+        agent: "pi",
+        title: "Pi · Waiting for user",
+        displayRole: "Pi",
+        stateLabels: {
+          working: "waiting for user",
+          idle: "waiting for user",
+          done: "waiting for user",
+        },
+      });
+      expect(reportMetadata.mock.calls[1]?.[1]).toMatchObject({
+        title: "Pi",
+        stateLabels: { working: "working", idle: "idle", done: "done" },
+      });
+
+      await manager.shutdown();
+      emitEvent(events.userInteraction, { active: true, reason: "after shutdown" });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(reportMetadata).toHaveBeenCalledTimes(2);
+    } finally {
+      verify.mockRestore();
+      reportMetadata.mockRestore();
+      for (const [key, value] of Object.entries(original)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
   });
 
   it("restarts a completed agent poller before a successful follow-up", async () => {

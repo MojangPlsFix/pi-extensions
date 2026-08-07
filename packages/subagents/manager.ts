@@ -3,7 +3,7 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { events } from "../../shared/events.js";
+import { events, type UserInteractionEvent } from "../../shared/events.js";
 import { consumeRpcTelemetry, recordActivity, SessionPoller } from "./agent-telemetry.js";
 import { discoverAgents, safeName } from "./agents.js";
 import type { SubagentBackend } from "./backend.js";
@@ -79,8 +79,12 @@ export class SubagentManager {
   private pendingWorkers = 0;
   private shutdownPromise?: Promise<void>;
   private ui?: ExtensionContext["ui"];
+  private interactionMetadataSequence = 0;
+  private interactionMetadataTail: Promise<void> = Promise.resolve();
+  private herdrInteractionWarningIssued = false;
   private readonly unsubscribePlanMode: () => void;
   private readonly unsubscribePlanReview: () => void;
+  private readonly unsubscribeUserInteraction: () => void;
 
   private enqueue<T>(id: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.operationTails.get(id) ?? Promise.resolve();
@@ -133,6 +137,18 @@ export class SubagentManager {
     });
     this.unsubscribePlanReview =
       typeof unsubscribePlanReview === "function" ? unsubscribePlanReview : () => {};
+    const unsubscribeUserInteraction = pi.events.on(events.userInteraction, (data: unknown) => {
+      const event = data as Partial<UserInteractionEvent>;
+      if (typeof event.active !== "boolean") return;
+      const active = event.active;
+      const reason = typeof event.reason === "string" ? event.reason : "user interaction";
+      this.interactionMetadataTail = this.interactionMetadataTail
+        .catch(() => {})
+        .then(() => this.reportParentInteractionMetadata(active, reason))
+        .catch((cause: unknown) => this.warnHerdrInteraction(cause));
+    });
+    this.unsubscribeUserInteraction =
+      typeof unsubscribeUserInteraction === "function" ? unsubscribeUserInteraction : () => {};
   }
 
   attachUi(ctx: ExtensionContext): void {
@@ -513,6 +529,7 @@ export class SubagentManager {
   shutdown(): Promise<void> {
     this.unsubscribePlanMode();
     this.unsubscribePlanReview();
+    this.unsubscribeUserInteraction();
     this.shutdownPromise ??= this.shutdownNow();
     return this.shutdownPromise;
   }
@@ -745,6 +762,53 @@ export class SubagentManager {
         `Herdr is explicitly configured but its control plane is unavailable: ${cause instanceof Error ? cause.message : String(cause)}. Fix Herdr or remove its environment to use RPC.`,
       );
     }
+  }
+
+  /** Report waiting state on the existing parent pane; this never allocates Herdr UI. */
+  private async reportParentInteractionMetadata(active: boolean, reason: string): Promise<void> {
+    if (this.shutdownPromise || HerdrClient.environmentState() !== "complete") return;
+    const parentPaneId = process.env.HERDR_PANE_ID;
+    if (!parentPaneId) return;
+
+    const client = this.verifiedHerdrClient ?? new HerdrClient();
+    const parent = await client.verify(parentPaneId);
+    const waitingLabel = "waiting for user";
+    const normalLabels = {
+      working: "working",
+      blocked: "blocked",
+      idle: "idle",
+      done: "done",
+    };
+    const stateLabels = active
+      ? {
+          working: waitingLabel,
+          blocked: waitingLabel,
+          idle: waitingLabel,
+          done: waitingLabel,
+        }
+      : normalLabels;
+    const trimmedReason = reason.replace(/\s+/gu, " ").trim().slice(0, 120);
+    await client.reportMetadata(parent.paneId, {
+      agent: "pi",
+      title: active ? "Pi · Waiting for user" : "Pi",
+      displayRole: "Pi",
+      stateLabels,
+      tokens: {
+        role: "pi",
+        workspace: parent.workspaceId,
+        parentTab: parent.tabId,
+        ...(active && trimmedReason ? { reason: trimmedReason } : {}),
+      },
+      seq: ++this.interactionMetadataSequence,
+    });
+  }
+
+  private warnHerdrInteraction(cause: unknown): void {
+    if (this.herdrInteractionWarningIssued) return;
+    this.herdrInteractionWarningIssued = true;
+    const message = `Herdr parent waiting status is unavailable; continuing without it: ${cause instanceof Error ? cause.message : String(cause)}`;
+    if (this.ui) this.ui.notify(message, "warning");
+    else console.warn(`[subagents] ${message}`);
   }
 
   private backendFor(agent: ManagedAgent): SubagentBackend {
