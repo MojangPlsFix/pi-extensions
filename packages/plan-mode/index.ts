@@ -1,16 +1,17 @@
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-  Theme,
+import {
+  DynamicBorder,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
   Container,
   type SelectItem,
   SelectList,
+  Spacer,
+  Text,
   type TUI,
-  truncateToWidth,
-  visibleWidth,
 } from "@earendil-works/pi-tui";
 import { events, type PlanModeEvent, type SubagentsStatusEvent } from "../../shared/events.js";
 import { configureBashPolicy } from "./bash-policy.js";
@@ -59,21 +60,26 @@ type ReviewerThinking = (typeof thinkingLevels)[number];
 
 /**
  * A regular custom selector replaces the editor instead of painting over the transcript.
- * The explicit width bound keeps long model IDs inside a visible dialog while SelectList's
- * maxVisible window retains its normal keyboard scrolling behavior.
+ * DynamicBorder and SelectList provide Pi's standard selector framing and clipping while the
+ * bounded list retains its normal keyboard scrolling behavior.
  */
 class BoundedSelectDialog extends Container {
   private readonly selectList: SelectList;
 
   constructor(
     private readonly tui: Pick<TUI, "requestRender">,
-    private readonly theme: Theme,
-    private readonly title: string,
+    theme: Theme,
+    title: string,
     items: SelectItem[],
     done: (value: string | undefined) => void,
     defaultValue?: string,
   ) {
     super();
+    this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+    this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg("accent", theme.bold(title)), 1, 0));
+    this.addChild(new Spacer(1));
+
     this.selectList = new SelectList(items, 10, {
       selectedPrefix: (text) => theme.fg("accent", text),
       selectedText: (text) => theme.fg("accent", text),
@@ -87,31 +93,12 @@ class BoundedSelectDialog extends Container {
     }
     this.selectList.onSelect = (item) => done(item.value);
     this.selectList.onCancel = () => done(undefined);
-  }
+    this.addChild(this.selectList);
 
-  render(width: number): string[] {
-    const dialogWidth = Math.max(4, Math.min(width, Math.max(36, Math.floor(width * 0.8))));
-    const contentWidth = Math.max(1, dialogWidth - 4);
-    const leftPadding = " ".repeat(Math.max(0, Math.floor((width - dialogWidth) / 2)));
-    const content = [
-      this.theme.fg("accent", this.theme.bold(this.title)),
-      ...this.selectList.render(contentWidth),
-      this.theme.fg("dim", "Enter confirm • Esc cancel"),
-    ];
-    const fitLine = (line: string): string => {
-      const clipped = truncateToWidth(line, contentWidth, "…");
-      return `${clipped}${" ".repeat(Math.max(0, contentWidth - visibleWidth(clipped)))}`;
-    };
-    const top = this.theme.fg("accent", `╭${"─".repeat(dialogWidth - 2)}╮`);
-    const bottom = this.theme.fg("accent", `╰${"─".repeat(dialogWidth - 2)}╯`);
-    return [
-      top,
-      ...content.map(
-        (line) =>
-          `${this.theme.fg("accent", "│")} ${fitLine(line)} ${this.theme.fg("accent", "│")}`,
-      ),
-      bottom,
-    ].map((line) => `${leftPadding}${line}`);
+    this.addChild(new Spacer(1));
+    this.addChild(new Text(theme.fg("dim", "Enter confirm • Esc cancel"), 1, 0));
+    this.addChild(new Spacer(1));
+    this.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
   }
 
   handleInput(data: string): void {
