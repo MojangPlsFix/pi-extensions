@@ -12,13 +12,41 @@ describe("Plan Mode policy", () => {
     expect(isDirectlyDisabledInPlanMode("edit")).toBe(true);
     expect(isDirectlyDisabledInPlanMode("functions.ctx_purge")).toBe(true);
     expect(planModeToolBlockReason("read", { path: "README.md" })).toBeUndefined();
-    expect(planModeToolBlockReason("functions.ctx_execute", {})).toBeUndefined();
+    expect(planModeToolBlockReason("memory_read", { target: "long_term" })).toBeUndefined();
+    expect(planModeToolBlockReason("memory_search", { query: "plan" })).toBeUndefined();
+    expect(
+      planModeToolBlockReason("memory_write", { target: "daily", content: "note" }),
+    ).toBeUndefined();
+    expect(
+      planModeToolBlockReason("memory_write", {
+        target: "long_term",
+        content: "fact",
+        mode: "append",
+      }),
+    ).toBeUndefined();
+    expect(
+      planModeToolBlockReason("memory_write", {
+        target: "long_term",
+        content: "fact",
+        mode: "overwrite",
+      }),
+    ).toContain("append-only");
+    expect(
+      planModeToolBlockReason("memory_write", { target: "scratchpad", content: "note" }),
+    ).toContain("append-only");
+    expect(planModeToolBlockReason("functions.ctx_execute", {})).toContain("disabled");
     for (const tool of [
       "search",
+      "ctx_search",
+      "ctx_stats",
+      "ctx_doctor",
+      "ctx_index",
+      "ctx_fetch_and_index",
       "subagent_spawn",
       "subagent_list",
       "subagent_read",
       "subagent_wait",
+      "repository_reference",
     ])
       expect(planModeToolBlockReason(tool, {}), tool).toBeUndefined();
     expect(planModeToolBlockReason("unreviewed_tool", {})).toContain("Unreviewed");
@@ -109,6 +137,16 @@ describe("Plan Mode policy", () => {
     ]) {
       expect(bashBlockReason(command), command).toBeTruthy();
     }
+    for (const tool of [
+      "ctx_execute",
+      "ctx_execute_file",
+      "ctx_batch_execute",
+      "ctx_upgrade",
+      "ctx_purge",
+      "subagent_close",
+      "subagent_interrupt",
+    ])
+      expect(planModeToolBlockReason(tool, {}), tool).toContain("disabled");
     expect(planModeToolBlockReason("todo", { action: "create" })).toContain("blocked");
     expect(planModeToolBlockReason("scratchpad", { action: "write" })).toContain("blocked");
   });

@@ -70,6 +70,7 @@ export const DEFAULT_SUBAGENT_CONFIG: Required<SubagentConfig> = {
   agents: {
     explorer: { model: "inherit", thinking: "inherit" },
     worker: { model: "inherit", thinking: "inherit" },
+    "plan-reviewer": { model: "inherit", thinking: "inherit" },
   },
 };
 
@@ -216,11 +217,14 @@ export function resolveAgentModelPolicy(
   config: SubagentConfig,
   parentModel: string | undefined,
   parentThinking: string | undefined,
+  explicit?: string | { model?: string; thinking?: string },
 ): { model?: string; thinking?: string } {
   const configured = config.agents?.[definition.name];
+  const explicitPolicy = typeof explicit === "string" ? { model: explicit } : explicit;
   return {
     model: resolvePolicy(
       [
+        explicitPolicy?.model,
         configured?.model,
         definition.source === "user" ? definition.model : undefined,
         config.defaults?.model,
@@ -229,6 +233,7 @@ export function resolveAgentModelPolicy(
     ),
     thinking: resolvePolicy(
       [
+        explicitPolicy?.thinking,
         configured?.thinking,
         definition.source === "user" ? definition.thinking : undefined,
         config.defaults?.thinking,
@@ -286,15 +291,19 @@ export function effectiveAgentResources(
   };
 }
 
-/** Added only when Context Mode is positively available to the child. */
+/** Read-only Context Mode tools added only when Context Mode is positively available. */
 export const CONTEXT_TOOLS = [
-  "ctx_execute_file",
   "ctx_index",
   "ctx_search",
   "ctx_fetch_and_index",
   "ctx_stats",
 ] as const;
-export const CONTEXT_EXECUTION_TOOLS = ["ctx_execute", "ctx_batch_execute"] as const;
+/** Context execution includes file execution; Explorers and reviewers never receive these tools. */
+export const CONTEXT_EXECUTION_TOOLS = [
+  "ctx_execute",
+  "ctx_execute_file",
+  "ctx_batch_execute",
+] as const;
 /** Explorers receive only read-only tools. Todo mutates shared state and is worker-only. */
 export const EXPLORER_TOOLS = ["read", "grep", "find", "ls"] as const;
 export const WORKER_TOOLS = [...EXPLORER_TOOLS, "todo", "bash", "edit", "write"] as const;

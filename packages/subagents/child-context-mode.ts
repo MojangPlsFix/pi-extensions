@@ -5,13 +5,13 @@ import { contextModeRoot, contextModeServer } from "./context-mode-resolver.js";
 
 /** Context Mode without its Pi active-memory/session hooks or admin tools. */
 export const READ_ONLY_TOOLS = [
-  "ctx_execute_file",
   "ctx_index",
   "ctx_search",
   "ctx_fetch_and_index",
   "ctx_stats",
 ] as const;
-export const EXECUTION_TOOLS = ["ctx_execute", "ctx_batch_execute"] as const;
+/** File execution is execution-only just like shell and batch execution. */
+export const EXECUTION_TOOLS = ["ctx_execute", "ctx_execute_file", "ctx_batch_execute"] as const;
 export const ALLOWED_TOOLS = new Set<string>(READ_ONLY_TOOLS);
 
 function allowedTools(): Set<string> {

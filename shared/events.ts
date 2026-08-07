@@ -1,6 +1,7 @@
 /** Public event names shared by independently loaded package entrypoints. */
 export const events = {
   planMode: "pi-extensions:plan-mode",
+  planReview: "pi-extensions:plan-review",
   subagentsStatus: "pi-extensions:subagents-status",
 } as const;
 

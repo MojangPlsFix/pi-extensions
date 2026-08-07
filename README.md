@@ -21,7 +21,8 @@ pi update --extensions
 | Extension | Purpose | Commands and tools | Availability |
 | --- | --- | --- | --- |
 | [Ask User Question](packages/ask-user-question/) | Gives the model a structured UI for single-choice, multi-select, and custom questions. | `ask_user_question` | Interactive sessions |
-| [Plan Mode](packages/plan-mode/) | Adds a read-only planning workflow and controlled implementation steps. | `/plan`, `/plan off`, `/plan-implement`, `/plan-implement fresh` | Any provider |
+| [Plan Mode](packages/plan-mode/) | Adds a read-only planning workflow, advisory `/plan-review`, and controlled implementation steps. | `/plan`, `/plan off`, `/plan-review`, `/plan-implement`, `/plan-implement fresh` | Any provider |
+| [Repository Reference](packages/repository-reference/) | Clones validated Git remotes and revisions into managed temporary paths with list, remove, and cleanup operations. | `repository_reference` | Any provider; no Context Mode dependency |
 | [Notify](packages/notify/) | Sends a desktop or terminal notification after an assistant turn completes. | `/notify-test`, `/notify-toggle`, `/notify-status` | Windows, WSL, and supported terminals |
 | [Todos](packages/todos/) | Stores project work items with status, tags, assignment, and locking. | `/todos`, `todo` | Any provider |
 | [Context Size](packages/context-size/) | Sets a temporary context-window limit and shows it in the status area. | `/context`, `/context 128k`, `/context auto` | Any model |
@@ -34,7 +35,7 @@ pi update --extensions
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
-The package installs all 13 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 14 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Usage Meter and Search use OpenAI Codex OAuth for `openai-codex`. Run `/login openai-codex`.

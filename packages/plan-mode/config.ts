@@ -25,6 +25,11 @@ const mutators = new Set([
   "memory_forget",
   "ctx_purge",
   "ctx_upgrade",
+  "ctx_execute",
+  "ctx_execute_file",
+  "ctx_batch_execute",
+  "subagent_close",
+  "subagent_interrupt",
 ]);
 const namePattern = /^[A-Za-z][A-Za-z0-9_.-]*$/;
 const emptyConfig = (): PlanModeConfig => ({ readOnlyTools: [], readOnlyCommands: {} });

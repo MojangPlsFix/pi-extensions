@@ -37,6 +37,29 @@ describe("Plan Mode state", () => {
     });
   });
 
+  it("restores review metadata and consumed-plan protection fields", () => {
+    const state = {
+      version: 1 as const,
+      mode: "default" as const,
+      disabledTools: [],
+      latestPlan: { markdown: "# Plan", sourceEntryId: "source-1" },
+      implementedPlanSourceEntryId: "source-1",
+      lastReview: {
+        planSourceEntryId: "source-1",
+        reviewerId: "reviewer-1",
+        model: "provider/model",
+        reviewedAt: "2026-01-01T00:00:00.000Z",
+        report: "Revise the test coverage.",
+      },
+    };
+    expect(
+      restorePlanModeState([{ type: "custom", customType: PLAN_MODE_STATE_ENTRY, data: state }]),
+    ).toMatchObject({
+      implementedPlanSourceEntryId: "source-1",
+      lastReview: { planSourceEntryId: "source-1", reviewerId: "reviewer-1" },
+    });
+  });
+
   it("ignores malformed state", () => {
     expect(
       restorePlanModeState([

@@ -29,6 +29,45 @@ describe("Plan Mode configuration", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("rejects hard-disabled tools even when configuration attempts to approve them", async () => {
+    const root = await mkdtemp(join(tmpdir(), "plan-mode-"));
+    const path = join(root, "plan-mode.json");
+    process.env.PI_CODING_AGENT_DIR = root;
+    await writeFile(
+      path,
+      JSON.stringify({
+        readOnlyTools: [
+          "ctx_execute",
+          "ctx_execute_file",
+          "ctx_batch_execute",
+          "ctx_purge",
+          "ctx_upgrade",
+          "subagent_close",
+          "subagent_interrupt",
+        ],
+      }),
+      "utf8",
+    );
+    const loaded = await loadPlanModeConfig({
+      cwd: root,
+      trusted: false,
+      checkAvailability: false,
+    });
+    for (const tool of [
+      "ctx_execute",
+      "ctx_execute_file",
+      "ctx_batch_execute",
+      "ctx_purge",
+      "ctx_upgrade",
+      "subagent_close",
+      "subagent_interrupt",
+    ])
+      expect(loaded.readOnlyTools).not.toContain(tool);
+    expect(loaded.warnings).toHaveLength(7);
+    delete process.env.PI_CODING_AGENT_DIR;
+    await rm(root, { recursive: true, force: true });
+  });
+
   it("fails closed for malformed entries and preserves exact atomic output", async () => {
     const root = await mkdtemp(join(tmpdir(), "plan-mode-"));
     const path = join(root, "plan-mode.json");

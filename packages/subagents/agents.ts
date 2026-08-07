@@ -21,6 +21,14 @@ const builtins: AgentDefinition[] = [
       "Implement only the delegated scope. Preserve unrelated work, validate your changes, and report exact files and commands.",
     source: "builtin",
   },
+  {
+    name: "plan-reviewer",
+    description: "Read-only plan reviewer that checks risks, omissions, and verification coverage.",
+    mode: "explorer",
+    prompt:
+      "Review the proposed plan against the repository and task. Do not modify files, approve or implement the plan, or ask the user questions. Return a concise report with findings, risks, missing work, and concrete suggested revisions.",
+    source: "builtin",
+  },
 ];
 
 export function safeName(value: string): string {

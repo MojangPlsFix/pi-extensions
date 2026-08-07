@@ -55,6 +55,39 @@ function managerHarness() {
 }
 
 describe("SubagentManager follow-up lifecycle", () => {
+  it("bridges Plan Mode reviews through the manager service", async () => {
+    const { manager, emitEvent } = managerHarness();
+    const review = vi
+      .spyOn(
+        manager as unknown as { reviewPlan: (...args: any[]) => Promise<unknown> },
+        "reviewPlan",
+      )
+      .mockResolvedValue({
+        reviewerId: "plan-reviewer-1",
+        model: "provider/model",
+        report: "revise",
+      });
+    const accept = vi.fn();
+    const respond = vi.fn();
+    emitEvent(events.planReview, {
+      task: "review plan",
+      model: "provider/model",
+      ctx: { isIdle: () => true },
+      accept,
+      respond,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(accept).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      reviewerId: "plan-reviewer-1",
+      model: "provider/model",
+      report: "revise",
+    });
+    expect(review).toHaveBeenCalledWith("review plan", "provider/model", {
+      isIdle: expect.any(Function),
+    });
+  });
+
   it("derives a neutral parent-aware Herdr tab label", () => {
     expect(subagentTabLabel("Orchestrator")).toBe("Orchestrator - Subagents");
     expect(subagentTabLabel("  ")).toBe("Subagents");

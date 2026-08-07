@@ -6,6 +6,7 @@ import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
 import notify from "../packages/notify/index.js";
 import planMode from "../packages/plan-mode/index.js";
+import repositoryReference from "../packages/repository-reference/index.js";
 import stats from "../packages/stats/index.js";
 import subagents from "../packages/subagents/index.js";
 import todos from "../packages/todos/index.js";
@@ -45,6 +46,7 @@ function registry() {
 const entrypoints = [
   askUserQuestion,
   planMode,
+  repositoryReference,
   notify,
   todos,
   contextSize,
@@ -74,6 +76,7 @@ describe("package manifest", () => {
         "subagent_spawn",
         "subagent_close",
         "search",
+        "repository_reference",
       ]),
     );
   });
@@ -128,11 +131,13 @@ describe("package manifest", () => {
       const source = await readFile(path, "utf8");
       for (const expected of [
         "~/.pi/agent/subagents/config.json",
-        "github-copilot/gpt-5.6-luna",
         '"thinking": "low"',
         '"thinking": "high"',
       ])
         expect(source, `${path} must contain ${expected}`).toContain(expected);
+      expect(source, `${path} must contain a Luna provider model`).toMatch(
+        /(?:github-copilot|openai-codex)\/gpt-5\.6-luna/,
+      );
     }
     const configuration = await readFile("docs/configuration.md", "utf8");
     expect(configuration).toContain("openai-codex/gpt-5.6-luna");

@@ -6,10 +6,21 @@ export interface ProposedPlanState {
   sourceEntryId: string;
 }
 
+export interface PlanReviewState {
+  planSourceEntryId: string;
+  reviewerId: string;
+  model: string;
+  reviewedAt: string;
+  report: string;
+}
+
 export interface PlanModeState {
   version: 1;
   mode: "default" | "plan";
   latestPlan?: ProposedPlanState;
+  /** A plan source can be implemented only once. A newer proposed plan resets this marker. */
+  implementedPlanSourceEntryId?: string;
+  lastReview?: PlanReviewState;
   lastOfferedEntryId?: string;
   disabledTools: string[];
 }
@@ -30,6 +41,18 @@ function isProposedPlan(value: unknown): value is ProposedPlanState {
   return typeof plan.markdown === "string" && typeof plan.sourceEntryId === "string";
 }
 
+function isPlanReview(value: unknown): value is PlanReviewState {
+  if (!value || typeof value !== "object") return false;
+  const review = value as Record<string, unknown>;
+  return (
+    typeof review.planSourceEntryId === "string" &&
+    typeof review.reviewerId === "string" &&
+    typeof review.model === "string" &&
+    typeof review.reviewedAt === "string" &&
+    typeof review.report === "string"
+  );
+}
+
 function isPlanModeState(value: unknown): value is PlanModeState {
   if (!value || typeof value !== "object") return false;
   const state = value as Record<string, unknown>;
@@ -39,6 +62,9 @@ function isPlanModeState(value: unknown): value is PlanModeState {
     Array.isArray(state.disabledTools) &&
     state.disabledTools.every((name) => typeof name === "string") &&
     (state.latestPlan === undefined || isProposedPlan(state.latestPlan)) &&
+    (state.implementedPlanSourceEntryId === undefined ||
+      typeof state.implementedPlanSourceEntryId === "string") &&
+    (state.lastReview === undefined || isPlanReview(state.lastReview)) &&
     (state.lastOfferedEntryId === undefined || typeof state.lastOfferedEntryId === "string")
   );
 }
@@ -59,6 +85,7 @@ export function restorePlanModeState(entries: readonly CustomEntryLike[]): PlanM
       ...entry.data,
       disabledTools: [...entry.data.disabledTools],
       ...(entry.data.latestPlan ? { latestPlan: { ...entry.data.latestPlan } } : {}),
+      ...(entry.data.lastReview ? { lastReview: { ...entry.data.lastReview } } : {}),
     };
   }
   return createDefaultPlanModeState();

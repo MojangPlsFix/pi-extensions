@@ -60,7 +60,7 @@ Create `~/.pi/agent/subagents/config.json`, or the matching path under `PI_CODIN
 }
 ```
 
-Explorer Luna with low thinking uses less quota for parallel investigation and review. Worker Luna with high thinking suits the persistent implementation owner. This example uses GitHub Copilot because it is the active provider on this PC. A Codex installation can replace the model prefix with `openai-codex` and use `/login openai-codex`. This setup is a recommendation, not a requirement. Configure and authenticate the selected provider. Pi resolves the model when each child starts. Existing children keep their model and thinking level. Run `/reload` after you edit the file. Use `subagent_list` or `/agents` to verify a new child.
+Explorer Luna with low thinking uses less quota for parallel investigation and review. The built-in Reviewer role is also read-only and is selected temporarily by `/plan-review`; its explicit model overrides normal role configuration only for that review. Worker Luna with high thinking suits the persistent implementation owner. This example uses GitHub Copilot because it is the active provider on this PC. A Codex installation can replace the model prefix with `openai-codex` and use `/login openai-codex`. This setup is a recommendation, not a requirement. Configure and authenticate the selected provider. Pi resolves the model when each child starts. Existing children keep their model and thinking level. Run `/reload` after you edit the file. Use `subagent_list` or `/agents` to verify a new child.
 
 Before Subagents allocates child files, processes, tabs, or panes, it checks the selected model and provider authentication. Up to four children can remain open. Only one can be a Worker. Use `subagent_close` or `x` in `/agents` to release capacity. Failed and interrupted children release capacity automatically.
 
@@ -93,7 +93,7 @@ Optional child resources use `resources` in `defaults` or an agent entry. Resolu
 }
 ```
 
-Explorers cannot enable Context execution, Todos, RTK, or UV. Workers can enable Web Search. Explorer Search uses separate provider-accounted quota. Arbitrary extension and skill paths are not allowed. Capability diagnostics appear in spawn, list, and read results and in expanded `/agents` details.
+Explorers cannot enable Context execution, including `ctx_execute_file`, Todos, RTK, or UV. Workers can enable Web Search. The built-in Plan Mode Reviewer uses the Explorer restrictions and therefore never receives execution-only Context tools. Explorer Search uses separate provider-accounted quota. Arbitrary extension and skill paths are not allowed. Capability diagnostics appear in spawn, list, and read results and in expanded `/agents` details.
 
 The activity widget shows task-first child status. `/agents` contains full history, reports, Herdr focus, and cleanup. New transcripts stay hidden from `/resume` at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the unchanged legacy `<agent-dir>/sessions/subagents` location. You do not need to migrate legacy transcripts.
 

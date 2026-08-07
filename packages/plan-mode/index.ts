@@ -28,6 +28,23 @@ const stayInPlanMode = "No, stay in Plan mode";
 const implementationMessage = "Implement the approved plan.";
 const freshImplementationPrefix =
   "A previous agent produced the plan below for the user's task. Implement it in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and complete implementation and verification.";
+const reviewFailedPrefix = "Plan review failed";
+
+type ReviewResult = {
+  reviewerId?: string;
+  model?: string;
+  report?: string;
+  error?: string;
+};
+
+function modelReference(model: unknown): string | undefined {
+  if (!model || typeof model !== "object") return undefined;
+  const value = model as { provider?: unknown; id?: unknown };
+  if (typeof value.id !== "string" || !value.id) return undefined;
+  return typeof value.provider === "string" && value.provider
+    ? `${value.provider}/${value.id}`
+    : value.id;
+}
 
 type MessageEntryLike = {
   type: string;
@@ -87,6 +104,75 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       if (ctx.hasUI) ctx.ui.notify(warning, "warning");
       else console.error(`[plan-mode] ${warning}`);
     }
+  }
+
+  async function selectReviewerModel(ctx: ExtensionCommandContext): Promise<string | undefined> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(`${reviewFailedPrefix}: interactive model selection is unavailable.`, "error");
+      return undefined;
+    }
+    try {
+      await ctx.modelRegistry.refresh();
+      const scoped = (ctx.scopedModels ?? [])
+        .map((entry) => modelReference(entry.model))
+        .filter((model): model is string => Boolean(model));
+      const available = scoped.length
+        ? scoped
+        : ctx.modelRegistry
+            .getAll()
+            .map((model) => modelReference(model))
+            .filter((model): model is string => Boolean(model));
+      const models = [...new Set(available)].sort();
+      if (!models.length) {
+        ctx.ui.notify(`${reviewFailedPrefix}: no scoped or available models.`, "error");
+        return undefined;
+      }
+      const selected = await ctx.ui.select("Select a model for this plan review", models);
+      if (!selected) {
+        ctx.ui.notify(`${reviewFailedPrefix}: cancelled.`, "warning");
+        return undefined;
+      }
+      if (!models.includes(selected)) {
+        ctx.ui.notify(`${reviewFailedPrefix}: selected model is unavailable.`, "error");
+        return undefined;
+      }
+      return selected;
+    } catch (error) {
+      ctx.ui.notify(
+        `${reviewFailedPrefix}: could not load available models: ${error instanceof Error ? error.message : String(error)}`,
+        "error",
+      );
+      return undefined;
+    }
+  }
+
+  function requestPlanReview(
+    task: string,
+    model: string,
+    ctx: ExtensionCommandContext,
+  ): Promise<ReviewResult> {
+    return new Promise((resolve) => {
+      let settled = false;
+      let accepted = false;
+      const finish = (result: ReviewResult): void => {
+        if (settled) return;
+        settled = true;
+        resolve(result);
+      };
+      pi.events.emit(events.planReview, {
+        task,
+        model,
+        ctx,
+        accept: () => {
+          accepted = true;
+        },
+        respond: finish,
+      });
+      // A Plan Mode-only installation has no reviewer service; fail clearly rather than hanging.
+      setTimeout(() => {
+        if (!accepted) finish({ error: "Subagent reviewer service is unavailable." });
+      }, 100);
+    });
   }
 
   const requestRender = (): void => activeTui?.requestRender();
@@ -166,12 +252,15 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("Fresh implementation is unavailable while the agent is working.", "warning");
       return;
     }
+    const sourceEntryId = state.latestPlan?.sourceEntryId;
     const replacementState: PlanModeState = {
       ...createDefaultPlanModeState(),
       ...(state.latestPlan ? { latestPlan: { ...state.latestPlan } } : {}),
       ...(state.lastOfferedEntryId ? { lastOfferedEntryId: state.lastOfferedEntryId } : {}),
+      ...(sourceEntryId ? { implementedPlanSourceEntryId: sourceEntryId } : {}),
+      ...(state.lastReview ? { lastReview: { ...state.lastReview } } : {}),
     };
-    await ctx.newSession({
+    const result = await ctx.newSession({
       parentSession: ctx.sessionManager.getSessionFile(),
       setup: async (sessionManager) => {
         sessionManager.appendCustomEntry(PLAN_MODE_STATE_ENTRY, replacementState);
@@ -180,6 +269,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         await replacement.sendUserMessage(`${freshImplementationPrefix}\n\n${plan}`);
       },
     });
+    if (result?.cancelled !== true && sourceEntryId) consumePlan(sourceEntryId);
+  }
+
+  function consumePlan(sourceEntryId: string): void {
+    state = { ...state, implementedPlanSourceEntryId: sourceEntryId };
+    persistState();
   }
 
   async function implementPlan(args: string, ctx: ExtensionCommandContext): Promise<void> {
@@ -193,16 +288,29 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       ctx.ui.notify("No approved plan is available.", "warning");
       return;
     }
+    const sourceEntryId = state.latestPlan!.sourceEntryId;
+    if (state.implementedPlanSourceEntryId === sourceEntryId) {
+      ctx.ui.notify(
+        "This plan has already been implemented. Produce a newer plan before retrying.",
+        "warning",
+      );
+      return;
+    }
     if (args.trim().toLowerCase() === "fresh") {
       await startFreshImplementation(plan, ctx);
       return;
     }
+    consumePlan(sourceEntryId);
     leave(ctx, false);
     pi.sendUserMessage(implementationMessage);
   }
 
   pi.registerCommand("plan", {
     description: "Enter Plan Mode; use /plan off to leave or /plan <request> to start planning",
+    getArgumentCompletions: (argumentPrefix) =>
+      state.mode === "plan" && "off".startsWith(argumentPrefix.trim().toLowerCase())
+        ? [{ value: "off", label: "off", description: "Leave Plan Mode" }]
+        : null,
     handler: async (args, ctx) => {
       latestCommandContext = ctx;
       if (!ctx.isIdle()) {
@@ -230,7 +338,90 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("plan-implement", {
     description: "Implement the latest proposed plan; pass 'fresh' to use a new session",
+    getArgumentCompletions: (argumentPrefix) =>
+      "fresh".startsWith(argumentPrefix.trim().toLowerCase())
+        ? [{ value: "fresh", label: "fresh", description: "Use a new session" }]
+        : null,
     handler: implementPlan,
+  });
+
+  pi.registerCommand("plan-review", {
+    description: "Review the latest plan with a selected read-only Explorer model",
+    handler: async (_args, ctx) => {
+      latestCommandContext = ctx;
+      if (state.mode !== "plan") {
+        ctx.ui.notify(`${reviewFailedPrefix}: Plan Mode is not active.`, "error");
+        return;
+      }
+      if (!state.latestPlan?.markdown) {
+        ctx.ui.notify(`${reviewFailedPrefix}: no latest plan is available.`, "error");
+        return;
+      }
+      if (state.implementedPlanSourceEntryId === state.latestPlan.sourceEntryId) {
+        ctx.ui.notify(
+          `${reviewFailedPrefix}: the latest plan was already consumed; produce a newer plan.`,
+          "error",
+        );
+        return;
+      }
+      if (!ctx.isIdle()) {
+        ctx.ui.notify(`${reviewFailedPrefix}: the parent agent must be idle.`, "error");
+        return;
+      }
+      if (activeWorkers > 0) {
+        ctx.ui.notify(`${reviewFailedPrefix}: a Worker is active.`, "error");
+        return;
+      }
+      const model = await selectReviewerModel(ctx);
+      if (!model) return;
+      const sourceEntryId = state.latestPlan.sourceEntryId;
+      const result = await requestPlanReview(
+        [
+          "Review this Plan Mode proposal. The report is advisory: never approve or implement it.",
+          `Plan source ID: ${sourceEntryId}`,
+          "Return findings, risks, omissions, and concrete revisions for the parent.",
+          "",
+          state.latestPlan.markdown,
+        ].join("\n\n"),
+        model,
+        ctx,
+      );
+      if (result.error || !result.report || !result.reviewerId || !result.model) {
+        ctx.ui.notify(
+          `${reviewFailedPrefix}: ${result.error ?? "reviewer returned no report."}`,
+          "error",
+        );
+        return;
+      }
+      const review = {
+        planSourceEntryId: sourceEntryId,
+        reviewerId: result.reviewerId,
+        model: result.model,
+        reviewedAt: new Date().toISOString(),
+        report: result.report,
+      };
+      state = { ...state, lastReview: review };
+      persistState();
+      pi.sendMessage(
+        {
+          customType: "plan-review",
+          content: [
+            `Advisory plan review for ${sourceEntryId} using ${result.model}:`,
+            "",
+            result.report,
+            "",
+            "Plan Mode revision instruction: Treat this report as advisory. Review the findings and revise the proposed plan if needed, then remain in Plan Mode. Do not approve or implement the plan in this turn.",
+          ].join("\n"),
+          display: true,
+          details: review,
+        },
+        { triggerTurn: true },
+      );
+      ctx.ui.notify(
+        "Plan review completed. The report is available for revising the plan; it did not approve implementation.",
+        "info",
+      );
+    },
   });
 
   pi.registerCommand("plan-tools", {
@@ -363,6 +554,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     state = {
       ...state,
       latestPlan: { markdown: parsed.plan, sourceEntryId: latest.id },
+      implementedPlanSourceEntryId: undefined,
+      lastReview: undefined,
       lastOfferedEntryId: latest.id,
     };
     persistState();
@@ -376,6 +569,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         stayInPlanMode,
       ]);
       if (choice === implementCurrent) {
+        consumePlan(latest.id);
         leave(ctx, false);
         pi.sendUserMessage(implementationMessage, { deliverAs: "followUp" });
       } else if (choice === implementFresh) {

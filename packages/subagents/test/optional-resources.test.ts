@@ -287,7 +287,7 @@ describe("optional child resources", () => {
     expect(childSkillPaths(all)).toEqual([paths.webSearchSkill]);
     const allTools = childPiArgs(all)[childPiArgs(all).indexOf("--tools") + 1]!;
     expect(allTools).toBe(
-      "read,grep,find,ls,todo,bash,edit,write,ctx_execute_file,ctx_index,ctx_search,ctx_fetch_and_index,ctx_stats,ctx_execute,ctx_batch_execute,search",
+      "read,grep,find,ls,todo,bash,edit,write,ctx_index,ctx_search,ctx_fetch_and_index,ctx_stats,ctx_execute,ctx_execute_file,ctx_batch_execute,search",
     );
     expect(allTools.split(",").filter((tool) => tool === "bash")).toHaveLength(1);
     expect(childPiArgs(all)).toEqual([
@@ -318,7 +318,7 @@ describe("optional child resources", () => {
     };
     const workerArgs = childPiArgs(managed(worker, resources));
     const tools = workerArgs[workerArgs.indexOf("--tools") + 1];
-    expect(tools).toContain("ctx_execute,ctx_batch_execute");
+    expect(tools).toContain("ctx_execute,ctx_execute_file,ctx_batch_execute");
     expect(tools).toContain("search");
     expect(workerArgs.filter((arg) => arg === "--extension").length).toBe(4);
     const explorerArgs = childPiArgs(
@@ -333,7 +333,29 @@ describe("optional child resources", () => {
     expect(explorerArgs[explorerArgs.indexOf("--tools") + 1]?.split(",")).not.toContain(
       "ctx_execute",
     );
+    expect(explorerArgs[explorerArgs.indexOf("--tools") + 1]?.split(",")).not.toContain(
+      "ctx_execute_file",
+    );
     expect(explorerArgs[explorerArgs.indexOf("--tools") + 1]).not.toContain("bash");
+  });
+
+  it("keeps ctx_execute_file execution-only for Explorer and Reviewer resources", () => {
+    const explorerArgs = childPiArgs(
+      managed(
+        { ...explorer, name: "plan-reviewer" },
+        {
+          contextMode: true,
+          contextExecution: false,
+          webSearch: false,
+          todos: false,
+          rtk: false,
+          uv: false,
+        },
+      ),
+    );
+    const tools = explorerArgs[explorerArgs.indexOf("--tools") + 1]?.split(",") ?? [];
+    expect(tools).toContain("ctx_search");
+    expect(tools).not.toContain("ctx_execute_file");
   });
 
   it("composes RTK before UV and retains exactly one Bash owner", async () => {

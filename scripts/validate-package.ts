@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 const expectedEntrypoints = [
   "packages/ask-user-question/index.ts",
   "packages/plan-mode/index.ts",
+  "packages/repository-reference/index.ts",
   "packages/notify/index.ts",
   "packages/todos/index.ts",
   "packages/context-size/index.ts",

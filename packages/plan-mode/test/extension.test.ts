@@ -8,17 +8,28 @@ import planModeExtension from "../index.js";
 
 type Handler = (...args: any[]) => any;
 
-function harness(options: { hasUI?: boolean; selection?: string } = {}) {
+function harness(options: { hasUI?: boolean; selection?: string; selections?: string[] } = {}) {
+  const selections = [...(options.selections ?? [])];
   const commands = new Map<string, Handler>();
+  const completions = new Map<string, (prefix: string) => unknown>();
   const handlers = new Map<string, Handler[]>();
   const bus = new Map<string, Handler[]>();
   const entries: Array<Record<string, unknown>> = [];
   const sent: string[] = [];
+  const sentMessages: Array<{
+    customType: string;
+    content: string;
+    options?: { triggerTurn?: boolean };
+  }> = [];
   const replacementMessages: string[] = [];
   let activeTools = ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"];
   const api = {
-    registerCommand(name: string, command: { handler: Handler }) {
+    registerCommand(
+      name: string,
+      command: { handler: Handler; getArgumentCompletions?: (prefix: string) => unknown },
+    ) {
       commands.set(name, command.handler);
+      if (command.getArgumentCompletions) completions.set(name, command.getArgumentCompletions);
     },
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
@@ -37,6 +48,13 @@ function harness(options: { hasUI?: boolean; selection?: string } = {}) {
     sendUserMessage(message: string) {
       sent.push(message);
     },
+    sendMessage: (
+      message: { customType: string; content: string },
+      options?: { triggerTurn?: boolean },
+    ) => {
+      sentMessages.push({ ...message, options });
+      sent.push(`${message.customType}:${message.content}`);
+    },
     events: {
       emit(name: string, data: unknown) {
         for (const handler of bus.get(name) ?? []) handler(data);
@@ -52,9 +70,14 @@ function harness(options: { hasUI?: boolean; selection?: string } = {}) {
     isIdle: () => true,
     hasPendingMessages: () => false,
     sessionManager: { getBranch: () => entries, getSessionFile: () => "/tmp/session.jsonl" },
+    modelRegistry: {
+      refresh: async () => undefined,
+      getAll: () => [{ provider: "provider", id: "model" }],
+    },
+    scopedModels: [],
     ui: {
       notify: () => undefined,
-      select: async () => options.selection,
+      select: async () => selections.shift() ?? options.selection,
       setEditorText: () => undefined,
     },
     newSession: async (sessionOptions: {
@@ -74,14 +97,19 @@ function harness(options: { hasUI?: boolean; selection?: string } = {}) {
   planModeExtension(api);
   return {
     commands,
+    completions,
     handlers,
     entries,
     sent,
+    sentMessages,
     replacementMessages,
     context,
     activeTools: () => activeTools,
     emitExtensionEvent(name: string, data: unknown) {
       for (const handler of bus.get(name) ?? []) handler(data);
+    },
+    onExtensionEvent(name: string, handler: Handler) {
+      bus.set(name, [...(bus.get(name) ?? []), handler]);
     },
   };
 }
@@ -99,6 +127,19 @@ async function emit(
 }
 
 describe("Plan Mode lifecycle", () => {
+  it("offers only the active /plan off completion and fresh implementation completion", async () => {
+    const subject = harness();
+    await emit(subject, "session_start", {});
+    expect(subject.completions.get("plan")?.("o")).toBeNull();
+    await subject.commands.get("plan")?.("", subject.context);
+    expect(subject.completions.get("plan")?.("o")).toEqual([
+      { value: "off", label: "off", description: "Leave Plan Mode" },
+    ]);
+    expect(subject.completions.get("plan-implement")?.("f")).toEqual([
+      { value: "fresh", label: "fresh", description: "Use a new session" },
+    ]);
+  });
+
   it("transitions through /plan and restores direct mutation tools with /plan off", async () => {
     const subject = harness();
     await emit(subject, "session_start", {});
@@ -132,6 +173,46 @@ describe("Plan Mode lifecycle", () => {
     });
     await worker.commands.get("plan")?.("", worker.context);
     expect(worker.activeTools()).toContain("edit");
+  });
+
+  it("uses the reviewer bridge without approving or implementing the plan", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["No, stay in Plan mode", "provider/model"],
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.onExtensionEvent("pi-extensions:plan-review", (request: any) => {
+      request.accept();
+      request.respond({
+        reviewerId: "plan-reviewer-1",
+        model: request.model,
+        report: "Add an integration test.",
+      });
+    });
+    subject.entries.push({
+      type: "message",
+      id: "assistant-review",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Review me\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    await subject.commands.get("plan-review")?.("", subject.context);
+    expect(subject.sent.some((message) => message.startsWith("plan-review:"))).toBe(true);
+    expect(subject.sent).not.toContain("Implement the approved plan.");
+    expect(subject.sentMessages.at(-1)).toMatchObject({
+      options: { triggerTurn: true },
+    });
+    expect(subject.sentMessages.at(-1)?.content).toContain(
+      "Plan Mode revision instruction: Treat this report as advisory.",
+    );
+    expect(subject.sentMessages.at(-1)?.content).toContain("revise the proposed plan if needed");
+    expect(subject.sentMessages.at(-1)?.content).toContain("Do not approve or implement");
+    expect(subject.entries.at(-1)?.data).toMatchObject({
+      lastReview: { planSourceEntryId: "assistant-review", reviewerId: "plan-reviewer-1" },
+    });
   });
 
   it("implements an approved plan in current or fresh context", async () => {

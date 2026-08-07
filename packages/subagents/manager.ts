@@ -80,6 +80,7 @@ export class SubagentManager {
   private shutdownPromise?: Promise<void>;
   private ui?: ExtensionContext["ui"];
   private readonly unsubscribePlanMode: () => void;
+  private readonly unsubscribePlanReview: () => void;
 
   private enqueue<T>(id: string, operation: () => Promise<T>): Promise<T> {
     const previous = this.operationTails.get(id) ?? Promise.resolve();
@@ -103,6 +104,29 @@ export class SubagentManager {
     });
     this.unsubscribePlanMode =
       typeof unsubscribePlanMode === "function" ? unsubscribePlanMode : () => {};
+    const unsubscribePlanReview = pi.events.on(events.planReview, (data: unknown) => {
+      const request = data as {
+        task?: string;
+        model?: string;
+        ctx?: ExtensionContext;
+        respond?: (result: {
+          reviewerId?: string;
+          model?: string;
+          report?: string;
+          error?: string;
+        }) => void;
+        accept?: () => void;
+      };
+      if (!request.task || !request.model || !request.ctx || !request.respond) return;
+      request.accept?.();
+      void this.reviewPlan(request.task, request.model, request.ctx)
+        .then((result) => request.respond?.(result))
+        .catch((error: unknown) =>
+          request.respond?.({ error: error instanceof Error ? error.message : String(error) }),
+        );
+    });
+    this.unsubscribePlanReview =
+      typeof unsubscribePlanReview === "function" ? unsubscribePlanReview : () => {};
   }
 
   attachUi(ctx: ExtensionContext): void {
@@ -128,6 +152,7 @@ export class SubagentManager {
     agentName: string | undefined,
     task: string,
     ctx: ExtensionContext,
+    explicit?: string | { model?: string; thinking?: string },
   ): Promise<ManagedAgent> {
     this.assertParentOpen();
     this.attachUi(ctx);
@@ -161,11 +186,13 @@ export class SubagentManager {
     };
     try {
       const config = await loadSubagentConfig();
+      const explicitPolicy = typeof explicit === "string" ? { model: explicit } : explicit;
       const resolved = resolveAgentModelPolicy(
         definition,
         config,
         modelName(ctx),
         ctx.thinkingLevel,
+        explicitPolicy,
       );
       // Resource probes and resolution happen before allocating files, processes, tabs, or panes.
       const requestedResources = resolveAgentResourcePolicy(definition, config);
@@ -244,6 +271,37 @@ export class SubagentManager {
         if (allocatedContextDir) await fs.rm(allocatedContextDir, { recursive: true, force: true });
         if (allocatedSessionDir) await fs.rm(allocatedSessionDir, { recursive: true, force: true });
       }
+    }
+  }
+
+  /** Service bridge used by Plan Mode; the reviewer is an ordinary managed Explorer child. */
+  private async reviewPlan(
+    task: string,
+    explicitModel: string,
+    ctx: ExtensionContext,
+  ): Promise<{ reviewerId?: string; model?: string; report?: string; error?: string }> {
+    let agent: ManagedAgent | undefined;
+    try {
+      agent = await this.spawn("plan-reviewer", task, ctx, { model: explicitModel });
+      await this.wait(agent.id, false, undefined);
+      const report = agent.output || agent.error || "(reviewer returned no report)";
+      const result = {
+        reviewerId: agent.id,
+        model: agent.requestedModel ?? explicitModel,
+        report,
+        ...(agent.status === "failed" ? { error: agent.error ?? "Reviewer failed." } : {}),
+      };
+      await this.close(agent.id);
+      return result;
+    } catch (error) {
+      if (agent) {
+        try {
+          await this.close(agent.id);
+        } catch {
+          // Preserve the reviewer failure as the actionable error.
+        }
+      }
+      throw error;
     }
   }
 
@@ -437,6 +495,7 @@ export class SubagentManager {
 
   shutdown(): Promise<void> {
     this.unsubscribePlanMode();
+    this.unsubscribePlanReview();
     this.shutdownPromise ??= this.shutdownNow();
     return this.shutdownPromise;
   }

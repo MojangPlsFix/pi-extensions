@@ -6,6 +6,7 @@ Subagents run isolated, persistent child Pi sessions for parallel investigation 
 
 - **Explorer** is the default read-only role. It investigates code, architecture, documentation, and current web topics. Its reviewed tools do not include file mutation.
 - **Worker** handles delegated file changes. At most one Worker can remain open. Workers cannot start or resume while Plan Mode is active.
+- **Plan Reviewer** (`plan-reviewer`) is a built-in read-only Explorer role used by Plan Mode `/plan-review`. It is spawned through the manager service bridge, waits for a report, and closes automatically. A per-review model selection overrides normal role/configuration/parent precedence only for that reviewer.
 - Trusted custom agents can use Markdown files in `~/.pi/agent/subagents/agents/`. The package ignores project-controlled definitions.
 
 Children cannot start their own Subagents or ask users questions. They return questions and blockers to the parent.
@@ -38,7 +39,7 @@ Create `~/.pi/agent/subagents/config.json` to configure roles. This development 
 
 This setup is a recommendation, not a hard-coded requirement. The example uses Pi's built-in `github-copilot` provider. Authenticate it through Pi's GitHub Copilot login flow or `COPILOT_GITHUB_TOKEN`. A Codex installation can use `openai-codex/gpt-5.6-luna` after `/login openai-codex`. The `copilot` CLI and `copilot login` are required only for the separate Search integration. They are not required for Subagent children.
 
-Pi resolves a model when a child starts. Existing children keep their model and thinking level. `inherit` takes the parent snapshot at that time. Later parent model changes do not affect an open child. Luna is opt-in. Pi has no built-in Luna default.
+Pi resolves a model when a child starts. Explicit per-call model overrides take precedence over per-agent settings, custom frontmatter, defaults, and the parent snapshot. Existing children keep their model and thinking level. `inherit` takes the parent snapshot at that time. Later parent model changes do not affect an open child. Luna is opt-in. Pi has no built-in Luna default.
 
 Before it allocates transcript directories, child processes, tabs, or panes, Subagents checks that Pi can resolve the selected model and provider authentication. Invalid configuration or missing authentication produces an actionable error.
 
@@ -132,6 +133,7 @@ Child resources use a `resources` object in `defaults`, a built-in mode entry, o
 | --- | --- | --- |
 | Context Mode | Auto-detect | Auto-detect |
 | Context execution | Never | When Context Mode is active |
+| `ctx_execute_file` | Never (execution-only) | When Context Mode execution is active |
 | Web Search | Enabled | Disabled by default |
 | Todos | Disabled | Enabled |
 | RTK | Never | Auto-detect |
