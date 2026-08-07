@@ -1,4 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
+
+const storeMocks = vi.hoisted(() => ({
+  cleanupRepositoryReferences: vi.fn(),
+  cloneRepositoryReference: vi.fn(),
+  listRepositoryReferences: vi.fn(),
+  removeRepositoryReference: vi.fn(),
+}));
+vi.mock("../store.js", () => storeMocks);
+
 import repositoryReferenceExtension from "../index.js";
 
 type RegisteredTool = {
@@ -27,42 +36,36 @@ function text(result: { content: Array<{ text?: string }> }): string {
 }
 
 describe("repository_reference tool", () => {
-  it("rejects clone without UI instead of starting a network operation", async () => {
+  it("clones without UI confirmation", async () => {
     const tool = registeredTool();
     const confirm = vi.fn();
+    const reference = {
+      id: "ref-test",
+      remote: "https://github.com/example/project.git",
+      revision: "main",
+      resolvedRevision: "0123456789abcdef0123456789abcdef01234567",
+      path: "/tmp/pi-repository-references/ref-test",
+      createdAt: "2025-01-01T00:00:00.000Z",
+    };
+    storeMocks.cloneRepositoryReference.mockResolvedValueOnce(reference);
 
     const result = await tool.execute(
       "call",
-      { action: "clone", remote: "https://github.com/example/project.git", revision: "main" },
+      { action: "clone", remote: reference.remote, revision: reference.revision },
       undefined,
       undefined,
       { hasUI: false, ui: { confirm } },
     );
 
-    expect(text(result)).toContain("interactive UI confirmation");
+    expect(text(result)).toContain("Created repository reference ref-test");
     expect(confirm).not.toHaveBeenCalled();
+    expect(storeMocks.cloneRepositoryReference).toHaveBeenCalledWith(
+      reference.remote,
+      reference.revision,
+    );
   });
 
-  it("confirms a clone before allowing it to proceed", async () => {
-    const tool = registeredTool();
-    const confirm = vi.fn().mockResolvedValue(false);
-
-    const result = await tool.execute(
-      "call",
-      { action: "clone", remote: "https://github.com/example/project.git", revision: "main" },
-      undefined,
-      undefined,
-      { hasUI: true, ui: { confirm } },
-    );
-
-    expect(confirm).toHaveBeenCalledWith(
-      "Confirm repository clone",
-      "Clone https://github.com/example/project.git at revision main? This may access the network and create a temporary checkout.",
-    );
-    expect(text(result)).toContain("repository reference clone cancelled");
-  });
-
-  it("rejects local file remotes before asking for confirmation", async () => {
+  it("rejects local file remotes without asking for confirmation", async () => {
     const tool = registeredTool();
     const confirm = vi.fn();
 

@@ -21,9 +21,9 @@ export default function repositoryReferenceExtension(pi: ExtensionAPI): void {
     name: "repository_reference",
     label: "Repository reference",
     description:
-      "Safely clone a validated network Git remote at a validated revision into a managed temporary directory after interactive confirmation, then list, remove, or clean up only references created by this tool. It does not use a shell or require Context Mode.",
+      "Safely clone a validated network Git remote at a validated revision into a managed temporary directory, then list, remove, or clean up only references created by this tool. It does not use a shell or require Context Mode.",
     parameters: RepositoryReferenceParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
       try {
         switch (params.action) {
           case "clone": {
@@ -31,15 +31,6 @@ export default function repositoryReferenceExtension(pi: ExtensionAPI): void {
             if ("error" in remoteResult) throw new Error(remoteResult.error);
             const revisionResult = validateRevision(params.revision);
             if ("error" in revisionResult) throw new Error(revisionResult.error);
-            if (!ctx.hasUI)
-              throw new Error(
-                "repository reference clone requires an interactive UI confirmation; invoke it from a session with UI available",
-              );
-            const confirmed = await ctx.ui.confirm(
-              "Confirm repository clone",
-              `Clone ${remoteResult.remote} at revision ${revisionResult.revision}? This may access the network and create a temporary checkout.`,
-            );
-            if (!confirmed) throw new Error("repository reference clone cancelled");
             const reference = await cloneRepositoryReference(
               remoteResult.remote,
               revisionResult.revision,

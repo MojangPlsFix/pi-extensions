@@ -21,6 +21,7 @@ const GIT_ENV = {
 };
 
 type GitRunner = (args: string[], cwd?: string) => Promise<{ stdout: string; stderr: string }>;
+const COMMIT_SHA = /^[0-9a-f]{40}$/i;
 
 export const runGit: GitRunner = async (args, cwd) => {
   const result = await execFile("git", args, {
@@ -92,6 +93,35 @@ export async function listRepositoryReferences(
   return references.sort((left, right) => left.id.localeCompare(right.id));
 }
 
+function revisionCandidates(revision: string): string[] {
+  if (revision === "HEAD" || /^[0-9a-f]{7,64}$/i.test(revision)) return [revision];
+  if (revision.startsWith("refs/heads/"))
+    return [`refs/remotes/origin/${revision.slice("refs/heads/".length)}`];
+  if (revision.startsWith("refs/")) return [revision];
+  return [`refs/remotes/origin/${revision}`, `refs/tags/${revision}`, revision];
+}
+
+async function resolveRevision(path: string, revision: string, git: GitRunner): Promise<string> {
+  for (const candidate of revisionCandidates(revision)) {
+    try {
+      const resolved = (
+        await git([
+          "-C",
+          path,
+          "rev-parse",
+          "--verify",
+          "--end-of-options",
+          `${candidate}^{commit}`,
+        ])
+      ).stdout.trim();
+      if (COMMIT_SHA.test(resolved)) return resolved;
+    } catch {
+      // Try the next safe ref spelling. Git's error is not needed by callers.
+    }
+  }
+  throw new Error(`revision ${revision} could not be resolved to a commit`);
+}
+
 export async function cloneRepositoryReference(
   remoteInput: unknown,
   revisionInput: unknown,
@@ -107,12 +137,10 @@ export async function cloneRepositoryReference(
   const path = await fs.mkdtemp(join(managedRoot, "ref-"));
   const id = basename(path);
   try {
-    // Use execFile with an argument array. Remote and revision never become shell text.
+    // Use execFile with argument arrays. Remote and revision never become shell text.
     await git(["clone", "--no-checkout", remoteResult.remote, path]);
-    await git(["-C", path, "checkout", "--detach", "--quiet", revisionResult.revision]);
-    const resolvedRevision = (await git(["-C", path, "rev-parse", "HEAD"])).stdout.trim();
-    if (!/^[0-9a-f]{40}$/i.test(resolvedRevision))
-      throw new Error("git returned an invalid resolved revision");
+    const resolvedRevision = await resolveRevision(path, revisionResult.revision, git);
+    await git(["-C", path, "checkout", "--detach", "--quiet", resolvedRevision]);
     const reference: RepositoryReference = {
       id,
       remote: remoteResult.remote,

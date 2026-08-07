@@ -4,7 +4,7 @@
 
 ## Operations
 
-- `clone`: validate a network remote and optional revision, ask for interactive confirmation, then clone it without a shell into a private temporary directory and check out the revision detached. The result includes the managed `id`, path, requested revision, and resolved commit. Clone is rejected when no interactive UI is available.
+- `clone`: validate a network remote and optional revision, then clone it without a shell into a private temporary directory and check out the revision detached. The result includes the managed `id`, path, requested revision, and resolved commit. Cloning works with or without an interactive UI.
 - `list`: show references still managed by this extension.
 - `remove`: delete one reference by its returned id.
 - `cleanup`: delete every valid reference managed by this extension.

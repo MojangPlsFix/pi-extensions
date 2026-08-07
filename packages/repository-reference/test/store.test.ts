@@ -66,12 +66,40 @@ describe("managed repository references", () => {
     expect(reference.resolvedRevision).toBe(resolvedRevision);
     expect(calls).toEqual([
       ["clone", "--no-checkout", "https://github.com/example/project.git", reference.path],
-      ["-C", reference.path, "checkout", "--detach", "--quiet", "main"],
-      ["-C", reference.path, "rev-parse", "HEAD"],
+      [
+        "-C",
+        reference.path,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "refs/remotes/origin/main^{commit}",
+      ],
+      ["-C", reference.path, "checkout", "--detach", "--quiet", resolvedRevision],
     ]);
     expect(await listRepositoryReferences(root)).toEqual([reference]);
 
+    const develop = await cloneRepositoryReference(
+      "https://github.com/example/project.git",
+      "refs/heads/develop",
+      root,
+      fakeGit,
+    );
+    expect(calls.slice(-3)).toEqual([
+      ["clone", "--no-checkout", "https://github.com/example/project.git", develop.path],
+      [
+        "-C",
+        develop.path,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        "refs/remotes/origin/develop^{commit}",
+      ],
+      ["-C", develop.path, "checkout", "--detach", "--quiet", resolvedRevision],
+    ]);
+
     await removeRepositoryReference(reference.id, root);
+    expect(await listRepositoryReferences(root)).toEqual([develop]);
+    await removeRepositoryReference(develop.id, root);
     expect(await listRepositoryReferences(root)).toEqual([]);
 
     const second = await cloneRepositoryReference(
