@@ -14,6 +14,8 @@ function harness(
     hasUI?: boolean;
     selection?: string;
     selections?: string[];
+    inputs?: Array<string | undefined>;
+    confirmations?: boolean[];
     allModels?: Array<{
       provider: string;
       id: string;
@@ -40,6 +42,8 @@ function harness(
   } = {},
 ) {
   const selections = [...(options.selections ?? [])];
+  const inputs = [...(options.inputs ?? [])];
+  const confirmations = [...(options.confirmations ?? [])];
   const commands = new Map<string, Handler>();
   const completions = new Map<string, (prefix: string) => unknown>();
   const handlers = new Map<string, Handler[]>();
@@ -130,6 +134,8 @@ function harness(
         selectCalls.push({ title, options: selectOptions });
         return selections.shift() ?? options.selection;
       },
+      input: async () => inputs.shift(),
+      confirm: async () => confirmations.shift() ?? false,
       setEditorText: () => undefined,
     },
     newSession: async (sessionOptions: {
@@ -239,7 +245,9 @@ describe("Plan Mode lifecycle", () => {
     await emit(subject, "session_start", {});
     await subject.commands.get("plan")?.("", subject.context);
     const interactions: Array<{ active: boolean; reason: string }> = [];
+    const herdrBlocking: Array<{ active: boolean; label?: string }> = [];
     subject.onExtensionEvent(events.userInteraction, (event: any) => interactions.push(event));
+    subject.onExtensionEvent(events.herdrBlocked, (event: any) => herdrBlocking.push(event));
     subject.onExtensionEvent("pi-extensions:plan-review", (request: any) => {
       request.accept();
       request.respond({
@@ -276,6 +284,14 @@ describe("Plan Mode lifecycle", () => {
       { active: true, reason: "Plan Mode reviewer effort selection" },
       { active: false, reason: "Plan Mode reviewer effort selection" },
     ]);
+    expect(herdrBlocking).toEqual([
+      { active: true, label: "Plan Mode proposal approval" },
+      { active: false },
+      { active: true, label: "Plan Mode reviewer model selection" },
+      { active: false },
+      { active: true, label: "Plan Mode reviewer effort selection" },
+      { active: false },
+    ]);
     expect(subject.sent.some((message) => message.startsWith("plan-review:"))).toBe(true);
     expect(subject.sent).not.toContain("Implement the approved plan.");
     expect(subject.sentMessages.at(-1)).toMatchObject({
@@ -294,6 +310,39 @@ describe("Plan Mode lifecycle", () => {
         thinking: "high",
       },
     });
+  });
+
+  it("reports /plan-tools selections, inputs, and confirmations to both event streams", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["Global", "CLI program"],
+      inputs: ["example-cli", "help, inspect"],
+      confirmations: [false],
+    });
+    await emit(subject, "session_start", {});
+    const interactions: Array<{ active: boolean; reason: string }> = [];
+    const herdrBlocking: Array<{ active: boolean; label?: string }> = [];
+    subject.onExtensionEvent(events.userInteraction, (event: any) => interactions.push(event));
+    subject.onExtensionEvent(events.herdrBlocked, (event: any) => herdrBlocking.push(event));
+
+    await subject.commands.get("plan-tools")?.("", subject.context);
+
+    const reasons = [
+      "Plan Mode approval scope selection",
+      "Plan Mode approval type selection",
+      "Plan Mode command approval program input",
+      "Plan Mode command approval details input",
+      "Plan Mode command approval confirmation",
+    ];
+    expect(interactions).toEqual(
+      reasons.flatMap((reason) => [
+        { active: true, reason },
+        { active: false, reason },
+      ]),
+    );
+    expect(herdrBlocking).toEqual(
+      reasons.flatMap((label) => [{ active: true, label }, { active: false }]),
+    );
   });
 
   it("uses only available models and intersects scoped models", async () => {

@@ -35,13 +35,13 @@ function tuiHarness() {
 }
 
 describe("ask_user_question", () => {
-  it("reports the whole question wizard as a user interaction", async () => {
-    const interactions: unknown[] = [];
+  it("reports the whole question wizard to both interaction event streams", async () => {
+    const emitted: Array<{ name: string; value: unknown }> = [];
     let tool: any;
     const api = {
       events: {
         emit(name: string, value: unknown) {
-          if (name === events.userInteraction) interactions.push(value);
+          emitted.push({ name, value });
         },
       },
       on() {},
@@ -56,9 +56,23 @@ describe("ask_user_question", () => {
       mode: "print",
     });
 
-    expect(interactions).toEqual([
-      { active: true, reason: "Ask User question wizard" },
-      { active: false, reason: "Ask User question wizard" },
+    expect(emitted).toEqual([
+      {
+        name: events.userInteraction,
+        value: { active: true, reason: "Ask User question wizard" },
+      },
+      {
+        name: events.herdrBlocked,
+        value: { active: true, label: "Ask User question wizard" },
+      },
+      {
+        name: events.userInteraction,
+        value: { active: false, reason: "Ask User question wizard" },
+      },
+      {
+        name: events.herdrBlocked,
+        value: { active: false },
+      },
     ]);
   });
 

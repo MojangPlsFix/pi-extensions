@@ -103,6 +103,15 @@ Completion cards use Pi's normal custom-message shell. Compact cards show the ta
 
 RPC is the normal backend. It does not require Herdr. A complete explicit Herdr environment with `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH` selects Herdr after control-plane verification. An incomplete or broken explicit environment blocks spawning. It does not silently select RPC.
 
+Semantic `blocked` state for Ask User and Plan Mode dialogs requires the current official Herdr Pi integration. Install or update the integration, and then verify its status:
+
+```text
+herdr integration install pi
+herdr integration status
+```
+
+The official integration keeps lifecycle authority under `herdr:pi`. Subagents keeps the older `pi-extensions:user-interaction` metadata fallback for visual waiting labels. It does not report or release the parent agent lifecycle.
+
 Herdr creates one non-focused tab in the parent workspace. It labels the tab from the parent tab, such as `<parent tab label> - Subagents`. If the parent label is unavailable, it uses `Subagents`. The visible label never uses the cwd, project name, or username. `/agents` and pane metadata keep the parent workspace, Subagents tab, and pane IDs.
 
 Herdr never takes focus by itself. One to four open children use the tab root pane and an adaptive layout. Before each split, Subagents checks current geometry. It selects the largest owned pane and splits right at `0.5` when the pane is at least twice as wide as tall. Otherwise, it splits down. It checks geometry again after closures.

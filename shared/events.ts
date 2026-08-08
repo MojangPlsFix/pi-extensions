@@ -4,6 +4,7 @@ export const events = {
   planReview: "pi-extensions:plan-review",
   subagentsStatus: "pi-extensions:subagents-status",
   userInteraction: "pi-extensions:user-interaction",
+  herdrBlocked: "herdr:blocked",
 } as const;
 
 export type PlanModeEvent = {
@@ -15,6 +16,43 @@ export type UserInteractionEvent = {
   active: boolean;
   reason: string;
 };
+
+/** Herdr's official semantic blocking event. */
+export type HerdrBlockedEvent = {
+  active: boolean;
+  label?: string;
+};
+
+type EventEmitter = {
+  emit(name: string, data: unknown): unknown;
+};
+
+/** Report a blocking user interaction to both current and legacy integrations. */
+export async function withBlockingUserInteraction<T>(
+  emitter: EventEmitter,
+  reason: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  emitter.emit(events.userInteraction, {
+    active: true,
+    reason,
+  } satisfies UserInteractionEvent);
+  emitter.emit(events.herdrBlocked, {
+    active: true,
+    label: reason,
+  } satisfies HerdrBlockedEvent);
+  try {
+    return await operation();
+  } finally {
+    emitter.emit(events.userInteraction, {
+      active: false,
+      reason,
+    } satisfies UserInteractionEvent);
+    emitter.emit(events.herdrBlocked, {
+      active: false,
+    } satisfies HerdrBlockedEvent);
+  }
+}
 
 /** Request for the optional Plan Mode reviewer service. Thinking is optional for old senders. */
 export type PlanReviewEvent = {

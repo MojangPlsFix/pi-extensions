@@ -17,7 +17,7 @@ import {
   events,
   type PlanModeEvent,
   type SubagentsStatusEvent,
-  type UserInteractionEvent,
+  withBlockingUserInteraction,
 } from "../../shared/events.js";
 import { configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
@@ -332,17 +332,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   const requestRender = (): void => activeTui?.requestRender();
-  async function waitForUser<T>(reason: string, operation: () => Promise<T>): Promise<T> {
-    pi.events.emit(events.userInteraction, { active: true, reason } satisfies UserInteractionEvent);
-    try {
-      return await operation();
-    } finally {
-      pi.events.emit(events.userInteraction, {
-        active: false,
-        reason,
-      } satisfies UserInteractionEvent);
-    }
-  }
+  const waitForUser = <T>(reason: string, operation: () => Promise<T>): Promise<T> =>
+    withBlockingUserInteraction(pi.events, reason, operation);
 
   const emitMode = (): void =>
     pi.events.emit(events.planMode, { enabled: state.mode === "plan" } satisfies PlanModeEvent);
