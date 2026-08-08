@@ -26,6 +26,7 @@ pi update --extensions
 | [Notify](packages/notify/) | Sends a desktop or terminal notification after an assistant turn completes. | `/notify-test`, `/notify-toggle`, `/notify-status` | Windows, WSL, and supported terminals |
 | [Todos](packages/todos/) | Stores project work items with status, tags, assignment, and locking. | `/todos`, `todo` | Any provider |
 | [Context Size](packages/context-size/) | Sets a temporary context-window limit and shows it in the status area. | `/context`, `/context 128k`, `/context auto` | Any model |
+| [Codex Compaction](packages/codex-compaction/) | Uses OpenAI opaque checkpoints through Pi's compaction lifecycle at 90% context usage. | Automatic, `/compact` | Exact `openai-codex/openai-codex-responses` models |
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private cache and sends a file reference to the model. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
 | [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Subagent subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
@@ -35,10 +36,10 @@ pi update --extensions
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
-The package installs all 14 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 15 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
-- **OpenAI Codex OAuth:** Usage Meter and Search use OpenAI Codex OAuth for `openai-codex`. Run `/login openai-codex`.
+- **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
 - **Herdr:** Subagents normally use persistent Pi RPC children. When Herdr is available, one non-focused task-named Subagents tab uses one to four panes and closes in a controlled way.
 - **Context Mode:** Subagents discover Context Mode only for the optional child integration.
 - **RTK and UV:** Worker children detect RTK 0.23 or newer and a working UV executable. A missing tool does not block a Worker. Native Pi Bash remains the fallback.

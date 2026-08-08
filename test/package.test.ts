@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
+import codexCompaction from "../packages/codex-compaction/index.js";
 import contextSize from "../packages/context-size/index.js";
 import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
@@ -50,6 +51,7 @@ const entrypoints = [
   notify,
   todos,
   contextSize,
+  codexCompaction,
   largePaste,
   modelCostBadges,
   stats,
@@ -108,6 +110,8 @@ describe("package manifest", () => {
       "https://github.com/openai/codex/commit/1e85ca099e4265bf89f4016772d299816e231bb3",
       "https://github.com/openai/codex/commit/2b5bdcf67547860f2e5c5a605009a70026796b2b",
       "https://github.com/openai/codex/blob/main/LICENSE",
+      "https://github.com/ogulcancelik/pi-extensions/commit/ca37adb6c8000f6a83c447b4a119657c7714bc94",
+      "https://github.com/ogulcancelik/pi-extensions/blob/ca37adb6c8000f6a83c447b4a119657c7714bc94/packages/pi-codex-compaction/LICENSE",
       "https://github.com/badlogic/pi-skills",
       "https://github.com/badlogic/pi-skills/blob/main/LICENSE",
       "https://github.com/mitsuhiko/agent-stuff",

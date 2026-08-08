@@ -21,6 +21,14 @@ The projects below were used as references or inspiration. Their inclusion does 
 - License: [Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE)
 - Relationship: The Usage Meter extension's direct ChatGPT quota request and rate-limit parsing were informed by the OpenAI Codex implementation and adapted independently to Pi's extension and OAuth APIs.
 
+## Codex Native Compaction Extension
+
+- Reference commit: <https://github.com/ogulcancelik/pi-extensions/commit/ca37adb6c8000f6a83c447b4a119657c7714bc94>
+- Pinned source: [pi-codex-compaction](https://github.com/ogulcancelik/pi-extensions/tree/ca37adb6c8000f6a83c447b4a119657c7714bc94/packages/pi-codex-compaction)
+- License: [MIT](https://github.com/ogulcancelik/pi-extensions/blob/ca37adb6c8000f6a83c447b4a119657c7714bc94/packages/pi-codex-compaction/LICENSE)
+- Copyright: 2025 Can Celik
+- Relationship: The Codex Compaction extension adapts this implementation to this package and Pi 0.84 APIs.
+
 ## STE Writing Skill
 
 - Sources: [ste-writing-skill.md](https://raw.githubusercontent.com/woosal1337/blog/main/videos/ep01-the-cure-for-ai-slop/ste-writing-skill.md) and [ste-lint.py](https://raw.githubusercontent.com/woosal1337/blog/main/videos/ep01-the-cure-for-ai-slop/ste-lint.py)

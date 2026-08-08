@@ -8,6 +8,7 @@ const expectedEntrypoints = [
   "packages/notify/index.ts",
   "packages/todos/index.ts",
   "packages/context-size/index.ts",
+  "packages/codex-compaction/index.ts",
   "packages/large-paste/index.ts",
   "packages/model-cost-badges/index.ts",
   "packages/stats/index.ts",
