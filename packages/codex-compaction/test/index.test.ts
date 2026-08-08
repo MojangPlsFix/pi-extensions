@@ -486,7 +486,7 @@ describe("pi-codex-compaction", () => {
     ]);
   });
 
-  test("continues when Pi reports compaction before its completion callback", () => {
+  test("continues when ctx.compact emits a matching manual event before onComplete", () => {
     const entry = userEntry("user-1", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
@@ -497,7 +497,7 @@ describe("pi-codex-compaction", () => {
 
     harness.handlers.get("session_compact")!(
       {
-        reason: "threshold",
+        reason: "manual",
         willRetry: false,
         fromExtension: true,
         compactionEntry: { details: nativeDetails() },
@@ -505,6 +505,34 @@ describe("pi-codex-compaction", () => {
       harness.context,
     );
     harness.compactionRequests[0].onComplete({});
+    expect(harness.sentUserMessages).toEqual([
+      {
+        content: "Compaction completed. Continue.",
+        options: undefined,
+      },
+    ]);
+  });
+
+  test("continues exactly once after duplicate compaction completion signals", () => {
+    const entry = userEntry("user-duplicate", "continue the task");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.setIdle(true);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+
+    const completionEvent = {
+      reason: "manual",
+      willRetry: false,
+      fromExtension: true,
+      compactionEntry: { details: nativeDetails() },
+    };
+    harness.handlers.get("session_compact")!(completionEvent, harness.context);
+    harness.handlers.get("session_compact")!(completionEvent, harness.context);
+    harness.compactionRequests[0].onComplete({});
+    harness.compactionRequests[0].onComplete({});
+    harness.handlers.get("session_compact")!(completionEvent, harness.context);
+
     expect(harness.sentUserMessages).toEqual([
       {
         content: "Compaction completed. Continue.",
@@ -586,19 +614,32 @@ describe("pi-codex-compaction", () => {
     }
   });
 
-  test("does not auto-continue when input is already queued", () => {
+  test("continues as a follow-up when input is queued after the abort", () => {
     const entry = userEntry("user-1", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
     harness.handlers.get("turn_end")!({}, harness.context);
-    harness.setIdle(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
     harness.setHasPendingMessages(true);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+    harness.handlers.get("session_compact")!(
+      {
+        reason: "manual",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry: { details: nativeDetails() },
+      },
+      harness.context,
+    );
     harness.compactionRequests[0].onComplete({});
-    expect(harness.sentUserMessages).toEqual([]);
+    expect(harness.sentUserMessages).toEqual([
+      {
+        content: "Compaction completed. Continue.",
+        options: { deliverAs: "followUp" },
+      },
+    ]);
   });
 
-  test("remembers queued input even when abort clears Pi's pending queue", () => {
+  test("continues when abort clears input that was already queued", () => {
     const harness = extensionHarness([userEntry("user-queued", "continue")]);
     harness.setUsageTokens(180_000);
     harness.setHasPendingMessages(true);
@@ -606,8 +647,22 @@ describe("pi-codex-compaction", () => {
     harness.setHasPendingMessages(false);
     harness.setIdle(true);
     harness.handlers.get("agent_settled")!({}, harness.context);
+    harness.handlers.get("session_compact")!(
+      {
+        reason: "manual",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry: { details: nativeDetails() },
+      },
+      harness.context,
+    );
     harness.compactionRequests[0].onComplete({});
-    expect(harness.sentUserMessages).toEqual([]);
+    expect(harness.sentUserMessages).toEqual([
+      {
+        content: "Compaction completed. Continue.",
+        options: undefined,
+      },
+    ]);
   });
 
   test("a completed manual compaction clears pending automatic compaction", () => {

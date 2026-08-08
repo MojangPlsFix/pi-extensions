@@ -38,7 +38,6 @@ type CompactionStatus = {
 type ForcedCompactionState = {
   sessionId: string;
   phase: "waitingForSettle" | "compacting" | "compacted";
-  suppressContinuation: boolean;
 };
 
 const COMPACTION_STATUS_KIND = "openai-codex-compaction-status";
@@ -280,7 +279,6 @@ export default function codexCompactionExtension(pi: ExtensionAPI): void {
       state === expected || (expected.phase === "compacting" && state?.phase === "compacted");
     if (!stateMatches || state?.sessionId !== expected.sessionId) return;
     forcedCompaction = undefined;
-    if (state.suppressContinuation || ctx.hasPendingMessages()) return;
     if (ctx.isIdle()) {
       pi.sendUserMessage(CONTINUATION_PROMPT);
     } else {
@@ -307,7 +305,6 @@ export default function codexCompactionExtension(pi: ExtensionAPI): void {
     forcedCompaction = {
       sessionId: ctx.sessionManager.getSessionId(),
       phase: "waitingForSettle",
-      suppressContinuation: ctx.hasPendingMessages(),
     };
     if (ctx.hasUI) {
       ctx.ui.notify(
@@ -329,8 +326,15 @@ export default function codexCompactionExtension(pi: ExtensionAPI): void {
     const state = forcedCompaction;
     if (!state || state.sessionId !== ctx.sessionManager.getSessionId()) return;
     if (event.reason === "manual") {
-      forcedCompaction = undefined;
-      return;
+      if (state.phase === "waitingForSettle") {
+        forcedCompaction = undefined;
+        return;
+      }
+      if (state.phase === "compacted") return;
+      if (!isMatchingNativeCompaction) {
+        forcedCompaction = undefined;
+        return;
+      }
     }
     if (
       (state.phase !== "waitingForSettle" && state.phase !== "compacting") ||

@@ -39,7 +39,11 @@ The turn-boundary threshold is 90% by default. At that threshold, the extension 
 3. It starts Pi's normal compaction lifecycle.
 4. It sends `Compaction completed. Continue.` after success.
 
-The extension does not send the continuation when Pi will retry an overflow. It also does not send it when input is already queued.
+After a threshold stop, the extension always sends the continuation when compaction succeeds. Queued input before or after the stop does not suppress the continuation.
+
+If Pi is idle, the continuation starts a run immediately. If another run is active, Pi queues the continuation as a follow-up.
+
+Pi's overflow recovery does not use this continuation. Pi retries the overflow request.
 
 Pi stores a short local marker because each `CompactionEntry` requires a summary. Requests to the matching Codex model exclude this marker. They contain recent user messages, one opaque checkpoint, and messages after that checkpoint.
 
@@ -48,6 +52,8 @@ Repeated compaction replaces the old opaque item. It does not nest opaque checkp
 ## Manual compaction
 
 `/compact [instructions]` starts native compaction for a matching Codex model.
+
+A standalone `/compact` does not send the continuation or start a new run after compaction. Pi remains idle unless another input is queued.
 
 The optional focus instructions cannot control a readable summary. Native compaction does not create one.
 
