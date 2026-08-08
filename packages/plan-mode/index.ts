@@ -346,6 +346,24 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     });
   }
 
+  function reportFreshImplementationError(
+    error: unknown,
+    replacementContext?: ExtensionContext,
+  ): void {
+    const message = `Could not start fresh implementation: ${error instanceof Error ? error.message : String(error)}`;
+    if (replacementContext) {
+      try {
+        if (replacementContext.hasUI) {
+          replacementContext.ui.notify(message, "error");
+          return;
+        }
+      } catch {
+        // Session replacement can invalidate even the reporting context; logging remains safe.
+      }
+    }
+    console.error(`[plan-mode] ${message}`);
+  }
+
   function restoreTools(names: string[]): void {
     if (names.length === 0) return;
     const available = new Set(pi.getAllTools().map((tool) => tool.name));
@@ -407,28 +425,37 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     plan: string,
     ctx: ExtensionCommandContext,
   ): Promise<void> {
-    if (!ctx.isIdle()) {
-      ctx.ui.notify("Fresh implementation is unavailable while the agent is working.", "warning");
-      return;
+    try {
+      if (!ctx.isIdle()) {
+        ctx.ui.notify("Fresh implementation is unavailable while the agent is working.", "warning");
+        return;
+      }
+      const parentSession = ctx.sessionManager.getSessionFile();
+      const sourceEntryId = state.latestPlan?.sourceEntryId;
+      const replacementState: PlanModeState = {
+        ...createDefaultPlanModeState(),
+        ...(state.latestPlan ? { latestPlan: { ...state.latestPlan } } : {}),
+        ...(state.lastOfferedEntryId ? { lastOfferedEntryId: state.lastOfferedEntryId } : {}),
+        ...(sourceEntryId ? { implementedPlanSourceEntryId: sourceEntryId } : {}),
+        ...(state.lastReview ? { lastReview: { ...state.lastReview } } : {}),
+      };
+      await ctx.newSession({
+        parentSession,
+        setup: async (sessionManager) => {
+          sessionManager.appendCustomEntry(PLAN_MODE_STATE_ENTRY, replacementState);
+        },
+        withSession: async (replacement) => {
+          try {
+            await replacement.sendUserMessage(`${freshImplementationPrefix}\n\n${plan}`);
+          } catch (error) {
+            reportFreshImplementationError(error, replacement);
+          }
+        },
+      });
+    } catch (error) {
+      // Once replacement starts, the original command context may already be stale.
+      reportFreshImplementationError(error);
     }
-    const sourceEntryId = state.latestPlan?.sourceEntryId;
-    const replacementState: PlanModeState = {
-      ...createDefaultPlanModeState(),
-      ...(state.latestPlan ? { latestPlan: { ...state.latestPlan } } : {}),
-      ...(state.lastOfferedEntryId ? { lastOfferedEntryId: state.lastOfferedEntryId } : {}),
-      ...(sourceEntryId ? { implementedPlanSourceEntryId: sourceEntryId } : {}),
-      ...(state.lastReview ? { lastReview: { ...state.lastReview } } : {}),
-    };
-    const result = await ctx.newSession({
-      parentSession: ctx.sessionManager.getSessionFile(),
-      setup: async (sessionManager) => {
-        sessionManager.appendCustomEntry(PLAN_MODE_STATE_ENTRY, replacementState);
-      },
-      withSession: async (replacement) => {
-        await replacement.sendUserMessage(`${freshImplementationPrefix}\n\n${plan}`);
-      },
-    });
-    if (result?.cancelled !== true && sourceEntryId) consumePlan(sourceEntryId);
   }
 
   function consumePlan(sourceEntryId: string): void {
@@ -751,12 +778,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
           freshSessionScheduled = true;
           setImmediate(() => {
             void startFreshImplementation(plan, commandContext)
-              .catch((error: unknown) =>
-                commandContext.ui.notify(
-                  `Could not start fresh implementation: ${error instanceof Error ? error.message : String(error)}`,
-                  "error",
-                ),
-              )
+              .catch((error: unknown) => reportFreshImplementationError(error))
               .finally(() => {
                 freshSessionScheduled = false;
               });

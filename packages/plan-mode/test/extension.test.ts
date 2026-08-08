@@ -3,7 +3,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
 import planModeExtension from "../index.js";
 
@@ -39,6 +39,9 @@ function harness(
     thinkingLevel?: string;
     reasoning?: boolean;
     thinkingLevelMap?: Record<string, string | null | undefined>;
+    replacementSendError?: Error;
+    newSessionErrorAfterInvalidation?: Error;
+    replacementHasUI?: boolean;
   } = {},
 ) {
   const selections = [...(options.selections ?? [])];
@@ -56,8 +59,17 @@ function harness(
     options?: { triggerTurn?: boolean };
   }> = [];
   const replacementMessages: string[] = [];
+  const replacementEntries: Array<{ customType: string; data: unknown }> = [];
+  const replacementNotifications: Array<{ message: string; level: string }> = [];
+  const staleAccesses: string[] = [];
   const selectCalls: Array<{ title: string; options: string[] }> = [];
   let activeTools = ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"];
+  let oldRuntimeActive = true;
+  const assertOldRuntimeActive = (operation: string): void => {
+    if (oldRuntimeActive) return;
+    staleAccesses.push(operation);
+    throw new Error("stale old extension runtime");
+  };
   const api = {
     registerCommand(
       name: string,
@@ -70,23 +82,32 @@ function harness(
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
     appendEntry(customType: string, data: unknown) {
+      assertOldRuntimeActive("pi.appendEntry");
       entries.push({ type: "custom", customType, data, id: `entry-${entries.length}` });
     },
-    getActiveTools: () => [...activeTools],
+    getActiveTools: () => {
+      assertOldRuntimeActive("pi.getActiveTools");
+      return [...activeTools];
+    },
     setActiveTools(names: string[]) {
+      assertOldRuntimeActive("pi.setActiveTools");
       activeTools = [...names];
     },
-    getAllTools: () =>
-      ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"].map((name) => ({
+    getAllTools: () => {
+      assertOldRuntimeActive("pi.getAllTools");
+      return ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"].map((name) => ({
         name,
-      })),
+      }));
+    },
     sendUserMessage(message: string) {
+      assertOldRuntimeActive("pi.sendUserMessage");
       sent.push(message);
     },
     sendMessage: (
       message: { customType: string; content: string },
       options?: { triggerTurn?: boolean },
     ) => {
+      assertOldRuntimeActive("pi.sendMessage");
       sentMessages.push({ ...message, options });
       sent.push(`${message.customType}:${message.content}`);
     },
@@ -99,12 +120,41 @@ function harness(
       },
     },
   } as unknown as ExtensionAPI;
+  const ui = {
+    notify: () => undefined,
+    select: async (title: string, selectOptions: string[]) => {
+      selectCalls.push({ title, options: selectOptions });
+      return selections.shift() ?? options.selection;
+    },
+    input: async () => inputs.shift(),
+    confirm: async () => confirmations.shift() ?? false,
+    setEditorText: () => undefined,
+  };
+  const sessionManager = {
+    getBranch: () => entries,
+    getSessionFile: () => "/tmp/session.jsonl",
+  };
   const context = {
-    mode: "print",
-    hasUI: options.hasUI ?? false,
-    isIdle: () => true,
-    hasPendingMessages: () => false,
-    sessionManager: { getBranch: () => entries, getSessionFile: () => "/tmp/session.jsonl" },
+    get mode() {
+      assertOldRuntimeActive("ctx.mode");
+      return "print" as const;
+    },
+    get hasUI() {
+      assertOldRuntimeActive("ctx.hasUI");
+      return options.hasUI ?? false;
+    },
+    isIdle: () => {
+      assertOldRuntimeActive("ctx.isIdle");
+      return true;
+    },
+    hasPendingMessages: () => {
+      assertOldRuntimeActive("ctx.hasPendingMessages");
+      return false;
+    },
+    get sessionManager() {
+      assertOldRuntimeActive("ctx.sessionManager");
+      return sessionManager;
+    },
     modelRegistry: {
       refresh: async () => undefined,
       getAll: () =>
@@ -128,28 +178,42 @@ function harness(
     },
     scopedModels: options.scopedModels ?? [],
     thinkingLevel: options.thinkingLevel,
-    ui: {
-      notify: () => undefined,
-      select: async (title: string, selectOptions: string[]) => {
-        selectCalls.push({ title, options: selectOptions });
-        return selections.shift() ?? options.selection;
-      },
-      input: async () => inputs.shift(),
-      confirm: async () => confirmations.shift() ?? false,
-      setEditorText: () => undefined,
+    get ui() {
+      assertOldRuntimeActive("ctx.ui");
+      return ui;
     },
     newSession: async (sessionOptions: {
       setup?: (manager: { appendCustomEntry(type: string, data: unknown): void }) => Promise<void>;
       withSession?: (replacement: {
+        hasUI: boolean;
+        ui: { notify(message: string, level: string): void };
         sendUserMessage(message: string): Promise<void>;
       }) => Promise<void>;
     }) => {
-      await sessionOptions.setup?.({ appendCustomEntry: () => undefined });
+      assertOldRuntimeActive("ctx.newSession");
+      for (const handler of handlers.get("session_shutdown") ?? []) {
+        await handler({ type: "session_shutdown", reason: "new" }, context);
+      }
+      oldRuntimeActive = false;
+      if (options.newSessionErrorAfterInvalidation) {
+        throw options.newSessionErrorAfterInvalidation;
+      }
+      await sessionOptions.setup?.({
+        appendCustomEntry: (customType, data) => {
+          replacementEntries.push({ customType, data });
+        },
+      });
       await sessionOptions.withSession?.({
+        hasUI: options.replacementHasUI ?? true,
+        ui: {
+          notify: (message, level) => replacementNotifications.push({ message, level }),
+        },
         sendUserMessage: async (message) => {
+          if (options.replacementSendError) throw options.replacementSendError;
           replacementMessages.push(message);
         },
       });
+      return { cancelled: false };
     },
   } as unknown as ExtensionCommandContext;
   planModeExtension(api);
@@ -161,6 +225,9 @@ function harness(
     sent,
     sentMessages,
     replacementMessages,
+    replacementEntries,
+    replacementNotifications,
+    staleAccesses,
     selectCalls,
     context,
     activeTools: () => activeTools,
@@ -381,34 +448,126 @@ describe("Plan Mode lifecycle", () => {
     expect(subject.selectCalls.at(-1)?.options).toEqual(["off"]);
   });
 
-  it("implements an approved plan in current or fresh context", async () => {
-    const current = harness({ hasUI: true, selection: "Yes, implement this plan" });
-    await emit(current, "session_start", {});
-    await current.commands.get("plan")?.("", current.context);
-    current.entries.push({
+  it("implements an approved plan in the current context", async () => {
+    const subject = harness({ hasUI: true, selection: "Yes, implement this plan" });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
       type: "message",
-      id: "assistant",
+      id: "assistant-current",
       message: {
         role: "assistant",
         content: [{ type: "text", text: "<proposed_plan>\n# Current\n</proposed_plan>" }],
       },
     });
-    await emit(current, "agent_settled", {});
-    expect(current.sent.at(-1)).toBe("Implement the approved plan.");
+    await emit(subject, "agent_settled", {});
+    expect(subject.sent.at(-1)).toBe("Implement the approved plan.");
+  });
 
-    const fresh = harness({ hasUI: true, selection: "Yes, clear context and implement" });
-    await emit(fresh, "session_start", {});
-    await fresh.commands.get("plan")?.("", fresh.context);
-    fresh.entries.push({
+  it("implements an approved plan through only the replacement runtime", async () => {
+    const subject = harness({ hasUI: true, selection: "Yes, clear context and implement" });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
       type: "message",
-      id: "assistant",
+      id: "assistant-fresh",
       message: {
         role: "assistant",
         content: [{ type: "text", text: "<proposed_plan>\n# Fresh\n</proposed_plan>" }],
       },
     });
-    await emit(fresh, "agent_settled", {});
+    await emit(subject, "agent_settled", {});
     await new Promise((resolve) => setImmediate(resolve));
-    expect(fresh.replacementMessages[0]).toContain("fresh context");
+
+    expect(subject.replacementMessages[0]).toContain("fresh context");
+    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+      mode: "default",
+      implementedPlanSourceEntryId: "assistant-fresh",
+    });
+    expect(subject.staleAccesses).toEqual([]);
+  });
+
+  it("supports /plan-implement fresh without using the replaced runtime", async () => {
+    const subject = harness({ hasUI: true, selection: "No, stay in Plan mode" });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "assistant-command-fresh",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Command Fresh\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+
+    await subject.commands.get("plan-implement")?.("fresh", subject.context);
+
+    expect(subject.replacementMessages[0]).toContain("# Command Fresh");
+    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+      implementedPlanSourceEntryId: "assistant-command-fresh",
+    });
+    expect(subject.staleAccesses).toEqual([]);
+  });
+
+  it("reports replacement send failures through the replacement UI", async () => {
+    const subject = harness({
+      hasUI: true,
+      selection: "Yes, clear context and implement",
+      replacementSendError: new Error("replacement send failed"),
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "assistant-send-failure",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Failure\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(subject.replacementNotifications).toEqual([
+      {
+        message: "Could not start fresh implementation: replacement send failed",
+        level: "error",
+      },
+    ]);
+    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+      implementedPlanSourceEntryId: "assistant-send-failure",
+    });
+    expect(subject.staleAccesses).toEqual([]);
+  });
+
+  it("logs replacement failures when no valid UI context exists", async () => {
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      const subject = harness({
+        hasUI: true,
+        selection: "Yes, clear context and implement",
+        newSessionErrorAfterInvalidation: new Error("replacement setup failed"),
+      });
+      await emit(subject, "session_start", {});
+      await subject.commands.get("plan")?.("", subject.context);
+      subject.entries.push({
+        type: "message",
+        id: "assistant-setup-failure",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "<proposed_plan>\n# Failure\n</proposed_plan>" }],
+        },
+      });
+      await emit(subject, "agent_settled", {});
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        "[plan-mode] Could not start fresh implementation: replacement setup failed",
+      );
+      expect(subject.staleAccesses).toEqual([]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 });
