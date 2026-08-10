@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   codexUsageUrl,
+  copilotDailyBudget,
   copilotDailyPacePercent,
   daysInMonth,
   fetchCodexUsage,
@@ -141,21 +142,40 @@ describe("Copilot daily pace", () => {
     ).toBeUndefined();
   });
 
-  it("shows daily status only for finite AI-credit quotas", () => {
+  it("calculates today's remaining allowance, including negative overage", () => {
+    const today = { ...baseline, date: "2026-03-03" };
+    const daily = copilotDailyBudget(
+      { remaining: 146_591, total: 150_000, unlimited: false, unit: "ai_credits" },
+      [today],
+      new Date("2026-03-03T12:00:00"),
+    );
+    expect(Math.round(daily?.remaining ?? Number.NaN)).toBe(3_409);
+    expect(Math.round(daily?.percentRemaining ?? Number.NaN)).toBe(50);
+
+    const overBudget = copilotDailyBudget(
+      { remaining: 143_000, total: 150_000, unlimited: false, unit: "ai_credits" },
+      [today],
+      new Date("2026-03-03T12:00:00"),
+    );
+    expect(overBudget?.remaining).toBeLessThan(0);
+    expect(overBudget?.percentRemaining).toBeLessThan(0);
+  });
+
+  it("formats daily remaining credits before the monthly quota", () => {
     expect(
       formatCopilotQuotaFooter(
         { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
-        undefined,
+        { remaining: 3_409, percentRemaining: 50 },
       ),
-    ).toContain("daily: — · 142,500/150,000");
+    ).toBe("daily: 3,409 (50%) left - month: 142,500/150,000 (95% left)");
     expect(
       formatCopilotQuotaFooter(
         { remaining: 25, total: 100, unlimited: false, unit: "premium_requests" },
-        50,
+        undefined,
       ),
     ).toBe("25/100");
     expect(
-      formatCopilotQuotaFooter({ remaining: 0, unlimited: true, unit: "ai_credits" }, 50),
+      formatCopilotQuotaFooter({ remaining: 0, unlimited: true, unit: "ai_credits" }, undefined),
     ).toBe("unlimited AI credits");
   });
 });

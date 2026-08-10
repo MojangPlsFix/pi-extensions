@@ -52,7 +52,7 @@ Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrie
 
 The TUI stats viewer supports `↑` and `↓`, PageUp, PageDown, Home, End, `←`, and `→` for navigation. Use `m` for month view, `w` for workweek view, and `Esc` or `q` to close the viewer.
 
-Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota. Finite Copilot AI-credit quotas also show a workday pace label when an earlier compatible current-month checkpoint exists; weekends and missing baselines show `daily: —`, while unlimited and premium-request quotas omit the label.
+Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota. Finite Copilot AI-credit quotas also show the current workday’s remaining allowance and percentage before the monthly quota; weekends and missing or incompatible checkpoints show `daily: —`, while unlimited and premium-request quotas omit the label.
 
 ## Skills
 

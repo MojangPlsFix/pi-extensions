@@ -1,6 +1,11 @@
 import type { CopilotCreditSnapshot } from "../../shared/copilot-snapshots.js";
 import type { CopilotQuota } from "./types.js";
 
+export type CopilotDailyBudget = {
+  remaining: number;
+  percentRemaining: number;
+};
+
 /** Return the number of calendar days in the local month containing `date`. */
 export function daysInMonth(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
@@ -50,6 +55,39 @@ function validSnapshot(snapshot: CopilotCreditSnapshot, month: string, total: nu
     snapshot.unit === "ai_credits" &&
     snapshot.total === total
   );
+}
+
+/**
+ * Calculate the finite AI credits still available for the current workday.
+ *
+ * The current-day checkpoint is the start of the observed daily window. The
+ * amount can become negative when today's usage exceeds the even workday
+ * target, so the indicator shows the size of the overage instead of hiding it.
+ */
+export function copilotDailyBudget(
+  quota: CopilotQuota,
+  snapshots: readonly CopilotCreditSnapshot[],
+  now = new Date(),
+): CopilotDailyBudget | undefined {
+  if (quota.unlimited || quota.unit !== "ai_credits") return undefined;
+  if (now.getDay() === 0 || now.getDay() === 6) return undefined;
+  const total = quotaTotal(quota);
+  if (total === undefined || !Number.isFinite(quota.remaining)) return undefined;
+
+  const today = dateKey(now);
+  const month = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+  const baseline = snapshots.find(
+    (snapshot) => snapshot.date === today && validSnapshot(snapshot, month, total),
+  );
+  if (!baseline || !Number.isFinite(baseline.remaining)) return undefined;
+
+  const usedToday = baseline.remaining - quota.remaining;
+  if (!Number.isFinite(usedToday) || usedToday < 0) return undefined;
+  const target = total / workdaysInMonth(now);
+  if (!Number.isFinite(target) || target <= 0) return undefined;
+
+  const remaining = target - usedToday;
+  return { remaining, percentRemaining: (remaining / target) * 100 };
 }
 
 /**

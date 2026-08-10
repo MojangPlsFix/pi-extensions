@@ -54,8 +54,8 @@ checkpoint in the shared store at:
 the checkpoint's cumulative account-level usage in `Start Credits`. Copilot credits are not Pi
 input/output/cache tokens and are never added to Pi costs, responses, sessions, model totals, or
 project totals. Snapshot retrieval and storage fail open, and non-Copilot active models do not
-invoke Copilot authentication or network calls. Usage Meter uses the same file for its daily pace
-baseline. It requires an earlier current-month checkpoint with the same unit and total, so a month
+invoke Copilot authentication or network calls. Usage Meter uses the same file for its daily
+allowance baseline. It requires a current-day checkpoint with the same unit and total, so a month
 or plan change is not treated as a valid baseline.
 
 The live `/usage-meter` extension remains separate. Stats does not include live Codex or Copilot
