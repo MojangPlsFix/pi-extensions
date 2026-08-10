@@ -19,7 +19,7 @@ Pi shows active provider usage on its own right-aligned footer row. Normal direc
 ```text
 ~/projects/my-app (develop)
 ↑12.4k ↓3.1k R84.2k $0.842 (sub) 18.6%/128k                 github-copilot/gpt-5.4
-                                  daily: 3,409 (50%) left - month: 142,500/150,000 (95% left)
+                                  daily: 3,409 (50%) left • month: 142,500/150,000 (95% left)
 ```
 
 For Codex, the row shows the active rate-limit windows:
@@ -32,7 +32,7 @@ For Codex, the row shows the active rate-limit windows:
 
 Normal usage uses muted colors. Low Copilot quota and reached Codex limits use error styling. Approaching Codex limits use warning styling.
 
-Finite Copilot AI-credit quotas include a daily remaining allowance before the monthly quota. The format is `daily: <credits> (<percent>%) left - month: <remaining>/<total> (<percent>% left)`. The daily target is the current monthly total divided by the local month’s Monday-Friday workdays. The daily amount uses the current-day checkpoint and can become negative when today’s target is exceeded. Weekends and missing or incompatible checkpoints show `daily: —`. Unlimited quotas and premium-request quotas do not include the daily label. Checkpoints are stored in the shared `<agent-dir>/copilot-credit-snapshots.json` file used by Stats.
+Finite Copilot AI-credit quotas include a daily remaining allowance before the monthly quota. The format is `daily: <credits> (<percent>%) left • month: <remaining>/<total> (<percent>% left)`. The daily target is the current monthly total divided by the local month’s Monday-Friday workdays. The daily amount uses the current-day checkpoint and can become negative when today’s target is exceeded. Weekends and missing or incompatible checkpoints show `daily: —`. Unlimited quotas and premium-request quotas do not include the daily label. Checkpoints are stored in the shared `<agent-dir>/copilot-credit-snapshots.json` file used by Stats.
 
 `/usage-meter` refreshes the active supported provider. It reports a concise unavailable message when authentication or provider data is missing. It shows plan, reset, credit, spend, and additional-limit details when data is available:
 

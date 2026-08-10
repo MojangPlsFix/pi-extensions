@@ -98,7 +98,7 @@ export function formatCopilotQuotaFooter(
   const daily = dailyBudget
     ? `daily: ${Math.round(dailyBudget.remaining).toLocaleString("en-US")} (${Math.round(dailyBudget.percentRemaining)}%) left`
     : "daily: —";
-  return `${daily} - month: ${monthlyQuota}`;
+  return `${daily} • month: ${monthlyQuota}`;
 }
 
 type FooterData = {

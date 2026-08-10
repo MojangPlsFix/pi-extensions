@@ -167,7 +167,7 @@ describe("Copilot daily pace", () => {
         { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
         { remaining: 3_409, percentRemaining: 50 },
       ),
-    ).toBe("daily: 3,409 (50%) left - month: 142,500/150,000 (95% left)");
+    ).toBe("daily: 3,409 (50%) left • month: 142,500/150,000 (95% left)");
     expect(
       formatCopilotQuotaFooter(
         { remaining: 25, total: 100, unlimited: false, unit: "premium_requests" },
