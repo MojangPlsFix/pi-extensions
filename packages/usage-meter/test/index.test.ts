@@ -1,14 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   codexUsageUrl,
+  copilotDailyPacePercent,
+  daysInMonth,
   fetchCodexUsage,
   fetchProviderUsage,
   formatCodexUsage,
   formatCodexUsageDetailed,
+  formatCopilotQuotaFooter,
+  monthToDateWorkdays,
   parseCodexUsage,
   parseCodexUsageHeaders,
   parseCopilotQuota,
   registerUsageMeter,
+  workdaysInMonth,
 } from "../index.js";
 
 type Handler = (...args: any[]) => any;
@@ -97,6 +102,62 @@ describe("Copilot quota parsing", () => {
   });
   it("fails open for missing provider payloads", () =>
     expect(parseCopilotQuota({})).toBeUndefined());
+});
+
+describe("Copilot daily pace", () => {
+  const baseline = {
+    date: "2026-03-02",
+    capturedAt: "2026-03-02T08:00:00.000Z",
+    used: 0,
+    remaining: 150_000,
+    total: 150_000,
+    unit: "ai_credits" as const,
+  };
+
+  it("uses deterministic workday pace and rejects weekends or incompatible baselines", () => {
+    expect(daysInMonth(new Date("2026-02-10T12:00:00"))).toBe(28);
+    expect(workdaysInMonth(new Date("2026-03-10T12:00:00"))).toBe(22);
+    expect(monthToDateWorkdays(new Date("2026-03-08T12:00:00"))).toBe(5);
+    expect(
+      copilotDailyPacePercent(
+        { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
+        [baseline],
+        new Date("2026-03-03T12:00:00"),
+      ),
+    ).toBe(110);
+    expect(
+      copilotDailyPacePercent(
+        { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
+        [baseline],
+        new Date("2026-03-07T12:00:00"),
+      ),
+    ).toBeUndefined();
+    expect(
+      copilotDailyPacePercent(
+        { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
+        [{ ...baseline, unit: "premium_requests" }],
+        new Date("2026-03-03T12:00:00"),
+      ),
+    ).toBeUndefined();
+  });
+
+  it("shows daily status only for finite AI-credit quotas", () => {
+    expect(
+      formatCopilotQuotaFooter(
+        { remaining: 142_500, total: 150_000, unlimited: false, unit: "ai_credits" },
+        undefined,
+      ),
+    ).toContain("daily: — · 142,500/150,000");
+    expect(
+      formatCopilotQuotaFooter(
+        { remaining: 25, total: 100, unlimited: false, unit: "premium_requests" },
+        50,
+      ),
+    ).toBe("25/100");
+    expect(
+      formatCopilotQuotaFooter({ remaining: 0, unlimited: true, unit: "ai_credits" }, 50),
+    ).toBe("unlimited AI credits");
+  });
 });
 
 describe("Codex usage", () => {

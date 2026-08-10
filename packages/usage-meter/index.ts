@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { loadCopilotSnapshots, recordCopilotSnapshot } from "../../shared/copilot-snapshots.js";
 import { mergeCodexUsage, parseCodexUsageHeaders } from "./codex-client.js";
+import { copilotDailyPacePercent } from "./copilot-pace.js";
 import { formatCodexUsage, formatUsageDetailed } from "./format.js";
 import {
   fetchProviderUsage,
@@ -8,12 +10,13 @@ import {
   providerLabel,
   usageProviderForModel,
 } from "./provider.js";
-import type { UsageMeterOptions, UsageProvider, UsageSnapshot } from "./types.js";
+import type { CopilotQuota, UsageMeterOptions, UsageProvider, UsageSnapshot } from "./types.js";
 
 const defaultCopilotRefreshMs = 30_000;
 const defaultCodexRefreshMs = 60_000;
 export const usageStatusKey = "pi-extensions:usage-meter";
 
+export type { CopilotCreditSnapshot } from "../../shared/copilot-snapshots.js";
 export {
   codexUsageUrl,
   fetchCodexUsage,
@@ -22,6 +25,13 @@ export {
   parseCodexUsageHeaders,
 } from "./codex-client.js";
 export { fetchCopilotQuota } from "./copilot-client.js";
+export {
+  copilotDailyPace,
+  copilotDailyPacePercent,
+  daysInMonth,
+  monthToDateWorkdays,
+  workdaysInMonth,
+} from "./copilot-pace.js";
 export { parseCopilotQuota } from "./copilot-quota.js";
 export {
   formatCodexUsage,
@@ -65,6 +75,19 @@ export type {
   UsageSnapshot,
 } from "./types.js";
 
+/** Format the Copilot footer quota without changing non-AI-credit output. */
+export function formatCopilotQuotaFooter(
+  quota: CopilotQuota,
+  dailyPercent: number | undefined,
+): string {
+  if (quota.unlimited) return "unlimited AI credits";
+  const daily =
+    quota.unit === "ai_credits"
+      ? `daily: ${dailyPercent === undefined ? "—" : `${dailyPercent}%`} · `
+      : "";
+  return `${daily}${quota.remaining.toLocaleString("en-US")}${quota.total === undefined ? "" : `/${quota.total.toLocaleString("en-US")}`}${quota.percentRemaining === undefined ? "" : ` (${Math.round(quota.percentRemaining)}% left)`}`;
+}
+
 type FooterData = {
   getGitBranch(): string | null;
   getExtensionStatuses(): ReadonlyMap<string, string>;
@@ -79,6 +102,7 @@ function renderUsageFooter(
   width: number,
   provider: UsageProvider,
   snapshot: UsageSnapshot | undefined,
+  copilotDailyPercent: number | undefined,
 ): string[] {
   let input = 0;
   let output = 0;
@@ -163,9 +187,7 @@ function renderUsageFooter(
   if (snapshot?.provider === provider) {
     if (snapshot.provider === "github-copilot") {
       const quota = snapshot.quota;
-      usageText = quota.unlimited
-        ? "unlimited AI credits"
-        : `${quota.remaining.toLocaleString("en-US")}${quota.total === undefined ? "" : `/${quota.total.toLocaleString("en-US")}`}${quota.percentRemaining === undefined ? "" : ` (${Math.round(quota.percentRemaining)}% left)`}`;
+      usageText = formatCopilotQuotaFooter(quota, copilotDailyPercent);
       if ((quota.percentRemaining ?? 100) <= 5) usageColor = "error";
     } else if (snapshot.provider === "openai-codex") {
       usageText = formatCodexUsage(snapshot.usage).replace(/^Codex:\s*/, "");
@@ -195,6 +217,7 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
   let generation = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let cached: UsageSnapshot | undefined;
+  let copilotDailyPercent: number | undefined;
   const inFlight = new Map<UsageProvider, Promise<UsageSnapshot | undefined>>();
   const lastRefresh = new Map<UsageProvider, number>();
   let footerRequestRender: (() => void) | undefined;
@@ -229,6 +252,7 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
             width,
             provider!,
             cached?.provider === provider ? cached : undefined,
+            copilotDailyPercent,
           ),
         invalidate: () => {},
       };
@@ -260,11 +284,28 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
     return request.then((snapshot) => {
       if (ctx !== activeContext || provider !== activeProvider || generation !== activeGeneration)
         return snapshot;
+      copilotDailyPercent = undefined;
       cached = snapshot;
       if (snapshot) {
         clearStatus();
         footerRequestRender?.();
       } else clearStatus();
+      if (snapshot?.provider === "github-copilot") {
+        const now = options.now?.() ?? new Date();
+        const env = options.copilotSnapshotEnv ?? process.env;
+        void (async () => {
+          await recordCopilotSnapshot(snapshot.quota, env, now);
+          const snapshots = await loadCopilotSnapshots(env);
+          if (
+            ctx !== activeContext ||
+            provider !== activeProvider ||
+            generation !== activeGeneration
+          )
+            return;
+          copilotDailyPercent = copilotDailyPacePercent(snapshot.quota, snapshots, now);
+          footerRequestRender?.();
+        })().catch(() => {});
+      }
       return snapshot;
     });
   };
@@ -274,6 +315,7 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
     ctx = next;
     provider = usageProviderForModel(next.model);
     cached = undefined;
+    copilotDailyPercent = undefined;
     clearTimer();
     clearStatus();
     bindFooter(next);
@@ -309,6 +351,7 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
     ctx = undefined;
     provider = undefined;
     cached = undefined;
+    copilotDailyPercent = undefined;
   });
   pi.registerCommand("usage-meter", {
     description: "Refresh active GitHub Copilot or OpenAI Codex usage details.",

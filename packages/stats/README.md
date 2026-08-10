@@ -43,8 +43,8 @@ report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
 scanned once, so Subagent usage is included in the overall totals exactly once and shown separately
 as a subset.
 
-When the active model is `github-copilot`, stats makes one best-effort daily Copilot quota
-checkpoint at:
+When the active model is `github-copilot`, Stats makes one best-effort daily Copilot quota
+checkpoint in the shared store at:
 
 ```text
 <agent-dir>/copilot-credit-snapshots.json
@@ -54,7 +54,9 @@ checkpoint at:
 the checkpoint's cumulative account-level usage in `Start Credits`. Copilot credits are not Pi
 input/output/cache tokens and are never added to Pi costs, responses, sessions, model totals, or
 project totals. Snapshot retrieval and storage fail open, and non-Copilot active models do not
-invoke Copilot authentication or network calls.
+invoke Copilot authentication or network calls. Usage Meter uses the same file for its daily pace
+baseline. It requires an earlier current-month checkpoint with the same unit and total, so a month
+or plan change is not treated as a valid baseline.
 
 The live `/usage-meter` extension remains separate. Stats does not include live Codex or Copilot
 quota in its historical report; it only reads the optional Copilot checkpoint file described above.

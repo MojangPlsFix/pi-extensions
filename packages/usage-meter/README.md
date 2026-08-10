@@ -19,7 +19,7 @@ Pi shows active provider usage on its own right-aligned footer row. Normal direc
 ```text
 ~/projects/my-app (develop)
 ↑12.4k ↓3.1k R84.2k $0.842 (sub) 18.6%/128k                 github-copilot/gpt-5.4
-                                                         81,055/150,000 (54% left)
+                                             daily: 100% · 81,055/150,000 (54% left)
 ```
 
 For Codex, the row shows the active rate-limit windows:
@@ -31,6 +31,8 @@ For Codex, the row shows the active rate-limit windows:
 ```
 
 Normal usage uses muted colors. Low Copilot quota and reached Codex limits use error styling. Approaching Codex limits use warning styling.
+
+Finite Copilot AI-credit quotas include a `daily: xx% ·` pace label before the quota. The label compares account credit use since the first compatible checkpoint in the current month with an even Monday-Friday monthly budget. A value above 100% is above that pace. The label is `daily: —` on weekends, on the first observed workday, or when the checkpoint unit or total does not match the current quota. Unlimited quotas and premium-request quotas do not include the label. Checkpoints are stored in the shared `<agent-dir>/copilot-credit-snapshots.json` file used by Stats.
 
 `/usage-meter` refreshes the active supported provider. It reports a concise unavailable message when authentication or provider data is missing. It shows plan, reset, credit, spend, and additional-limit details when data is available:
 

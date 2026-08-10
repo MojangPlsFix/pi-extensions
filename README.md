@@ -34,7 +34,7 @@ pi update --extensions
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Owns the visible Pi-styled Subagent activity block and the animated `Hackeln...` summary. | Automatic | Running, ready, and recent Subagents |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
-| [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
+| [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials, with an optional Copilot AI-credit daily pace. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
 The package installs all 15 extension entrypoints. Missing optional tools do not block Pi startup:
 
@@ -52,7 +52,7 @@ Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrie
 
 The TUI stats viewer supports `↑` and `↓`, PageUp, PageDown, Home, End, `←`, and `→` for navigation. Use `m` for month view, `w` for workweek view, and `Esc` or `q` to close the viewer.
 
-Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota.
+Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota. Finite Copilot AI-credit quotas also show a workday pace label when an earlier compatible current-month checkpoint exists; weekends and missing baselines show `daily: —`, while unlimited and premium-request quotas omit the label.
 
 ## Skills
 

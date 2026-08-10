@@ -78,4 +78,8 @@ export type UsageMeterOptions = {
   fetchCodexUsage?: () => Promise<CodexUsage | undefined>;
   copilotRefreshIntervalMs?: number;
   codexRefreshIntervalMs?: number;
+  /** Environment used for the optional Copilot daily pace checkpoint file. */
+  copilotSnapshotEnv?: NodeJS.ProcessEnv;
+  /** Clock override for deterministic consumers and tests. */
+  now?: () => Date;
 };

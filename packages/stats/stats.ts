@@ -1,18 +1,15 @@
 import { createReadStream } from "node:fs";
-import {
-  type FileHandle,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  rename,
-  stat,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { readdir } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import {
+  agentDirectory,
+  type CopilotCreditSnapshot,
+  type CopilotQuotaSnapshotInput,
+  captureCopilotSnapshot as captureStoredCopilotSnapshot,
+  loadCopilotSnapshotsInRange,
+} from "../../shared/copilot-snapshots.js";
 
 /** Canonical modes plus the legacy `week` spelling accepted by helpers. */
 export type ReportMode = "workweek" | "all" | "month" | "week";
@@ -35,24 +32,8 @@ export type UsageTotals = UsageRecord & {
 
 export type Bucket = UsageTotals & { key: string };
 
-export type CopilotCreditSnapshot = {
-  date: string;
-  capturedAt: string;
-  used: number;
-  remaining: number;
-  total: number;
-  unit: "ai_credits" | "premium_requests";
-  resetDate?: string;
-};
-
-export type CopilotQuotaLike = {
-  remaining: number;
-  total?: number;
-  unlimited: boolean;
-  percentRemaining?: number;
-  unit: "ai_credits" | "premium_requests";
-  resetDate?: string;
-};
+export type { CopilotCreditSnapshot } from "../../shared/copilot-snapshots.js";
+export type CopilotQuotaLike = CopilotQuotaSnapshotInput;
 
 export type CopilotQuotaFetcher = () => Promise<CopilotQuotaLike | undefined>;
 
@@ -128,13 +109,6 @@ export function currentWeekRange(
 
 export function currentMonthRange(now = new Date(), monthOffset = 0): { start: Date; end: Date } {
   return periodRange("month", now, monthOffset);
-}
-
-export function agentDirectory(env: NodeJS.ProcessEnv = process.env): string {
-  return (
-    env.PI_CODING_AGENT_DIR?.trim()?.replace(/^~(?=$|[\\/])/, homedir()) ||
-    join(homedir(), ".pi", "agent")
-  );
 }
 
 export function sessionDirectory(env: NodeJS.ProcessEnv = process.env): string {
@@ -439,152 +413,24 @@ export async function collectStats(options: CollectStatsOptions = {}): Promise<S
     const key = dayKey(date);
     if (!report.days.has(key)) report.days.set(key, emptyTotals());
   }
-  report.copilotSnapshots = await loadCopilotSnapshots({ start, end }, env);
+  report.copilotSnapshots = await loadCopilotSnapshotsInRange({ start, end }, env);
   return report;
 }
 
-const COPILOT_SNAPSHOT_FILE = "copilot-credit-snapshots.json";
-const COPILOT_SNAPSHOT_VERSION = 1;
-const COPILOT_SNAPSHOT_LOCK_MAX_AGE_MS = 60_000;
+export { agentDirectory, copilotSnapshotPath } from "../../shared/copilot-snapshots.js";
 
-type CopilotSnapshotStore = {
-  version: number;
-  snapshots: CopilotCreditSnapshot[];
-};
-
-export function copilotSnapshotPath(env: NodeJS.ProcessEnv = process.env): string {
-  return join(agentDirectory(env), COPILOT_SNAPSHOT_FILE);
-}
-
-function isCopilotCreditSnapshot(value: unknown): value is CopilotCreditSnapshot {
-  if (!isRecord(value)) return false;
-  return (
-    typeof value.date === "string" &&
-    typeof value.capturedAt === "string" &&
-    Number.isFinite(value.used) &&
-    Number.isFinite(value.remaining) &&
-    Number.isFinite(value.total) &&
-    (value.unit === "ai_credits" || value.unit === "premium_requests")
-  );
-}
-
-async function readCopilotSnapshotStore(
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<CopilotSnapshotStore> {
-  try {
-    const parsed = JSON.parse(await readFile(copilotSnapshotPath(env), "utf8")) as unknown;
-    if (!isRecord(parsed) || !Array.isArray(parsed.snapshots)) {
-      return { version: COPILOT_SNAPSHOT_VERSION, snapshots: [] };
-    }
-    return {
-      version: number(parsed.version) || COPILOT_SNAPSHOT_VERSION,
-      snapshots: parsed.snapshots
-        .filter(isCopilotCreditSnapshot)
-        .sort((a, b) => a.date.localeCompare(b.date)),
-    };
-  } catch {
-    return { version: COPILOT_SNAPSHOT_VERSION, snapshots: [] };
-  }
-}
-
-async function withCopilotSnapshotLock<T>(
-  env: NodeJS.ProcessEnv,
-  action: () => Promise<T>,
-): Promise<T | undefined> {
-  const path = copilotSnapshotPath(env);
-  const lockPath = `${path}.lock`;
-  await mkdir(agentDirectory(env), { recursive: true });
-
-  let handle: FileHandle | undefined;
-  try {
-    handle = await open(lockPath, "wx");
-  } catch (error: unknown) {
-    if ((error as NodeJS.ErrnoException).code === "EEXIST") {
-      try {
-        const lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
-        if (lockAge > COPILOT_SNAPSHOT_LOCK_MAX_AGE_MS) {
-          await unlink(lockPath);
-          handle = await open(lockPath, "wx");
-        }
-      } catch {
-        return undefined;
-      }
-    }
-    if (!handle) return undefined;
-  }
-
-  try {
-    return await action();
-  } finally {
-    await handle.close().catch(() => {});
-    await unlink(lockPath).catch(() => {});
-  }
-}
-
-function quotaTotal(quota: CopilotQuotaLike): number {
-  if (typeof quota.total === "number" && Number.isFinite(quota.total) && quota.total > 0)
-    return quota.total;
-  if (
-    typeof quota.percentRemaining === "number" &&
-    Number.isFinite(quota.percentRemaining) &&
-    quota.percentRemaining > 0
-  )
-    return quota.remaining / (quota.percentRemaining / 100);
-  return 0;
-}
-
-/**
- * Capture one account-level Copilot credit checkpoint for the local day.
- * Callers must first verify that Copilot is the active provider. All storage
- * and network failures are intentionally allowed to fail open.
- */
+/** Capture one optional account-level Copilot checkpoint for the local day. */
 export async function captureCopilotSnapshot(
   fetchQuota: CopilotQuotaFetcher,
   env: NodeJS.ProcessEnv = process.env,
   now = new Date(),
 ): Promise<void> {
-  const date = dayKey(now);
-  try {
-    await withCopilotSnapshotLock(env, async () => {
-      const store = await readCopilotSnapshotStore(env);
-      if (store.snapshots.some((entry) => entry.date === date)) return;
-
-      const quota = await fetchQuota();
-      if (!quota || quota.unlimited) return;
-      const total = quotaTotal(quota);
-      if (!Number.isFinite(total) || total <= 0 || !Number.isFinite(quota.remaining)) return;
-
-      const snapshot: CopilotCreditSnapshot = {
-        date,
-        capturedAt: new Date().toISOString(),
-        used: Math.max(0, total - quota.remaining),
-        remaining: quota.remaining,
-        total,
-        unit: quota.unit,
-        ...(quota.resetDate ? { resetDate: quota.resetDate } : {}),
-      };
-      store.snapshots.push(snapshot);
-      store.snapshots.sort((a, b) => a.date.localeCompare(b.date));
-      const path = copilotSnapshotPath(env);
-      const temporaryPath = `${path}.${process.pid}.tmp`;
-      await writeFile(
-        temporaryPath,
-        `${JSON.stringify({ ...store, version: COPILOT_SNAPSHOT_VERSION }, null, 2)}\n`,
-        "utf8",
-      );
-      await rename(temporaryPath, path);
-    });
-  } catch {
-    /* Copilot quota history is optional and never blocks Pi. */
-  }
+  await captureStoredCopilotSnapshot(fetchQuota, env, now);
 }
 
 export async function loadCopilotSnapshots(
   range: { start: Date; end: Date },
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<CopilotCreditSnapshot[]> {
-  const store = await readCopilotSnapshotStore(env);
-  const startKey = dayKey(range.start);
-  const endKey = dayKey(range.end);
-  return store.snapshots.filter((entry) => entry.date >= startKey && entry.date < endKey);
+  return loadCopilotSnapshotsInRange(range, env);
 }
