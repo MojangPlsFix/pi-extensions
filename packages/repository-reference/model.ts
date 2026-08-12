@@ -9,6 +9,9 @@ export const RepositoryReferenceParams = Type.Object({
   revision: Type.Optional(
     Type.String({ description: "Validated branch, tag, ref, or commit revision" }),
   ),
+  verbose: Type.Optional(
+    Type.Boolean({ description: "Include more detailed, sanitized Git diagnostics for clone" }),
+  ),
   id: Type.Optional(Type.String({ description: "Managed reference id returned by clone/list" })),
 });
 
@@ -23,8 +26,38 @@ export type RepositoryReference = {
   createdAt: string;
 };
 
+export type RepositoryReferencePhase = "clone" | "resolve-revision" | "checkout" | "metadata";
+
+export type RepositoryReferenceDiagnostics = {
+  phase: RepositoryReferencePhase;
+  stderr?: string;
+  stdout?: string;
+  attemptedRefs?: string[];
+  exitCode?: number;
+  signal?: string;
+  timedOut?: boolean;
+  cancelled?: boolean;
+};
+
+export type RepositoryReferenceProgress = {
+  phase: RepositoryReferencePhase;
+  message: string;
+  output?: string;
+  diagnostics?: RepositoryReferenceDiagnostics;
+};
+
+export type RepositoryReferenceCloneDetails = {
+  action: "clone";
+  phase?: RepositoryReferencePhase;
+  status?: string;
+  progress?: string[];
+  diagnostics?: RepositoryReferenceDiagnostics;
+  reference?: RepositoryReference;
+  error?: string;
+};
+
 export type RepositoryReferenceDetails =
-  | { action: "clone"; reference?: RepositoryReference; error?: string }
+  | RepositoryReferenceCloneDetails
   | { action: "list" | "cleanup"; references: RepositoryReference[]; error?: string }
   | { action: "remove"; id: string; error?: string };
 
@@ -32,6 +65,31 @@ const REMOTE_PROTOCOLS = new Set(["http:", "https:", "ssh:", "git:"]);
 const SCP_REMOTE = /^[A-Za-z0-9._-]+@[A-Za-z0-9._-]+:[^\s]+$/;
 const REVISION = /^[A-Za-z0-9][A-Za-z0-9._/@:+~^=-]*$/;
 const REFERENCE_ID = /^ref-[A-Za-z0-9]{1,60}$/;
+
+export function redactRemote(remote: string): string {
+  if (SCP_REMOTE.test(remote)) return remote;
+  try {
+    const parsed = new URL(remote);
+    parsed.username = "";
+    parsed.password = "";
+    parsed.search = "";
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return remote.replace(/:\/\/[^/\s@]+@/g, "://[redacted]@");
+  }
+}
+
+export function sanitizeGitOutput(output: string, remote?: string): string {
+  let sanitized = output;
+  if (remote) sanitized = sanitized.replaceAll(remote, redactRemote(remote));
+  return sanitized
+    .replace(/([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, "$1[redacted]@")
+    .replace(
+      /([?&](?:access[_-]?token|auth|key|password|passwd|secret|token)=)[^&\s]*/gi,
+      "$1[redacted]",
+    );
+}
 
 export function validateRemote(value: unknown): { remote: string } | { error: string } {
   if (typeof value !== "string" || !value.trim()) return { error: "remote is required" };
