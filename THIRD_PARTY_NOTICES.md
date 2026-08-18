@@ -55,6 +55,13 @@ The projects below were used as references or inspiration. Their inclusion does 
 - Copyright: 2025 Can Celik
 - Relationship: Reference and inspiration for modular feature/package organization and Pi extension implementations.
 
+## Context Mode runtime
+
+- Repository: <https://github.com/mksglu/context-mode>
+- Pinned runtime: `context-mode@1.0.169`
+- License: [Elastic License 2.0](https://github.com/mksglu/context-mode/blob/v1.0.169/LICENSE)
+- Relationship: This repository resolves the separately installed runtime at execution time and uses only its narrow MCP bridge for indexed read/search/fetch/stats tools. The Context Mode engine is not vendored or copied here. The upstream Pi entrypoint is intentionally not loaded concurrently.
+
 ## Pi
 
 - Repository: <https://github.com/earendil-works/pi>

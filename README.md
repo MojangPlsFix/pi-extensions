@@ -8,9 +8,24 @@ This repository contains modular extensions for [Pi](https://pi.dev). It support
 
 ```bash
 pi install git:github.com/MojangPlsFix/pi-extensions
+
+# Required external Context Mode engine for indexed tools
+pi install npm:context-mode@1.0.169
 ```
 
-Run `/reload` in an active Pi session after installation. Update Git-installed packages with:
+Keep the npm package installed as a runtime, but disable all of its Pi resources so this repository remains the only tool owner. Replace its string entry in `~/.pi/agent/settings.json` with this filtered package entry:
+
+```json
+{
+  "source": "npm:context-mode@1.0.169",
+  "extensions": [],
+  "skills": [],
+  "prompts": [],
+  "themes": []
+}
+```
+
+Run `/reload` in an active Pi session after installation and filtering. Update Git-installed packages with:
 
 ```bash
 pi update --extensions
@@ -26,6 +41,7 @@ pi update --extensions
 | [Notify](packages/notify/) | Sends a desktop or terminal notification after an assistant turn completes. | `/notify-test`, `/notify-toggle`, `/notify-status` | Windows, WSL, and supported terminals |
 | [Todos](packages/todos/) | Stores project work items with status, tags, assignment, and locking. | `/todos`, `todo` | Any provider |
 | [Context Size](packages/context-size/) | Sets a temporary context-window limit and shows it in the status area. | `/context`, `/context 128k`, `/context auto` | Any model |
+| [Context Mode replacement](packages/context-mode/) | Owns cancellable Pi execution, indexed Context Mode tools, and the pinned session-memory/compaction lifecycle. | `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`, `ctx_index`, `ctx_search`, `ctx_fetch_and_index`, `ctx_stats`, `ctx_doctor` | Node 22+; requires filtered `context-mode@1.0.169` runtime |
 | [Codex Compaction](packages/codex-compaction/) | Uses OpenAI opaque checkpoints through Pi's compaction lifecycle at 90% context usage. | Automatic, `/compact` | Exact `openai-codex/openai-codex-responses` models |
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private cache and sends a file reference to the model. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
@@ -36,12 +52,12 @@ pi update --extensions
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials, with an optional Copilot AI-credit daily pace. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
-The package installs all 15 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 16 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
 - **Herdr:** Subagents normally use persistent Pi RPC children. When Herdr is available, one non-focused task-named Subagents tab uses one to four panes and closes in a controlled way.
-- **Context Mode:** Subagents discover Context Mode only for the optional child integration.
+- **Context Mode replacement:** Install the external engine with `pi install npm:context-mode@1.0.169`, then use the filtered package entry above so none of the upstream package's Pi resources load. The runtime remains available to the indexed bridge while this repository stays the only tool owner. See [Context Mode](packages/context-mode/) for execution and indexing details.
 - **RTK and UV:** Worker children detect RTK 0.23 or newer and a working UV executable. A missing tool does not block a Worker. Native Pi Bash remains the fallback.
 
 Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrieval. Codex uses native `/codex/alpha/search`. Both backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because neither backend exposes usage or cost for local Pi totals.

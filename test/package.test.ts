@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
 import codexCompaction from "../packages/codex-compaction/index.js";
+import contextMode from "../packages/context-mode/index.js";
 import contextSize from "../packages/context-size/index.js";
 import largePaste from "../packages/large-paste/index.js";
 import modelCostBadges from "../packages/model-cost-badges/index.js";
@@ -51,6 +52,7 @@ const entrypoints = [
   notify,
   todos,
   contextSize,
+  contextMode,
   codexCompaction,
   largePaste,
   modelCostBadges,
@@ -79,6 +81,9 @@ describe("package manifest", () => {
         "subagent_close",
         "search",
         "repository_reference",
+        "ctx_execute",
+        "ctx_execute_file",
+        "ctx_batch_execute",
       ]),
     );
   });
@@ -120,6 +125,8 @@ describe("package manifest", () => {
       "https://github.com/ogulcancelik/pi-extensions/blob/main/LICENSE",
       "https://github.com/earendil-works/pi",
       "https://github.com/earendil-works/pi/blob/main/LICENSE",
+      "https://github.com/mksglu/context-mode",
+      "https://github.com/mksglu/context-mode/blob/v1.0.169/LICENSE",
     ])
       expect(notices).toContain(url);
   });

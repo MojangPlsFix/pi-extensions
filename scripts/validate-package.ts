@@ -16,6 +16,7 @@ const expectedEntrypoints = [
   "packages/uv/index.ts",
   "packages/working-indicator/index.ts",
   "packages/web-search/index.ts",
+  "packages/context-mode/index.ts",
   "packages/usage-meter/index.ts",
 ];
 
