@@ -21,6 +21,7 @@ export type ContextDetails = {
   truncated?: boolean;
   cancellation?: "hard" | "best-effort-external";
   toolName?: string;
+  inputEcho?: string;
   phase?: "execute" | "index" | "search";
   elapsedMs?: number;
   completedCommands?: number;

@@ -309,6 +309,7 @@ export async function nativeExecution(
     cancellation: "hard",
     phase: "execute",
     toolName,
+    inputEcho: executionEcho(request, file),
     elapsedMs: 0,
     outputBytes: 0,
   };
@@ -339,6 +340,7 @@ export async function nativeExecution(
       cancellation: "hard",
       phase: "execute",
       toolName,
+      inputEcho: echo,
       elapsedMs: Date.now() - startedAt,
     };
     if (intent && Buffer.byteLength(output) > INTENT_INDEX_THRESHOLD) {
@@ -383,6 +385,7 @@ export async function nativeExecution(
         cancellation: "hard",
         phase: "execute",
         toolName,
+        inputEcho: executionEcho(request, file),
       });
     }
     throw error;
@@ -424,6 +427,12 @@ export async function nativeBatchExecution(
       outputBytes: commandBytes.reduce((sum, bytes) => sum + bytes, 0),
       completedCommands: completed,
       totalCommands: batch.commands.length,
+      inputEcho: batch.commands
+        .map(
+          (command) =>
+            `- ${command.label}: $ ${command.command.replace(/\s+/gu, " ").trim().slice(0, 500)}`,
+        )
+        .join("\n"),
     });
 
   publishExecution(`Running 0/${batch.commands.length} batch commands…`);

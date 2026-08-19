@@ -571,6 +571,11 @@ describe("Context Mode tool-row rendering", () => {
     );
     expect(call.render(120).join("\n")).toContain("ctx_search");
     expect(call.render(120).join("\n")).toContain("cancellation progress");
+    const executeCall = createContextCallRenderer("ctx_execute")(
+      { language: "python", code: "print('current output')" },
+      theme(),
+    );
+    expect(executeCall.render(120).join("\n")).toContain("print('current output')");
     expect(expanded.render(120).join("\n")).toContain("full indexed search result");
     const expandedError = createContextResultRenderer("ctx_execute")(
       {
@@ -612,7 +617,23 @@ describe("Context Mode tool-row rendering", () => {
       theme(),
     );
     expect(partial.render(120).join("\n")).toContain("Running");
+    const expandedPartial = renderContextResult(
+      {
+        content: [{ type: "text", text: "ctx_execute · running · 00:02 · 0 bytes" }],
+        details: {
+          status: "running",
+          backend: "native",
+          toolName: "ctx_execute",
+          inputEcho: "```python\nprint('current output')\n```",
+        },
+      },
+      { isPartial: true, expanded: true },
+      theme(),
+    );
+    const collapsedComplete = complete.render(120).join("\n");
+    expect(expandedPartial.render(120).join("\n")).toContain("print('current output')");
+    expect(collapsedComplete).toContain("ctx_execute");
+    expect(collapsedComplete).toMatch(/expand/i);
     expect(cancelled.render(120).join("\n")).toContain("Cancelled");
-    expect(complete.render(120).join("\n")).toContain("ctx_execute");
   });
 });
