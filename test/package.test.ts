@@ -77,8 +77,11 @@ describe("package manifest", () => {
       expect.arrayContaining([
         "ask_user_question",
         "todo",
-        "subagent_spawn",
-        "subagent_close",
+        "subagent_dispatch",
+        "subagent_status",
+        "subagent_collect",
+        "subagent_steer",
+        "subagent_stop",
         "search",
         "repository_reference",
         "ctx_execute",
@@ -131,17 +134,12 @@ describe("package manifest", () => {
       expect(notices).toContain(url);
   });
 
-  it("documents provider-qualified Luna Subagent roles everywhere users and agents look", async () => {
-    const paths = [
-      "README.md",
-      "docs/configuration.md",
-      "packages/subagents/README.md",
-      "packages/subagents/skills/subagent-orchestration/SKILL.md",
-    ];
-    for (const path of paths) {
+  it("documents the Subagents v2 configuration and orchestration contract", async () => {
+    for (const path of ["README.md", "docs/configuration.md", "packages/subagents/README.md"]) {
       const source = await readFile(path, "utf8");
       for (const expected of [
         "~/.pi/agent/subagents/config.json",
+        '"schemaVersion": 2',
         '"thinking": "low"',
         '"thinking": "high"',
       ])
@@ -157,12 +155,13 @@ describe("package manifest", () => {
       "packages/subagents/skills/subagent-orchestration/SKILL.md",
       "utf8",
     );
-    expect(skill).toContain("/reload");
-    expect(skill).toContain("effective model");
-    expect(skill).toContain("subagent_list");
+    for (const tool of ["subagent_dispatch", "subagent_status", "subagent_collect"])
+      expect(skill).toContain(tool);
+    expect(skill).not.toContain("subagent_spawn");
+    expect(skill).not.toContain("subagent_list");
     const command = await readFile("packages/subagents/agents-command.ts", "utf8");
-    expect(command).toContain("~/.pi/agent/subagents/config.json");
-    expect(command).toContain("/reload");
+    expect(command).toContain('operation === "doctor"');
+    expect(command).toContain("effectivePolicy");
   });
 
   it("has no lifecycle install scripts or production dependencies", async () => {

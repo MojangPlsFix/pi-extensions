@@ -169,7 +169,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let activeTui: TUI | undefined;
   let previousEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]> | undefined;
   let editorInstalled = false;
-  let activeWorkers = 0;
+  let activeWriters = 0;
   let loadedConfig: LoadedPlanModeConfig = {
     readOnlyTools: [],
     readOnlyCommands: {},
@@ -509,8 +509,11 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         else leave(ctx);
         return;
       }
-      if (state.mode !== "plan" && activeWorkers > 0) {
-        ctx.ui.notify("Plan Mode cannot start while a worker subagent is running.", "warning");
+      if (state.mode !== "plan" && activeWriters > 0) {
+        ctx.ui.notify(
+          "Plan Mode cannot start while a write-capable subagent is running.",
+          "warning",
+        );
         return;
       }
       if (state.mode === "plan" && !request) {
@@ -554,8 +557,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`${reviewFailedPrefix}: the parent agent must be idle.`, "error");
         return;
       }
-      if (activeWorkers > 0) {
-        ctx.ui.notify(`${reviewFailedPrefix}: a Worker is active.`, "error");
+      if (activeWriters > 0) {
+        ctx.ui.notify(`${reviewFailedPrefix}: a write-capable subagent is active.`, "error");
         return;
       }
       const selection = await selectReviewerModel(ctx);
@@ -792,7 +795,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   pi.events.on(events.subagentsStatus, (data: unknown) => {
     const status = data as Partial<SubagentsStatusEvent> | undefined;
-    activeWorkers = typeof status?.workers === "number" ? status.workers : 0;
+    activeWriters = typeof status?.writers === "number" ? status.writers : 0;
   });
 
   pi.on("session_start", async (_event, ctx) => {

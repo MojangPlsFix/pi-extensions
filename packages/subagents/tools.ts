@@ -1,18 +1,9 @@
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import { discoverAgents } from "./agents.js";
-import { loadSubagentConfig, MAX_ACTIVE, MAX_WORKERS, resolveAgentModelPolicy } from "./config.js";
-import { HerdrClient } from "./herdr-client.js";
-import type { SubagentManager } from "./manager.js";
-import { formatAgent, herdrConnection, resourceDiagnostics } from "./renderers.js";
-import type { AgentSnapshot } from "./types.js";
-
-function snapshots(details: unknown): AgentSnapshot[] {
-  if (!details || typeof details !== "object") return [];
-  const value = details as { agent?: AgentSnapshot; agents?: AgentSnapshot[] };
-  return Array.isArray(value.agents) ? value.agents : value.agent ? [value.agent] : [];
-}
+import type { CollectMode, DispatchInput, SubagentManager } from "./manager.js";
+import { safeDisplayText } from "./renderers.js";
+import type { RunSnapshot } from "./types.js";
 
 function expandHint(): string {
   try {
@@ -22,14 +13,16 @@ function expandHint(): string {
   }
 }
 
-function toolSummary(agents: AgentSnapshot[]): string {
-  if (!agents.length) return "No matching subagent.";
-  return agents
-    .map(
-      (agent) =>
-        `${agent.status === "running" ? "●" : "○"} ${formatAgent(agent)} · ${agent.backend}${herdrConnection(agent) ? ` · ${herdrConnection(agent)}` : ""} · ${agent.latestActivity ?? "waiting…"}`,
-    )
-    .join("\n");
+function runLine(run: RunSnapshot): string {
+  const icon = run.status === "running" ? "●" : run.status === "blocked" ? "!" : "○";
+  const model = run.effectiveModel ? ` · ${safeDisplayText(run.effectiveModel)}` : "";
+  return `${icon} ${safeDisplayText(run.name)} · ${run.status}${model} · ${safeDisplayText(run.ownership.key)}`;
+}
+
+function runDetails(details: unknown): RunSnapshot[] {
+  if (!details || typeof details !== "object") return [];
+  const value = details as { runs?: RunSnapshot[]; run?: RunSnapshot };
+  return value.runs ?? (value.run ? [value.run] : []);
 }
 
 function resultRenderer(
@@ -38,55 +31,32 @@ function resultRenderer(
   theme: { fg(color: string, text: string): string },
   context: { lastComponent?: unknown; isError?: boolean },
 ) {
-  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-  const agents = snapshots(result.details);
+  const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  if (options.isPartial) {
+    component.setText(theme.fg("muted", "Subagent operation in progress…"));
+    return component;
+  }
+  const runs = runDetails(result.details);
   const content =
     result.content
-      ?.filter((item) => item.type === "text")
-      .map((item) => item.text ?? "")
+      ?.filter((part) => part.type === "text")
+      .map((part) => part.text ?? "")
       .join("\n") ?? "";
-  if (options.isPartial) {
-    text.setText(theme.fg("muted", "Subagent operation in progress…"));
-    return text;
-  }
-  // Every completed subagent result is compact by default, including errors and one-line replies.
   if (!options.expanded) {
-    const summary = agents.length
-      ? toolSummary(agents)
+    const summary = runs.length
+      ? runs.map(runLine).join("\n")
       : context.isError
         ? "Subagent operation failed."
         : "Subagent operation completed.";
-    const diagnostics = agents.flatMap((agent) => resourceDiagnostics(agent));
-    text.setText(
-      `${theme.fg(context.isError ? "error" : "muted", summary)}${diagnostics.length ? `\n${theme.fg("dim", diagnostics.join("\n"))}` : ""}\n${theme.fg("dim", expandHint())}`,
+    component.setText(
+      `${theme.fg(context.isError ? "error" : "muted", summary)}\n${theme.fg("dim", expandHint())}`,
     );
-    return text;
+    return component;
   }
-  if (context.isError) {
-    text.setText(theme.fg("error", content || "Subagent operation failed."));
-    return text;
-  }
-  const details = agents
-    .map((agent) =>
-      [
-        toolSummary([agent]),
-        `Task history:\n${agent.taskHistory.map((task, index) => `${index + 1}. ${task}`).join("\n") || "(none)"}`,
-        `Requested: ${agent.requestedModel ?? "default"} · ${agent.requestedThinking ?? "default"}`,
-        `Effective: ${agent.effectiveModel ?? "pending confirmation"} · ${agent.effectiveThinking ?? "pending confirmation"}`,
-        herdrConnection(agent) ? `Transport: ${herdrConnection(agent)}` : "",
-        ...resourceDiagnostics(agent),
-        `Started: ${agent.startedAt}${agent.finishedAt ? `\nFinished: ${agent.finishedAt}` : ""}`,
-        `Activity:\n${agent.activity.map((entry) => `${entry.at} · ${entry.kind} · ${entry.text}`).join("\n") || "(none)"}`,
-        agent.report ? `Report:\n${agent.report}` : "",
-        agent.stderr ? `Stderr:\n${agent.stderr}` : "",
-        agent.error ? `Error:\n${agent.error}` : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n"),
-    )
-    .join("\n\n---\n\n");
-  text.setText(theme.fg("toolOutput", details || content || "No subagent details."));
-  return text;
+  component.setText(
+    theme.fg(context.isError ? "error" : "toolOutput", safeDisplayText(content || "No output.")),
+  );
+  return component;
 }
 
 function callRenderer(
@@ -95,185 +65,185 @@ function callRenderer(
   theme: { fg(color: string, text: string): string; bold(text: string): string },
   context: { lastComponent?: unknown; isPartial?: boolean },
 ) {
-  const text = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const tasks = Array.isArray(args.tasks) ? args.tasks.length : undefined;
   const preview =
-    typeof args.task === "string"
-      ? args.task
-      : typeof args.message === "string"
-        ? args.message
+    tasks !== undefined
+      ? `${tasks} task${tasks === 1 ? "" : "s"}`
+      : Array.isArray(args.ids)
+        ? args.ids.join(", ")
         : typeof args.id === "string"
           ? args.id
           : "";
-  text.setText(
-    theme.fg("toolTitle", theme.bold(`${label} `)) +
-      theme.fg("dim", preview.slice(0, 100)) +
-      (context.isPartial ? theme.fg("muted", " · working") : ""),
+  component.setText(
+    `${theme.fg("toolTitle", theme.bold(`${label} `))}${theme.fg("dim", safeDisplayText(preview).slice(0, 100))}${context.isPartial ? theme.fg("muted", " · working") : ""}`,
   );
-  return text;
+  return component;
 }
+
+const dispatchTaskSchema = Type.Object({
+  key: Type.String({ description: "Stable unique key for this owned work slice." }),
+  agent: Type.String({ description: "Enabled profile name returned by subagent_status." }),
+  task: Type.String({ description: "Self-contained bounded assignment." }),
+  owns: Type.Array(Type.String(), {
+    minItems: 1,
+    description: "Owned paths, symbols, or topics. Prefix with path:, symbol:, or topic:.",
+  }),
+  deliverable: Type.String({ description: "Concrete result this child must return." }),
+  context: Type.Optional(
+    Type.Union([Type.Literal("fresh"), Type.Literal("decisions"), Type.Literal("plan")]),
+  ),
+  workspace: Type.Optional(Type.Union([Type.Literal("shared"), Type.Literal("worktree")])),
+});
 
 export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager): void {
   pi.registerTool({
-    name: "subagent_spawn",
-    label: "Subagent spawn",
+    name: "subagent_dispatch",
+    label: "Dispatch subagents",
     description:
-      "Start a persistent isolated subagent. Omit agent for all read-only investigation, documentation lookup, and current web research: this selects explorer. Specify agent: worker only when the delegated task must modify files. Never invent agent names such as research or web-researcher; custom names are only valid when listed by subagent_list. It returns after prompt acceptance; use subagent_wait or subagent_read for completion.",
-    promptSnippet:
-      "Delegate isolated read-only investigation to an Explorer or file changes to one Worker.",
+      "Dispatch one or more bounded subagent tasks. Batch every independent ready task in one call. Each task must declare disjoint ownership and a deliverable; the parent must not duplicate active delegated scope.",
+    promptSnippet: "Dispatch independent, explicitly owned specialist work in one batch.",
     promptGuidelines: [
-      "Use Explorer for read-only investigation and Worker only when delegated work must modify files.",
-      "Continue independent work after spawning instead of waiting immediately when useful.",
-      "Read completed reports and close agents when follow-ups are unnecessary; completed agents still consume capacity.",
-      "Subagents cannot recursively spawn Subagents or ask users directly.",
+      "Use subagents for substantial independent or specialist work, not trivial or tightly sequential steps.",
+      "Enumerate ready work, assign one owner per path/symbol/angle, and batch it in one call.",
+      "Use Scout/Researcher/Reviewer/Oracle for read-only work and Worker only for an owned implementation slice.",
+      "Do not work on a delegated scope while its child is active; continue only unowned work.",
+      "The parent reviews reports and runs final integrated verification.",
     ],
     parameters: Type.Object({
-      agent: Type.Optional(
-        Type.String({
-          description:
-            "Optional. Omit for read-only research and investigation (explorer is the default). Use worker only for file-changing implementation. Do not invent profile names; use a custom name only after subagent_list shows it.",
-        }),
-      ),
-      task: Type.String(),
+      tasks: Type.Array(dispatchTaskSchema, { minItems: 1, maxItems: 16 }),
     }),
-    async execute(_id, params, _signal, _update, ctx) {
+    async execute(_toolCallId, params, _signal, _update, ctx) {
       try {
-        const agent = await manager.spawn(params.agent, params.task, ctx);
+        const runs = await manager.dispatch(params.tasks as DispatchInput[], ctx);
+        const snapshots = manager
+          .snapshots()
+          .filter((snapshot) => runs.some((run) => run.id === snapshot.id));
         return {
           content: [
             {
               type: "text",
-              text: [`Started ${agent.name} as ${agent.id}.`, ...resourceDiagnostics(agent)].join(
-                "\n",
-              ),
+              text: runs.map((run) => `${run.ownership.key}: ${run.id} accepted`).join("\n"),
             },
           ],
-          details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
+          details: { runs: snapshots },
         };
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: {},
+          details: { runs: [] },
           isError: true,
         };
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_spawn", args as Record<string, unknown>, theme, context);
+      return callRenderer("subagent_dispatch", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
+
   pi.registerTool({
-    name: "subagent_send",
-    label: "Subagent send",
-    description: "Queue a non-destructive follow-up instruction to a persistent subagent.",
-    parameters: Type.Object({ id: Type.String(), message: Type.String() }),
-    async execute(_id, params) {
+    name: "subagent_status",
+    label: "Subagent status",
+    description:
+      "List enabled profiles, active ownership, capacity, blocked requests, parked reports, and configuration diagnostics.",
+    promptSnippet: "Inspect profiles, ownership, lifecycle, and capacity before dispatching.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _update, ctx) {
       try {
-        const agent = await manager.send(params.id, params.message);
-        return {
-          content: [{ type: "text", text: `Queued follow-up for ${agent.name}.` }],
-          details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
-        };
+        const hub = await manager.status(ctx);
+        const visibleProfiles = hub.profiles.filter((profile) => !profile.hidden);
+        const text = [
+          "Profiles:",
+          ...visibleProfiles.map(
+            (profile) =>
+              `- ${profile.name} (${profile.class}, ${profile.runner}): ${profile.description}`,
+          ),
+          "",
+          "Runs:",
+          ...(hub.runs.length
+            ? hub.runs.map(
+                (run) =>
+                  `${runLine(run)}\n  owns: ${run.ownership.owns.join(", ")}\n  task: ${run.task}`,
+              )
+            : ["(none)"]),
+          "",
+          `Pending supervisor requests: ${hub.requests.filter((request) => request.status === "pending").length}`,
+          ...(hub.diagnostics.length
+            ? [
+                "",
+                "Diagnostics:",
+                ...hub.diagnostics.map((item) => `- ${item.path}: ${item.message}`),
+              ]
+            : []),
+        ].join("\n");
+        return { content: [{ type: "text", text }], details: { runs: hub.runs } };
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: {},
+          details: { runs: [] },
           isError: true,
         };
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_send", args as Record<string, unknown>, theme, context);
+      return callRenderer("subagent_status", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
+
   pi.registerTool({
-    name: "subagent_wait",
-    label: "Subagent wait",
-    description: "Wait until one or all subagents settle and return their reports.",
+    name: "subagent_collect",
+    label: "Collect subagents",
+    description:
+      "Read selected subagent results, optionally waiting for the next or all selected runs to settle. Settled sessions are already parked and consume no active capacity.",
     parameters: Type.Object({
-      id: Type.Optional(Type.String()),
-      all: Type.Optional(Type.Boolean()),
+      ids: Type.Optional(Type.Array(Type.String())),
+      wait: Type.Optional(
+        Type.Union([Type.Literal("none"), Type.Literal("next"), Type.Literal("all")]),
+      ),
     }),
-    async execute(_id, params, signal) {
-      const done = await manager.wait(params.id, params.all, signal);
-      if (!done.length)
-        return {
-          content: [{ type: "text", text: "No matching running subagents." }],
-          details: { agents: [] },
-        };
-      const agents = manager
-        .snapshots()
-        .filter((value) => done.some((agent) => agent.id === value.id));
+    async execute(_toolCallId, params, signal) {
+      const runs = await manager.collect(
+        params.ids,
+        (params.wait ?? "none") as CollectMode,
+        signal,
+      );
       return {
         content: [
           {
             type: "text",
-            text: done
-              .map(
-                (agent) =>
-                  `## ${formatAgent(agent)}\n\n${agent.output || agent.error || "(no report)"}`,
-              )
-              .join("\n\n"),
+            text:
+              runs
+                .map(
+                  (run) =>
+                    `## ${run.name} · ${run.status}\nOwned: ${run.ownership.owns.join(", ")}\n\n${run.report || run.error || "(no report yet)"}`,
+                )
+                .join("\n\n") || "No matching subagents.",
           },
         ],
-        details: { agents },
+        details: { runs },
       };
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_wait", args as Record<string, unknown>, theme, context);
+      return callRenderer("subagent_collect", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
+
   pi.registerTool({
-    name: "subagent_list",
-    label: "Subagent list",
+    name: "subagent_steer",
+    label: "Steer subagent",
     description:
-      "List roles, configured model policy, capacity, backend capabilities, lifecycle guidance, and current or completed agents.",
-    promptSnippet: "Inspect Subagent roles, capacity, model policy, lifecycle, and current agents.",
-    parameters: Type.Object({}),
-    async execute(_id, _params, _signal, _update, ctx) {
+      "Send guidance to an active subagent, or explicitly revive a parked persistent session with a follow-up.",
+    parameters: Type.Object({ id: Type.String(), message: Type.String() }),
+    async execute(_toolCallId, params) {
       try {
-        const agents = manager.snapshots();
-        const definitions = await discoverAgents();
-        const config = await loadSubagentConfig();
-        const parent = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
-        const roles = definitions.map((definition) => {
-          const resolved = resolveAgentModelPolicy(definition, config, parent, ctx.thinkingLevel);
-          return `- ${definition.name} (${definition.mode}): ${resolved.model ?? "inherit"} · ${resolved.thinking ?? "inherit"}`;
-        });
-        const open = agents.filter((agent) => ["running", "completed"].includes(agent.status));
-        const workers = open.filter((agent) => agent.mode === "worker").length;
-        const herdr = HerdrClient.environmentState();
-        const current =
-          agents
-            .map((agent) =>
-              [
-                `${agent.id}: ${formatAgent(agent)}`,
-                `  Task: ${agent.task}`,
-                ...resourceDiagnostics(agent).map((line) => `  ${line}`),
-              ].join("\n"),
-            )
-            .join("\n") || "(none)";
+        const run = await manager.steer(params.id, params.message);
+        const snapshot = manager.snapshots().find((item) => item.id === run.id)!;
         return {
-          content: [
-            {
-              type: "text",
-              text: [
-                "Roles and spawn-time model policy:",
-                ...roles,
-                "Resolution: per-agent config → custom frontmatter → defaults → parent snapshot.",
-                `Capacity: ${open.length}/${MAX_ACTIVE} open · ${workers}/${MAX_WORKERS} Worker open. Completed agents remain open until subagent_close.`,
-                `Backend: ${herdr === "absent" ? "RPC fallback" : herdr === "complete" ? "Herdr (dedicated adaptive tab, metadata, and manual focus)" : "Herdr configured incompletely; spawning is blocked"}.`,
-                "Lifecycle: running and completed consume capacity; failed/interrupted release immediately; closed reports remain readable.",
-                "Continue independent work after spawning. Read reports and close agents when follow-ups are unnecessary.",
-                "",
-                "Agents:",
-                current,
-              ].join("\n"),
-            },
-          ],
-          details: { agents },
+          content: [{ type: "text", text: `Guidance accepted by ${run.id}.` }],
+          details: { run: snapshot },
         };
       } catch (error) {
         return {
@@ -284,52 +254,27 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_list", args as Record<string, unknown>, theme, context);
+      return callRenderer("subagent_steer", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
+
   pi.registerTool({
-    name: "subagent_read",
-    label: "Subagent read",
-    description: "Read a subagent's latest report and usage.",
-    parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params) {
-      const agent = manager.snapshots().find((value) => value.id === params.id);
-      return agent
-        ? {
-            content: [
-              {
-                type: "text",
-                text: [
-                  formatAgent(agent),
-                  ...resourceDiagnostics(agent),
-                  "",
-                  agent.report || agent.error || "(running; no report yet)",
-                ].join("\n"),
-              },
-            ],
-            details: { agent },
-          }
-        : { content: [{ type: "text", text: "Unknown subagent." }], details: {}, isError: true };
-    },
-    renderCall(args, theme, context) {
-      return callRenderer("subagent_read", args as Record<string, unknown>, theme, context);
-    },
-    renderResult: resultRenderer,
-  });
-  pi.registerTool({
-    name: "subagent_close",
-    label: "Subagent close",
+    name: "subagent_stop",
+    label: "Stop subagents",
     description:
-      "Close an open Subagent, release its capacity, terminate its transport, and retain its report for reading.",
-    promptSnippet: "Close Subagents whose reports no longer need follow-up.",
-    parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params) {
+      "Stop one or more active subagents and their owned descendants. Persistent transcripts and reports remain available.",
+    parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1 }) }),
+    async execute(_toolCallId, params) {
       try {
-        const agent = await manager.close(params.id);
+        const stopped: Awaited<ReturnType<SubagentManager["stop"]>>[] = [];
+        for (const id of params.ids) stopped.push(await manager.stop(id));
+        const snapshots = manager
+          .snapshots()
+          .filter((snapshot) => stopped.some((run) => run.id === snapshot.id));
         return {
-          content: [{ type: "text", text: `Closed ${agent.name}; its report remains readable.` }],
-          details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
+          content: [{ type: "text", text: stopped.map((run) => `Stopped ${run.id}.`).join("\n") }],
+          details: { runs: snapshots },
         };
       } catch (error) {
         return {
@@ -340,32 +285,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_close", args as Record<string, unknown>, theme, context);
-    },
-    renderResult: resultRenderer,
-  });
-  pi.registerTool({
-    name: "subagent_interrupt",
-    label: "Subagent interrupt",
-    description: "Interrupt a running subagent.",
-    parameters: Type.Object({ id: Type.String() }),
-    async execute(_id, params) {
-      try {
-        const agent = await manager.interrupt(params.id);
-        return {
-          content: [{ type: "text", text: `Interrupted ${agent.name}.` }],
-          details: { agent: manager.snapshots().find((value) => value.id === agent.id)! },
-        };
-      } catch (error) {
-        return {
-          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-          details: {},
-          isError: true,
-        };
-      }
-    },
-    renderCall(args, theme, context) {
-      return callRenderer("subagent_interrupt", args as Record<string, unknown>, theme, context);
+      return callRenderer("subagent_stop", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });

@@ -3,6 +3,7 @@ export const events = {
   planMode: "pi-extensions:plan-mode",
   planReview: "pi-extensions:plan-review",
   subagentsStatus: "pi-extensions:subagents-status",
+  subagentsHub: "pi-extensions:subagents-hub",
   userInteraction: "pi-extensions:user-interaction",
   herdrBlocked: "herdr:blocked",
 } as const;
@@ -73,12 +74,10 @@ export type PlanReviewEvent = {
 export type SubagentActivitySnapshot = {
   id: string;
   name: string;
-  mode: "explorer" | "worker";
-  status: "running" | "completed" | "failed" | "interrupted" | "closed";
+  profileClass?: "read" | "write" | "review" | "advisory" | "orchestrator";
+  status: "queued" | "starting" | "running" | "blocked" | "parked" | "failed" | "stopped";
   task: string;
   elapsedMs: number;
-  requestedModel?: string;
-  requestedThinking?: string;
   effectiveModel?: string;
   effectiveThinking?: string;
   latestActivity?: string;
@@ -86,13 +85,11 @@ export type SubagentActivitySnapshot = {
 
 export type SubagentsStatusEvent = {
   active: number;
-  ready: number;
-  open: number;
-  explorers: number;
-  workers: number;
+  blocked: number;
+  parked: number;
   failed: number;
-  interrupted: number;
-  closed: number;
+  writers: number;
+  total: number;
   /** Task-first inline snapshots only; complete history remains owned by /agents. */
   agents: SubagentActivitySnapshot[];
 };

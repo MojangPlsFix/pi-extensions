@@ -8,13 +8,11 @@ const widgetKey = "pi-extensions:subagent-working";
 
 const emptyStatus = (): SubagentsStatusEvent => ({
   active: 0,
-  ready: 0,
-  open: 0,
-  explorers: 0,
-  workers: 0,
+  blocked: 0,
+  parked: 0,
   failed: 0,
-  interrupted: 0,
-  closed: 0,
+  writers: 0,
+  total: 0,
   agents: [],
 });
 
@@ -24,13 +22,11 @@ function normalized(value: unknown): SubagentsStatusEvent {
     typeof entry === "number" && Number.isFinite(entry) ? Math.max(0, Math.floor(entry)) : 0;
   return {
     active: count(candidate.active),
-    ready: count(candidate.ready),
-    open: count(candidate.open),
-    explorers: count(candidate.explorers),
-    workers: count(candidate.workers),
+    blocked: count(candidate.blocked),
+    parked: count(candidate.parked),
     failed: count(candidate.failed),
-    interrupted: count(candidate.interrupted),
-    closed: count(candidate.closed),
+    writers: count(candidate.writers),
+    total: count(candidate.total),
     agents: Array.isArray(candidate.agents) ? candidate.agents.slice(0, 4) : [],
   };
 }
@@ -72,8 +68,9 @@ export class SubagentActivityComponent {
         ...this.status,
         agents: this.status.agents.map((agent) => ({
           ...agent,
-          elapsedMs:
-            agent.status === "running" ? agent.elapsedMs + elapsedSinceUpdate : agent.elapsedMs,
+          elapsedMs: ["queued", "starting", "running", "blocked"].includes(agent.status)
+            ? agent.elapsedMs + elapsedSinceUpdate
+            : agent.elapsedMs,
         })),
       },
       this.theme,

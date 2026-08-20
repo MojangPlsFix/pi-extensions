@@ -1,47 +1,42 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { events, type SubagentsStatusEvent } from "../../../shared/events.js";
-import { type AgentSnapshot, emptyUsage } from "../../subagents/types.js";
+import {
+  events,
+  type SubagentActivitySnapshot,
+  type SubagentsStatusEvent,
+} from "../../../shared/events.js";
 import workingIndicatorExtension, { SubagentActivityComponent } from "../index.js";
 
 type Handler = (...args: any[]) => any;
 
 type Harness = ReturnType<typeof harness>;
 
-function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
+function snapshot(overrides: Partial<SubagentActivitySnapshot> = {}): SubagentActivitySnapshot {
   return {
-    id: "explorer-1",
-    name: "explorer",
-    mode: "explorer",
+    id: "scout-1",
+    name: "scout",
+    profileClass: "read",
     status: "running",
-    backend: "rpc",
     task: "Trace the authentication request flow",
-    taskHistory: ["Trace the authentication request flow"],
-    startedAt: "2026-01-01T00:00:00.000Z",
     elapsedMs: 12_000,
-    sessionDir: "/tmp/session",
-    requestedModel: "openai-codex/gpt-5.6-luna",
-    requestedThinking: "low",
+    effectiveModel: "openai-codex/gpt-5.6-luna",
+    effectiveThinking: "low",
     latestActivity: "reading manager.ts",
-    activity: [],
-    report: "",
-    stderr: "",
-    usage: emptyUsage(),
     ...overrides,
   };
 }
 
-function status(agents: AgentSnapshot[]): SubagentsStatusEvent {
-  const running = agents.filter((agent) => agent.status === "running");
+function status(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
+  const active = agents.filter((agent) =>
+    ["queued", "starting", "running", "blocked"].includes(agent.status),
+  );
   return {
-    active: running.length,
-    ready: agents.filter((agent) => agent.status === "completed").length,
-    open: agents.filter((agent) => ["running", "completed"].includes(agent.status)).length,
-    explorers: running.filter((agent) => agent.mode === "explorer").length,
-    workers: running.filter((agent) => agent.mode === "worker").length,
+    active: active.length,
+    blocked: agents.filter((agent) => agent.status === "blocked").length,
+    parked: agents.filter((agent) => agent.status === "parked").length,
     failed: agents.filter((agent) => agent.status === "failed").length,
-    interrupted: agents.filter((agent) => agent.status === "interrupted").length,
-    closed: agents.filter((agent) => agent.status === "closed").length,
+    writers: active.filter((agent) => agent.profileClass === "write").length,
+    total: agents.length,
     agents,
   };
 }
@@ -141,6 +136,27 @@ describe("working indicator lifecycle", () => {
 
     subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
+    await emit(subject, "session_shutdown");
+  });
+
+  it("strips terminal controls from child activity", async () => {
+    const subject = harness();
+    await emit(subject, "session_start");
+    subject.emitExtensionEvent(
+      events.subagentsStatus,
+      status([
+        snapshot({
+          task: "Inspect \u001b]0;spoofed\u0007 auth",
+          latestActivity: "reading \u001b[31msecret\u001b[0m",
+        }),
+      ]),
+    );
+
+    const output = subject.widget()?.render(120).join("\n") ?? "";
+    expect(output).toContain("Inspect auth");
+    expect(output).toContain("reading secret");
+    expect(output).not.toContain("spoofed");
+    expect(output).not.toContain("\u001b");
     await emit(subject, "session_shutdown");
   });
 

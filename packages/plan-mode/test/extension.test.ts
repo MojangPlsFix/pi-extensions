@@ -279,26 +279,24 @@ describe("Plan Mode lifecycle", () => {
     expect(subject.activeTools()).toEqual(expect.arrayContaining(["edit", "write"]));
   });
 
-  it("allows an active explorer but blocks Plan Mode for an active worker", async () => {
-    const explorer = harness();
-    await emit(explorer, "session_start", {});
-    explorer.emitExtensionEvent("pi-extensions:subagents-status", {
+  it("allows an active read profile but blocks Plan Mode for an active writer", async () => {
+    const reader = harness();
+    await emit(reader, "session_start", {});
+    reader.emitExtensionEvent("pi-extensions:subagents-status", {
       active: 1,
-      explorers: 1,
-      workers: 0,
+      writers: 0,
     });
-    await explorer.commands.get("plan")?.("", explorer.context);
-    expect(explorer.activeTools()).not.toContain("edit");
+    await reader.commands.get("plan")?.("", reader.context);
+    expect(reader.activeTools()).not.toContain("edit");
 
-    const worker = harness();
-    await emit(worker, "session_start", {});
-    worker.emitExtensionEvent("pi-extensions:subagents-status", {
+    const writer = harness();
+    await emit(writer, "session_start", {});
+    writer.emitExtensionEvent("pi-extensions:subagents-status", {
       active: 1,
-      explorers: 0,
-      workers: 1,
+      writers: 1,
     });
-    await worker.commands.get("plan")?.("", worker.context);
-    expect(worker.activeTools()).toContain("edit");
+    await writer.commands.get("plan")?.("", writer.context);
+    expect(writer.activeTools()).toContain("edit");
   });
 
   it("uses the reviewer bridge without approving or implementing the plan", async () => {

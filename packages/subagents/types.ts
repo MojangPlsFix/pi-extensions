@@ -1,36 +1,72 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import type { EffectiveCapabilityPolicy } from "./capabilities.js";
 
-export type Mode = "explorer" | "worker";
-export type AgentStatus = "running" | "completed" | "failed" | "interrupted" | "closed";
-export type BackendKind = "rpc" | "herdr";
+/** The v2 profile class controls the authority granted to a profile. */
+export type ProfileClass = "read" | "write" | "review" | "advisory" | "orchestrator";
+export type RunnerKind = "native" | "rpc" | "external";
+export type WorkspacePolicy = "shared" | "isolated" | "read-only";
+export type AgentSource = "builtin" | "user" | "project";
 
-export type OptionalIntegrationPolicy = "auto" | "enabled" | "disabled";
+export const PROFILE_CLASSES = ["read", "write", "review", "advisory", "orchestrator"] as const;
+export const RUNNER_KINDS = ["native", "rpc", "external"] as const;
 
-/** Partial configuration override accepted in defaults and agent entries. */
-export type ChildResourcePolicy = {
-  contextMode?: OptionalIntegrationPolicy;
-  contextExecution?: boolean;
-  webSearch?: boolean;
-  todos?: boolean;
-  rtk?: OptionalIntegrationPolicy;
-  uv?: OptionalIntegrationPolicy;
+export type RunStatus =
+  | "queued"
+  | "starting"
+  | "running"
+  | "blocked"
+  | "parked"
+  | "failed"
+  | "stopped";
+
+export type RunActivityKind =
+  | "spawn"
+  | "prompt"
+  | "steer"
+  | "tool"
+  | "message"
+  | "status"
+  | "approval"
+  | "error"
+  | "transport"
+  | "park";
+
+export type RunActivity = { at: string; kind: RunActivityKind; text: string };
+
+export type Budget = { timeoutMs?: number; turns?: number; tokens?: number; cost?: number };
+export type ProfileMetadata = {
+  enabled?: boolean;
+  disabled?: boolean;
+  ejected?: boolean;
+  note?: string;
 };
 
-/** Fully resolved role policy used by a running child. */
-export type ResolvedChildResourcePolicy = Required<ChildResourcePolicy>;
-
-/** Probed/installed capability state. A false value can also mean that probing was skipped. */
-export type ChildDetectedResources = {
-  contextMode: boolean;
-  contextExecution: boolean;
-  webSearch: boolean;
-  todos: boolean;
-  rtk: boolean;
-  uv: boolean;
+/** A schema-v2 profile loaded from a built-in or Markdown definition. */
+export type AgentDefinition = {
+  schemaVersion: 2;
+  name: string;
+  description: string;
+  class: ProfileClass;
+  runner: RunnerKind;
+  tools: string[];
+  capabilities: string[];
+  skills: string[];
+  defaultContext?: string;
+  allowedNestedProfiles: string[];
+  maxDepth: number;
+  workspace: WorkspacePolicy;
+  timeout?: number;
+  turnBudget?: number;
+  tokenBudget?: number;
+  costBudget?: number;
+  infer: boolean;
+  hidden: boolean;
+  model?: string;
+  thinking?: string;
+  prompt: string;
+  source: AgentSource;
+  path?: string;
+  metadata?: ProfileMetadata;
 };
-
-/** Capabilities actually exposed to the child. */
-export type ChildEffectiveResources = ChildDetectedResources;
 
 export type Usage = {
   input: number;
@@ -41,110 +77,81 @@ export type Usage = {
   cost: number;
 };
 
-export type AgentDefinition = {
-  name: string;
-  description: string;
-  mode: Mode;
-  model?: string;
-  thinking?: string;
-  prompt: string;
-  source: "builtin" | "user";
+export type RunWorktree = {
+  missionId: string;
+  root: string;
+  cwd: string;
+  baseCommit: string;
+  sourceRoot: string;
 };
 
-export type AgentActivity = {
-  at: string;
-  kind:
-    | "spawn"
-    | "prompt"
-    | "guidance"
-    | "redirect"
-    | "tool"
-    | "message"
-    | "status"
-    | "error"
-    | "transport"
-    | "close";
-  text: string;
+export type IntegrationCandidate = {
+  patch: string;
+  files: string[];
+  hasChanges: boolean;
 };
 
-/** Serializable state deliberately safe to put in a tool result's details. */
-export type AgentSnapshot = {
+export type TaskOwnership = {
+  key: string;
+  owns: string[];
+  deliverable: string;
+  workspace: "shared" | "worktree";
+};
+
+export type RunRecord = {
   id: string;
-  name: string;
-  mode: Mode;
-  status: AgentStatus;
-  backend: BackendKind;
+  parentId?: string;
+  missionId?: string;
+  profile: AgentDefinition;
+  /** Immutable profile policy captured when this run was first allocated. */
+  profileSnapshot: AgentDefinition;
   task: string;
   taskHistory: string[];
+  ownership: TaskOwnership;
+  status: RunStatus;
+  runner: RunnerKind;
   startedAt: string;
   finishedAt?: string;
-  elapsedMs: number;
   sessionDir: string;
   sessionFile?: string;
-  herdrPaneId?: string;
-  herdrWorkspaceId?: string;
-  herdrParentTabId?: string;
-  herdrTabId?: string;
-  requestedModel?: string;
-  requestedThinking?: string;
-  effectiveModel?: string;
-  effectiveThinking?: string;
-  requestedResources?: ResolvedChildResourcePolicy;
-  detectedResources?: ChildDetectedResources;
-  effectiveResources?: ChildEffectiveResources;
-  resourceWarnings?: string[];
-  latestActivity?: string;
-  activity: AgentActivity[];
   report: string;
-  stderr: string;
   error?: string;
   usage: Usage;
-};
-
-export type ManagedAgent = {
-  id: string;
-  name: string;
-  definition: AgentDefinition;
-  task: string;
-  taskHistory: string[];
-  status: AgentStatus;
-  backend: BackendKind;
-  startedAt: string;
-  finishedAt?: string;
-  sessionDir: string;
-  sessionFile?: string;
-  /** Present only for the traditional invisible RPC transport. */
-  process?: ChildProcessWithoutNullStreams;
-  herdrPaneId?: string;
-  herdrWorkspaceId?: string;
-  herdrParentTabId?: string;
-  herdrTabId?: string;
-  stderr: string;
-  output: string;
-  error?: string;
-  usage: Usage;
-  completionReported: boolean;
-  requestedModel?: string;
-  requestedThinking?: string;
+  turns: number;
+  activity: RunActivity[];
+  currentTool?: string;
   effectiveModel?: string;
   effectiveThinking?: string;
-  requestedResources?: ResolvedChildResourcePolicy;
-  detectedResources?: ChildDetectedResources;
-  effectiveResources?: ChildEffectiveResources;
-  resourceWarnings?: string[];
-  activity: AgentActivity[];
-  redirectMessage?: string;
+  capabilityNames: string[];
+  /** Immutable flattened capability policy captured when the run starts. */
+  capabilityPolicy: EffectiveCapabilityPolicy;
+  worktree?: RunWorktree;
+  candidate?: IntegrationCandidate;
+  integrationRequestId?: string;
+  completionReported: boolean;
 };
 
-export type AgentStatusSummary = {
+export type RunSnapshot = Omit<
+  RunRecord,
+  "profile" | "profileSnapshot" | "candidate" | "capabilityPolicy"
+> & {
+  name: string;
+  profileClass: ProfileClass;
+  description: string;
+  elapsedMs: number;
+  latestActivity?: string;
+  hidden: boolean;
+  candidate?: { files: string[]; hasChanges: boolean };
+  capabilityPolicy: EffectiveCapabilityPolicy;
+};
+
+export type RunSummary = {
   active: number;
-  ready: number;
-  open: number;
-  explorers: number;
-  workers: number;
+  blocked: number;
+  parked: number;
   failed: number;
-  interrupted: number;
-  closed: number;
+  writers: number;
+  total: number;
 };
 
 export const emptyUsage = (): Usage => ({
@@ -156,41 +163,71 @@ export const emptyUsage = (): Usage => ({
   cost: 0,
 });
 
-export function agentSnapshot(agent: ManagedAgent, now = Date.now()): AgentSnapshot {
+export function capabilityPolicySnapshot(
+  policy: EffectiveCapabilityPolicy,
+): EffectiveCapabilityPolicy {
   return {
-    id: agent.id,
-    name: agent.name,
-    mode: agent.definition.mode,
-    status: agent.status,
-    backend: agent.backend,
-    task: agent.task,
-    taskHistory: [...agent.taskHistory],
-    startedAt: agent.startedAt,
-    finishedAt: agent.finishedAt,
+    requested: [...policy.requested],
+    capabilities: policy.capabilities.map((capability) => ({
+      ...capability,
+      toolPatterns: capability.toolPatterns ? [...capability.toolPatterns] : undefined,
+      executableArgvPrefixes: capability.executableArgvPrefixes?.map((prefix) => [...prefix]),
+      skills: capability.skills ? [...capability.skills] : undefined,
+      envAllowlist: capability.envAllowlist ? [...capability.envAllowlist] : undefined,
+      matchedTools: [...capability.matchedTools],
+      matchedExecutables: capability.matchedExecutables.map((prefix) => [...prefix]),
+    })),
+    tools: [...policy.tools],
+    executableArgvPrefixes: policy.executableArgvPrefixes.map((prefix) => [...prefix]),
+    skills: [...policy.skills],
+    envAllowlist: [...policy.envAllowlist],
+    state: policy.state,
+    approval: policy.approval,
+    diagnostics: policy.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+  };
+}
+
+export function runSnapshot(run: RunRecord, now = Date.now()): RunSnapshot {
+  return {
+    id: run.id,
+    parentId: run.parentId,
+    missionId: run.missionId,
+    name: run.profile.name,
+    profileClass: run.profile.class,
+    description: run.profile.description,
+    task: run.task,
+    taskHistory: [...run.taskHistory],
+    ownership: {
+      ...run.ownership,
+      owns: [...run.ownership.owns],
+    },
+    status: run.status,
+    runner: run.runner,
+    startedAt: run.startedAt,
+    finishedAt: run.finishedAt,
     elapsedMs: Math.max(
       0,
-      (agent.finishedAt ? Date.parse(agent.finishedAt) : now) - Date.parse(agent.startedAt),
+      (run.finishedAt ? Date.parse(run.finishedAt) : now) - Date.parse(run.startedAt),
     ),
-    sessionDir: agent.sessionDir,
-    sessionFile: agent.sessionFile,
-    herdrPaneId: agent.herdrPaneId,
-    herdrWorkspaceId: agent.herdrWorkspaceId,
-    herdrParentTabId: agent.herdrParentTabId,
-    herdrTabId: agent.herdrTabId,
-    requestedModel: agent.requestedModel,
-    requestedThinking: agent.requestedThinking,
-    effectiveModel: agent.effectiveModel,
-    effectiveThinking: agent.effectiveThinking,
-    requestedResources: agent.requestedResources ? { ...agent.requestedResources } : undefined,
-    detectedResources: agent.detectedResources ? { ...agent.detectedResources } : undefined,
-    effectiveResources: agent.effectiveResources ? { ...agent.effectiveResources } : undefined,
-    resourceWarnings: agent.resourceWarnings ? [...agent.resourceWarnings] : undefined,
-    // Transport observations belong in the expanded history but must not replace actual work in the compact widget.
-    latestActivity: [...agent.activity].reverse().find((entry) => entry.kind !== "transport")?.text,
-    activity: [...agent.activity],
-    report: agent.output,
-    stderr: agent.stderr,
-    error: agent.error,
-    usage: { ...agent.usage },
+    sessionDir: run.sessionDir,
+    sessionFile: run.sessionFile,
+    report: run.report,
+    error: run.error,
+    usage: { ...run.usage },
+    turns: run.turns,
+    activity: run.activity.map((entry) => ({ ...entry })),
+    latestActivity: run.activity.at(-1)?.text,
+    currentTool: run.currentTool,
+    effectiveModel: run.effectiveModel,
+    effectiveThinking: run.effectiveThinking,
+    capabilityNames: [...run.capabilityNames],
+    capabilityPolicy: capabilityPolicySnapshot(run.capabilityPolicy),
+    worktree: run.worktree ? { ...run.worktree } : undefined,
+    candidate: run.candidate
+      ? { files: [...run.candidate.files], hasChanges: run.candidate.hasChanges }
+      : undefined,
+    integrationRequestId: run.integrationRequestId,
+    completionReported: run.completionReported,
+    hidden: run.profile.hidden,
   };
 }

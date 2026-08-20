@@ -1,55 +1,88 @@
 ---
 name: subagent-orchestration
-description: Coordinate isolated Explorer and Worker Subagents for parallel investigation, implementation, follow-up, reports, and cleanup.
+description: Coordinate Subagents v2 profiles with explicit ownership, batch dispatch, supervisor requests, parked reports, and reviewed integration.
 ---
 
 # Subagent Orchestration
 
-Use Subagents to delegate independent work while keeping the parent responsible for decisions and integration.
+Use Subagents for substantial independent work or specialist work. Keep decisions, review, and final verification in the parent.
 
-## Choose the role deliberately
+## Select a profile
 
-- **Explorer** is the default for read-only code investigation, documentation lookup, architecture analysis, and web research.
-- **Worker** is only for delegated work that must modify files. Workers are unavailable while Plan Mode is active.
-- Roles may resolve to separate configured models and thinking levels. Treat the requested/effective model shown by the tools as diagnostic information, not as a reason to change role semantics.
-- Only use custom role names returned by `subagent_list`; never invent one.
+Call `subagent_status` before you use a custom profile name.
 
-## Recommended Luna role configuration
+Use the built-in profiles as follows:
 
-For development, recommend `~/.pi/agent/subagents/config.json` with Luna/low Explorers for inexpensive parallel investigation and review, and one Luna/high Worker as the persistent implementation owner:
+- Use `scout` for fast read-only repository mapping.
+- Use `researcher` for current web sources and primary documentation.
+- Use `worker` for one owned implementation slice.
+- Use `reviewer` for one evidence-based review angle.
+- Use `oracle` for decision consistency and hidden assumptions.
+- Use `/orchestrate` for one explicit sidecar mission.
 
-```json
-{
-  "agents": {
-    "explorer": {
-      "model": "openai-codex/gpt-5.6-luna",
-      "thinking": "low"
-    },
-    "worker": {
-      "model": "openai-codex/gpt-5.6-luna",
-      "thinking": "high"
-    }
-  }
-}
-```
+Do not invent a profile name.
 
-This is a recommended example, not a hard-coded requirement. The provider must be configured and authenticated. Model policy resolves when each child spawns; existing open children keep their original model and thinking. Run `/reload` after changing the file. Before relying on the policy, use `subagent_list` or `/agents` to verify the effective model of a newly spawned child.
+## Make a task graph
 
-## Coordinate without serializing everything
+1. List all ready work.
+2. Mark each dependency.
+3. Assign one owner to each path, symbol, or topic.
+4. Give each task one concrete deliverable.
+5. Put all independent ready tasks in one `subagent_dispatch` call.
 
-- Up to four Subagents may remain open, with at most one open Worker.
-- A completed Subagent remains open for follow-ups and still consumes capacity.
-- After spawning, continue independent parent work when useful instead of immediately waiting.
-- Use `subagent_read` for a settled report, `subagent_send` for a follow-up, and `subagent_wait` only when progress truly depends on completion.
-- Read reports and call `subagent_close` when follow-ups are unnecessary.
+Do not send the same task to two profiles. Do not assign overlapping writer scopes.
 
-## Visibility and lifecycle
+Use one shared-checkout Worker by default. Use `workspace: "worktree"` only for a clean Git checkout and disjoint writer scopes.
 
-- The inline task-first activity block shows at most four relevant agents.
-- `/agents` shows complete task history, status, reports, usage, Herdr focus, and close controls. Use `/agents help` for controls.
-- Running and completed agents are open. Failed and interrupted agents release capacity immediately. Closed agents retain readable reports but have no transport.
-- Herdr panes never steal focus automatically; use `/agents` focus when needed.
+## Continue parent work
 
-## Child boundaries
+After dispatch, continue only with work that no child owns.
 
-Children are isolated Pi sessions. They cannot spawn recursive Subagents or ask the user directly. They must return questions and blockers to the parent. Explorer resources are read-only; Worker resources permit the reviewed modification tools. The parent remains responsible for reviewing output, resolving conflicts, and validating the integrated result.
+Do not wait immediately if useful parent work remains. Use `subagent_collect` when the next step needs a child result.
+
+The manager parks a completed child automatically. A parked child does not use active capacity.
+
+Use `subagent_steer` for a narrow correction or follow-up. Do not replace the original ownership through steering.
+
+Use `subagent_stop` when a task is obsolete, unsafe, or outside its ownership.
+
+## Handle supervisor requests
+
+Children do not ask the user directly. Native children use `contact_supervisor` for these request types:
+
+- decision
+- approval
+- blocker
+- progress
+- integration-ready
+
+Open `/agents` to answer a blocked request. Review the detail and tool input before you approve an action.
+
+Do not claim that a pending child succeeded. Read its settled report first.
+
+## Review and integrate
+
+For each report:
+
+1. Check that the child stayed inside its ownership.
+2. Check its file and symbol evidence.
+3. Check its validation output.
+4. Inspect each changed file.
+5. Resolve conflicts and open questions.
+6. Run final checks in the integrated checkout.
+
+A worktree candidate requires an Inbox response. The manager never applies it automatically.
+
+## Plan Mode
+
+Plan Mode permits Subagent control tools. The manager rejects write dispatch and write-session revival during Plan Mode.
+
+Use Scout, Researcher, Reviewer, Oracle, or the hidden Plan Reviewer for plan work.
+
+## Lifecycle and UI
+
+Use `/agents` as the lifecycle authority. The Hub shows lineage, claims, blocked requests, reports, profiles, and diagnostics.
+
+Herdr transcript panes are display-only. They do not run or prompt children.
+
+Parent shutdown stops active turns and parks their records. Do not expect offline child work after Pi exits.

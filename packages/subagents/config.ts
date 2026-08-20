@@ -1,309 +1,378 @@
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
-import type {
-  AgentDefinition,
-  ChildDetectedResources,
-  ChildEffectiveResources,
-  ChildResourcePolicy,
-  Mode,
-  OptionalIntegrationPolicy,
-  ResolvedChildResourcePolicy,
-} from "./types.js";
+import { dirname, join } from "node:path";
+import {
+  type CapabilityDefinition,
+  type EffectiveCapabilityPolicy,
+  selectEffectiveCapabilities,
+  validateCapabilityCatalog,
+} from "./capabilities.js";
+import type { AgentDefinition } from "./types.js";
 
-export type {
-  ChildDetectedResources,
-  ChildEffectiveResources,
-  ChildResourcePolicy,
-  OptionalIntegrationPolicy,
-  ResolvedChildResourcePolicy,
-} from "./types.js";
-
-const agentRoot = process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
-
+export const PI_AGENT_DIR =
+  process.env.PI_CODING_AGENT_DIR?.trim() || join(homedir(), ".pi", "agent");
 export const MAX_ACTIVE = 4;
-export const MAX_WORKERS = 1;
-export const SUBAGENT_ROOT = join(agentRoot, "subagents");
-/** Trusted user-global agent definitions; project configuration is intentionally not loaded. */
+export const MAX_SHARED_WRITERS = 1;
+export const MAX_DEPTH = 2;
+export const DEFAULT_RETENTION_DAYS = 30;
+export const DEFAULT_RETENTION_ENTRIES = 200;
+export const SUBAGENT_ROOT = join(PI_AGENT_DIR, "subagents");
 export const AGENT_DIR = join(SUBAGENT_ROOT, "agents");
 export const CONFIG_PATH = join(SUBAGENT_ROOT, "config.json");
-/** Hidden from Pi's built-in /resume picker. */
 export const SESSION_ROOT = join(SUBAGENT_ROOT, "sessions");
-/** Previous transcript location, retained for Stats and optional manual migration. */
-export const LEGACY_SESSION_ROOT = join(agentRoot, "sessions", "subagents");
 
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export type ThinkingPolicy = (typeof THINKING_LEVELS)[number] | "inherit";
 export type ModelPolicy = string | "inherit";
-export type AgentResourceOverrides = ChildResourcePolicy;
-export type AgentModelPolicy = {
-  model?: ModelPolicy;
-  thinking?: ThinkingPolicy;
-  resources?: AgentResourceOverrides;
+export type ModelSelection = { model?: ModelPolicy; thinking?: ThinkingPolicy };
+export type RuntimeLimits = { maxActive: number; maxSharedWriters: number; maxDepth: number };
+export type RetentionPolicy = { days: number; entries: number };
+export type ModelDefaults = {
+  default?: ModelSelection;
+  overrides: Record<string, ModelSelection>;
+};
+export type ExternalRunnerDefinition = {
+  command: string;
+  args: string[];
+  envAllowlist: string[];
+  timeoutMs: number;
+  maxOutputBytes: number;
+};
+export type HerdrInspectorSettings = {
+  enabled: boolean;
+  direction: "right" | "down";
+  maxOutputBytes: number;
+};
+export type ProfileControl = {
+  enabled?: boolean;
+  disabled?: boolean;
+  ejected?: boolean;
+  note?: string;
 };
 export type SubagentConfig = {
-  defaults?: AgentModelPolicy;
-  agents?: Record<string, AgentModelPolicy>;
+  schemaVersion: 2;
+  runtime: RuntimeLimits;
+  retention: RetentionPolicy;
+  models: ModelDefaults;
+  capabilities: Record<string, CapabilityDefinition>;
+  runners: Record<string, ExternalRunnerDefinition>;
+  herdr: HerdrInspectorSettings;
+  profiles: Record<string, ProfileControl>;
 };
 
-export const BUILTIN_RESOURCE_PROFILES: Record<Mode, ResolvedChildResourcePolicy> = {
-  explorer: {
-    contextMode: "auto",
-    contextExecution: false,
-    webSearch: true,
-    todos: false,
-    rtk: "disabled",
-    uv: "disabled",
-  },
-  worker: {
-    contextMode: "auto",
-    contextExecution: true,
-    webSearch: false,
-    todos: true,
-    rtk: "auto",
-    uv: "auto",
-  },
+export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
+  schemaVersion: 2,
+  runtime: { maxActive: MAX_ACTIVE, maxSharedWriters: MAX_SHARED_WRITERS, maxDepth: MAX_DEPTH },
+  retention: { days: DEFAULT_RETENTION_DAYS, entries: DEFAULT_RETENTION_ENTRIES },
+  models: { overrides: {} },
+  capabilities: {},
+  runners: {},
+  herdr: { enabled: false, direction: "right", maxOutputBytes: 1_000_000 },
+  profiles: {},
 };
 
-export const DEFAULT_SUBAGENT_CONFIG: Required<SubagentConfig> = {
-  defaults: { model: "inherit", thinking: "inherit" },
-  agents: {
-    explorer: { model: "inherit", thinking: "inherit" },
-    worker: { model: "inherit", thinking: "inherit" },
-    "plan-reviewer": { model: "inherit", thinking: "inherit" },
-  },
-};
-
-const RESOURCE_KEYS = [
-  "contextMode",
-  "contextExecution",
-  "webSearch",
-  "todos",
-  "rtk",
-  "uv",
-] as const;
-const POLICY_KEYS = new Set(["contextMode", "rtk", "uv"]);
-const BOOLEAN_RESOURCE_KEYS = new Set(["contextExecution", "webSearch", "todos"]);
-const MODELS_KEYS = new Set(["model", "thinking", "resources"]);
-
-function policy(value: unknown, location: string): AgentModelPolicy {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`${location} must be an object.`);
-  const candidate = value as Record<string, unknown>;
-  for (const key of Object.keys(candidate))
-    if (!MODELS_KEYS.has(key)) throw new Error(`${location}.${key} is not supported.`);
-  const model = candidate.model;
-  const thinking = candidate.thinking;
-  if (model !== undefined && (typeof model !== "string" || !model.trim()))
-    throw new Error(`${location}.model must be a model id or "inherit".`);
-  if (
-    thinking !== undefined &&
-    (typeof thinking !== "string" ||
-      !["inherit", ...THINKING_LEVELS].includes(thinking as ThinkingPolicy))
-  )
-    throw new Error(`${location}.thinking is not a supported thinking level.`);
-  const resources =
-    candidate.resources === undefined
-      ? undefined
-      : resourceOverrides(candidate.resources, `${location}.resources`);
+function cloneDefault(): SubagentConfig {
   return {
-    ...(typeof model === "string" ? { model: model.trim() } : {}),
-    ...(typeof thinking === "string" ? { thinking: thinking as ThinkingPolicy } : {}),
-    ...(resources ? { resources } : {}),
+    ...DEFAULT_SUBAGENT_CONFIG,
+    runtime: { ...DEFAULT_SUBAGENT_CONFIG.runtime },
+    retention: { ...DEFAULT_SUBAGENT_CONFIG.retention },
+    models: { overrides: {} },
+    capabilities: {},
+    runners: {},
+    herdr: { ...DEFAULT_SUBAGENT_CONFIG.herdr },
+    profiles: {},
   };
 }
 
-function resourceOverrides(value: unknown, location: string): AgentResourceOverrides {
+function object(value: unknown, location: string): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value))
     throw new Error(`${location} must be an object.`);
-  const candidate = value as Record<string, unknown>;
-  for (const key of Object.keys(candidate))
-    if (!RESOURCE_KEYS.includes(key as (typeof RESOURCE_KEYS)[number]))
-      throw new Error(`${location}.${key} is not a supported child resource.`);
-  const result: AgentResourceOverrides = {};
-  for (const key of RESOURCE_KEYS) {
-    const valueForKey = candidate[key];
-    if (valueForKey === undefined) continue;
-    if (POLICY_KEYS.has(key)) {
-      if (typeof valueForKey !== "string" || !["auto", "enabled", "disabled"].includes(valueForKey))
-        throw new Error(`${location}.${key} must be "auto", "enabled", or "disabled".`);
-      if (key === "contextMode" || key === "rtk" || key === "uv")
-        result[key] = valueForKey as OptionalIntegrationPolicy;
-    } else if (BOOLEAN_RESOURCE_KEYS.has(key)) {
-      if (typeof valueForKey !== "boolean")
-        throw new Error(`${location}.${key} must be a boolean.`);
-      if (key === "contextExecution") result.contextExecution = valueForKey;
-      else if (key === "webSearch") result.webSearch = valueForKey;
-      else if (key === "todos") result.todos = valueForKey;
-    }
+  return value as Record<string, unknown>;
+}
+
+function integer(value: unknown, location: string, min = 0, max = Number.MAX_SAFE_INTEGER): number {
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max)
+    throw new Error(`${location} must be an integer between ${min} and ${max}.`);
+  return value;
+}
+
+function nonEmptyString(value: unknown, location: string): string {
+  if (typeof value !== "string" || !value.trim())
+    throw new Error(`${location} must be a non-empty string.`);
+  return value.trim();
+}
+
+function only(value: Record<string, unknown>, keys: readonly string[], location: string): void {
+  const allowed = new Set(keys);
+  for (const key of Object.keys(value))
+    if (!allowed.has(key)) throw new Error(`${location}.${key} is not supported.`);
+}
+
+function parseRuntime(value: unknown, location = "runtime"): RuntimeLimits {
+  const candidate = object(value, location);
+  only(candidate, ["maxActive", "maxSharedWriters", "maxDepth"], location);
+  return {
+    maxActive: integer(candidate.maxActive ?? MAX_ACTIVE, `${location}.maxActive`, 1, 32),
+    maxSharedWriters: integer(
+      candidate.maxSharedWriters ?? MAX_SHARED_WRITERS,
+      `${location}.maxSharedWriters`,
+      0,
+      8,
+    ),
+    maxDepth: integer(candidate.maxDepth ?? MAX_DEPTH, `${location}.maxDepth`, 0, MAX_DEPTH),
+  };
+}
+
+function parseRetention(value: unknown, location = "retention"): RetentionPolicy {
+  const candidate = object(value, location);
+  only(candidate, ["days", "entries"], location);
+  return {
+    days: integer(candidate.days ?? DEFAULT_RETENTION_DAYS, `${location}.days`, 1, 3650),
+    entries: integer(
+      candidate.entries ?? DEFAULT_RETENTION_ENTRIES,
+      `${location}.entries`,
+      1,
+      10_000,
+    ),
+  };
+}
+
+function parseModelSelection(value: unknown, location: string): ModelSelection {
+  const candidate = object(value, location);
+  only(candidate, ["model", "thinking"], location);
+  const result: ModelSelection = {};
+  if (candidate.model !== undefined)
+    result.model = nonEmptyString(candidate.model, `${location}.model`);
+  if (candidate.thinking !== undefined) {
+    const thinking = nonEmptyString(candidate.thinking, `${location}.thinking`);
+    if (thinking !== "inherit" && !(THINKING_LEVELS as readonly string[]).includes(thinking))
+      throw new Error(`${location}.thinking is not a supported thinking level.`);
+    result.thinking = thinking as ThinkingPolicy;
   }
   return result;
 }
 
-export async function loadSubagentConfig(path = CONFIG_PATH): Promise<SubagentConfig> {
+function parseModels(value: unknown): ModelDefaults {
+  const candidate = object(value, "models");
+  only(candidate, ["default", "overrides"], "models");
+  const overrides: Record<string, ModelSelection> = {};
+  if (candidate.overrides !== undefined)
+    for (const [name, selection] of Object.entries(object(candidate.overrides, "models.overrides")))
+      overrides[name] = parseModelSelection(selection, `models.overrides.${name}`);
+  return {
+    ...(candidate.default === undefined
+      ? {}
+      : { default: parseModelSelection(candidate.default, "models.default") }),
+    overrides,
+  };
+}
+
+function stringList(value: unknown, location: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string" || !entry.trim()))
+    throw new Error(`${location} must be an array of non-empty strings.`);
+  return value.map((entry) => (entry as string).trim());
+}
+
+function parseRunners(value: unknown): Record<string, ExternalRunnerDefinition> {
+  const result: Record<string, ExternalRunnerDefinition> = {};
+  for (const [name, raw] of Object.entries(object(value, "runners"))) {
+    const runner = object(raw, `runners.${name}`);
+    only(
+      runner,
+      ["command", "args", "envAllowlist", "timeoutMs", "maxOutputBytes"],
+      `runners.${name}`,
+    );
+    result[name] = {
+      command: nonEmptyString(runner.command, `runners.${name}.command`),
+      args: runner.args === undefined ? [] : stringList(runner.args, `runners.${name}.args`),
+      envAllowlist:
+        runner.envAllowlist === undefined
+          ? []
+          : stringList(runner.envAllowlist, `runners.${name}.envAllowlist`),
+      timeoutMs: integer(runner.timeoutMs ?? 300_000, `runners.${name}.timeoutMs`, 1, 86_400_000),
+      maxOutputBytes: integer(
+        runner.maxOutputBytes ?? 1_000_000,
+        `runners.${name}.maxOutputBytes`,
+        1,
+        100_000_000,
+      ),
+    };
+  }
+  return result;
+}
+
+function parseHerdr(value: unknown): HerdrInspectorSettings {
+  const candidate = object(value, "herdr");
+  only(candidate, ["enabled", "direction", "maxOutputBytes"], "herdr");
+  if (candidate.enabled !== undefined && typeof candidate.enabled !== "boolean")
+    throw new Error("herdr.enabled must be a boolean.");
+  const direction = candidate.direction ?? "right";
+  if (direction !== "right" && direction !== "down")
+    throw new Error("herdr.direction must be right or down.");
+  return {
+    enabled: candidate.enabled === true,
+    direction,
+    maxOutputBytes: integer(
+      candidate.maxOutputBytes ?? 1_000_000,
+      "herdr.maxOutputBytes",
+      1,
+      100_000_000,
+    ),
+  };
+}
+
+function parseProfiles(value: unknown): Record<string, ProfileControl> {
+  const profiles: Record<string, ProfileControl> = {};
+  for (const [name, raw] of Object.entries(object(value, "profiles"))) {
+    const control = object(raw, `profiles.${name}`);
+    only(control, ["enabled", "disabled", "ejected", "note"], `profiles.${name}`);
+    for (const key of ["enabled", "disabled", "ejected"] as const)
+      if (control[key] !== undefined && typeof control[key] !== "boolean")
+        throw new Error(`profiles.${name}.${key} must be a boolean.`);
+    if (
+      typeof control.enabled === "boolean" &&
+      typeof control.disabled === "boolean" &&
+      control.enabled === control.disabled
+    )
+      throw new Error(
+        `profiles.${name}.enabled and profiles.${name}.disabled must describe the same state.`,
+      );
+    if (control.note !== undefined && typeof control.note !== "string")
+      throw new Error(`profiles.${name}.note must be a string.`);
+    profiles[name] = {
+      ...(typeof control.enabled === "boolean" ? { enabled: control.enabled } : {}),
+      ...(typeof control.disabled === "boolean" ? { disabled: control.disabled } : {}),
+      ...(typeof control.ejected === "boolean" ? { ejected: control.ejected } : {}),
+      ...(typeof control.note === "string" && control.note.trim()
+        ? { note: control.note.trim() }
+        : {}),
+    };
+  }
+  return profiles;
+}
+
+export async function loadSubagentConfig(
+  path = CONFIG_PATH,
+  options: { source?: "global" | "project" } = {},
+): Promise<SubagentConfig> {
   let source: string;
   try {
     source = await fs.readFile(path, "utf8");
   } catch (cause) {
-    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return DEFAULT_SUBAGENT_CONFIG;
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return cloneDefault();
     throw cause;
   }
-  let value: unknown;
+  let raw: unknown;
   try {
-    value = JSON.parse(source);
+    raw = JSON.parse(source);
   } catch (cause) {
     throw new Error(
       `Invalid Subagent configuration at ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error(`Invalid Subagent configuration at ${path}: root must be an object.`);
-  const config = value as Record<string, unknown>;
-  for (const key of Object.keys(config))
-    if (key !== "defaults" && key !== "agents")
-      throw new Error(`Invalid Subagent configuration at ${path}: ${key} is not supported.`);
-  if (
-    config.agents !== undefined &&
-    (!config.agents || typeof config.agents !== "object" || Array.isArray(config.agents))
-  )
-    throw new Error(`Invalid Subagent configuration at ${path}: agents must be an object.`);
-  const agents = Object.fromEntries(
-    Object.entries((config.agents as Record<string, unknown> | undefined) ?? {}).map(
-      ([name, entry]) => [name, policy(entry, `agents.${name}`)],
-    ),
+  const config = object(raw, `Invalid Subagent configuration at ${path}`);
+  only(
+    config,
+    [
+      "schemaVersion",
+      "runtime",
+      "retention",
+      "models",
+      "capabilities",
+      "runners",
+      "herdr",
+      "profiles",
+    ],
+    path,
   );
-  const parsed: SubagentConfig = {
-    ...(config.defaults === undefined ? {} : { defaults: policy(config.defaults, "defaults") }),
-    ...(config.agents === undefined ? {} : { agents }),
+  if (config.schemaVersion !== 2)
+    throw new Error(`Invalid Subagent configuration at ${path}: schemaVersion must be 2.`);
+  return {
+    schemaVersion: 2,
+    runtime:
+      config.runtime === undefined
+        ? { ...DEFAULT_SUBAGENT_CONFIG.runtime }
+        : parseRuntime(config.runtime),
+    retention:
+      config.retention === undefined
+        ? { ...DEFAULT_SUBAGENT_CONFIG.retention }
+        : parseRetention(config.retention),
+    models: config.models === undefined ? { overrides: {} } : parseModels(config.models),
+    capabilities:
+      config.capabilities === undefined
+        ? {}
+        : validateCapabilityCatalog(config.capabilities, {
+            source: options.source === "project" ? "project" : "user",
+          }),
+    runners: config.runners === undefined ? {} : parseRunners(config.runners),
+    herdr:
+      config.herdr === undefined ? { ...DEFAULT_SUBAGENT_CONFIG.herdr } : parseHerdr(config.herdr),
+    profiles: config.profiles === undefined ? {} : parseProfiles(config.profiles),
   };
-  // Validate mode-specific capability boundaries while loading, before spawn allocation.
-  resolveAgentResourcePolicy(
-    {
-      name: "explorer",
-      description: "builtin",
-      mode: "explorer",
-      prompt: "",
-      source: "builtin",
-    },
-    parsed,
-  );
-  resolveAgentResourcePolicy(
-    {
-      name: "worker",
-      description: "builtin",
-      mode: "worker",
-      prompt: "",
-      source: "builtin",
-    },
-    parsed,
-  );
-  return parsed;
 }
 
 function resolvePolicy(
   values: Array<string | undefined>,
   inherited: string | undefined,
 ): string | undefined {
-  for (const value of values) {
-    if (value === undefined) continue;
-    return value === "inherit" ? inherited : value;
-  }
+  for (const value of values)
+    if (value !== undefined) return value === "inherit" ? inherited : value;
   return inherited;
 }
 
-/** Resolve once at spawn: exact agent config → custom frontmatter → defaults → parent. */
 export function resolveAgentModelPolicy(
   definition: AgentDefinition,
   config: SubagentConfig,
   parentModel: string | undefined,
   parentThinking: string | undefined,
-  explicit?: string | { model?: string; thinking?: string },
+  explicit?: string | ModelSelection,
 ): { model?: string; thinking?: string } {
-  const configured = config.agents?.[definition.name];
-  const explicitPolicy = typeof explicit === "string" ? { model: explicit } : explicit;
+  const override = config.models.overrides[definition.name];
+  const requested = typeof explicit === "string" ? { model: explicit } : explicit;
   return {
     model: resolvePolicy(
-      [
-        explicitPolicy?.model,
-        configured?.model,
-        definition.source === "user" ? definition.model : undefined,
-        config.defaults?.model,
-      ],
+      [requested?.model, override?.model, definition.model, config.models.default?.model],
       parentModel,
     ),
     thinking: resolvePolicy(
       [
-        explicitPolicy?.thinking,
-        configured?.thinking,
-        definition.source === "user" ? definition.thinking : undefined,
-        config.defaults?.thinking,
+        requested?.thinking,
+        override?.thinking,
+        definition.thinking,
+        config.models.default?.thinking,
       ],
       parentThinking,
     ),
   };
 }
 
-function mergeResourceOverrides(
-  base: ResolvedChildResourcePolicy,
-  ...overrides: Array<AgentResourceOverrides | undefined>
-): ResolvedChildResourcePolicy {
-  const result = { ...base };
-  for (const override of overrides) Object.assign(result, override ?? {});
-  return result;
-}
-
-/** Resolve resource policy in the documented mode-profile/default/mode/exact order. */
-export function resolveAgentResourcePolicy(
+export function resolveAgentCapabilities(
   definition: AgentDefinition,
   config: SubagentConfig,
-): ResolvedChildResourcePolicy {
-  const modeEntry = config.agents?.[definition.mode]?.resources;
-  const exactEntry = config.agents?.[definition.name]?.resources;
-  const result = mergeResourceOverrides(
-    BUILTIN_RESOURCE_PROFILES[definition.mode],
-    config.defaults?.resources,
-    modeEntry,
-    exactEntry,
-  );
-  if (result.contextMode === "disabled" && result.contextExecution)
-    throw new Error("contextExecution cannot be enabled when contextMode is disabled.");
-  if (definition.mode === "explorer") {
-    if (result.contextExecution) throw new Error("Explorer contextExecution cannot be enabled.");
-    if (result.todos) throw new Error("Explorer todos cannot be enabled.");
-    if (result.rtk !== "disabled") throw new Error("Explorer rtk cannot be enabled.");
-    if (result.uv !== "disabled") throw new Error("Explorer uv cannot be enabled.");
-  }
-  return result;
+  allowedCapabilities?: readonly string[],
+): EffectiveCapabilityPolicy {
+  return selectEffectiveCapabilities(definition.capabilities, config.capabilities, {
+    allowedCapabilities,
+    path: definition.path,
+  });
 }
 
-export function effectiveAgentResources(
-  requested: ResolvedChildResourcePolicy,
-  detected: ChildDetectedResources,
-): ChildEffectiveResources {
-  const contextMode = requested.contextMode !== "disabled" && detected.contextMode;
-  return {
-    contextMode,
-    contextExecution: requested.contextExecution && contextMode && detected.contextExecution,
-    webSearch: requested.webSearch && detected.webSearch,
-    todos: requested.todos && detected.todos,
-    rtk: requested.rtk !== "disabled" && detected.rtk,
-    uv: requested.uv !== "disabled" && detected.uv,
-  };
+/** Atomically update manager-owned profile controls without rewriting unrelated v2 settings. */
+export async function updateProfileControl(
+  name: string,
+  change: ProfileControl,
+  path = CONFIG_PATH,
+): Promise<SubagentConfig> {
+  const config = await loadSubagentConfig(path);
+  const normalized = { ...(config.profiles[name] ?? {}), ...change };
+  if (change.enabled !== undefined && change.disabled === undefined)
+    normalized.disabled = !change.enabled;
+  if (change.disabled !== undefined && change.enabled === undefined)
+    normalized.enabled = !change.disabled;
+  config.profiles[name] = normalized;
+  await fs.mkdir(dirname(path), { recursive: true });
+  const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
+  await fs.writeFile(temporary, `${JSON.stringify(config, null, 2)}\n`, { mode: 0o600 });
+  await fs.rename(temporary, path);
+  return config;
 }
-
-/** Read-only Context Mode tools added only when Context Mode is positively available. */
-export const CONTEXT_TOOLS = [
-  "ctx_index",
-  "ctx_search",
-  "ctx_fetch_and_index",
-  "ctx_stats",
-] as const;
-/** Context execution includes file execution; Explorers and reviewers never receive these tools. */
-export const CONTEXT_EXECUTION_TOOLS = [
-  "ctx_execute",
-  "ctx_execute_file",
-  "ctx_batch_execute",
-] as const;
-/** Explorers receive only read-only tools. Todo mutates shared state and is worker-only. */
-export const EXPLORER_TOOLS = ["read", "grep", "find", "ls"] as const;
-export const WORKER_TOOLS = [...EXPLORER_TOOLS, "todo", "bash", "edit", "write"] as const;

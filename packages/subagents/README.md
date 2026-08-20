@@ -1,184 +1,368 @@
-# Subagents
+# Subagents v2
 
-Subagents run isolated, persistent child Pi sessions for parallel investigation and focused implementation. The parent remains responsible for decisions, review, and integration.
+Subagents v2 runs child Pi sessions through the Pi SDK. It does not type prompts into a shell or a terminal.
 
-## Roles
+The parent Pi session owns every child, decision, review, and integration. A child stops when its parent session stops.
 
-- **Explorer** is the default read-only role. It investigates code, architecture, documentation, and current web topics. Its reviewed tools do not include file mutation.
-- **Worker** handles delegated file changes. At most one Worker can remain open. Workers cannot start or resume while Plan Mode is active.
-- **Plan Reviewer** (`plan-reviewer`) is a built-in read-only Explorer role used by Plan Mode `/plan-review`. It is spawned through the manager service bridge, waits for a report, and closes automatically. A per-review model selection overrides normal role/configuration/parent precedence only for that reviewer.
-- Trusted custom agents can use Markdown files in `~/.pi/agent/subagents/agents/`. The package ignores project-controlled definitions.
+## What changed
 
-Children cannot start their own Subagents or ask users questions. They return questions and blockers to the parent.
+Version 2 is a clean break. It does not register the version 1 tools or read the version 1 configuration schema.
 
-## Models and thinking levels
+Read [MIGRATION.md](MIGRATION.md) before you replace an existing setup.
 
-Pi resolves model policy when the child starts. It checks these sources in order:
+The main changes are:
 
-1. Per-agent settings.
-2. Trusted custom-agent frontmatter.
-3. Subagent defaults.
-4. The parent model and thinking level at spawn time.
+- Native children use `AgentSession.prompt()`.
+- Completed children park automatically and release live resources.
+- The Agent Hub is the main status and control view.
+- Herdr shows transcripts only. Herdr does not run child agents.
+- Profiles replace the fixed Explorer and Worker roles.
+- Task claims reject duplicate work and overlapping writer scopes.
+- A capability catalog controls optional work systems and external commands.
+- One explicit sidecar orchestrator can own a mission scope.
 
-Create `~/.pi/agent/subagents/config.json` to configure roles. This development setup uses Luna with low thinking for inexpensive investigation and Luna with high thinking for the persistent implementation owner:
+## Built-in profiles
 
-```json
-{
-  "agents": {
-    "explorer": {
-      "model": "github-copilot/gpt-5.6-luna",
-      "thinking": "low"
-    },
-    "worker": {
-      "model": "github-copilot/gpt-5.6-luna",
-      "thinking": "high"
-    }
-  }
-}
-```
+| Profile | Class | Use |
+| --- | --- | --- |
+| `scout` | `read` | Map code, architecture, constraints, and risks. |
+| `researcher` | `advisory` | Research current web sources and primary documentation. |
+| `worker` | `write` | Change one owned code slice and run local checks. |
+| `reviewer` | `review` | Review one angle without file changes. |
+| `oracle` | `advisory` | Check decisions, assumptions, and consistency. |
+| `orchestrator` | `orchestrator` | Coordinate one explicit mission and its child task graph. |
 
-This setup is a recommendation, not a hard-coded requirement. The example uses Pi's built-in `github-copilot` provider. Authenticate it through Pi's GitHub Copilot login flow or `COPILOT_GITHUB_TOKEN`. A Codex installation can use `openai-codex/gpt-5.6-luna` after `/login openai-codex`. The `copilot` CLI and `copilot login` are required only for the separate Search integration. They are not required for Subagent children.
+The hidden `plan-reviewer` profile supports Plan Mode reviews.
 
-Pi resolves a model when a child starts. Explicit per-call model overrides take precedence over per-agent settings, custom frontmatter, defaults, and the parent snapshot. Existing children keep their model and thinking level. `inherit` takes the parent snapshot at that time. Later parent model changes do not affect an open child. Luna is opt-in. Pi has no built-in Luna default.
+A profile class sets an authority ceiling. A read, review, advisory, or orchestrator profile cannot select mutation tools.
 
-Before it allocates transcript directories, child processes, tabs, or panes, Subagents checks that Pi can resolve the selected model and provider authentication. Invalid configuration or missing authentication produces an actionable error.
-
-Custom definition frontmatter can include `model` and `thinking`:
-
-```md
----
-name: careful-reviewer
-description: Read-only review specialist
-mode: explorer
-model: inherit
-thinking: high
----
-Review the delegated scope and return evidence without modifying files.
-```
-
-## Tools
+## Parent tools
 
 | Tool | Purpose |
 | --- | --- |
-| `subagent_spawn` | Starts an Explorer by default or a trusted role that you select. It returns after prompt acceptance. |
-| `subagent_send` | Queues non-destructive guidance or resumes an open child. |
-| `subagent_wait` | Waits for one or all running children to settle. |
-| `subagent_list` | Shows roles, model policy, capacity, backend capabilities, lifecycle guidance, and known children. |
-| `subagent_read` | Reads the latest report, status, usage, and diagnostics. |
-| `subagent_interrupt` | Stops a running child and releases its open capacity. |
-| `subagent_close` | Terminates transport and pane state while it keeps the report available. |
+| `subagent_dispatch` | Start one batch of independent tasks with explicit ownership. |
+| `subagent_status` | Show profiles, task claims, capacity, requests, and diagnostics. |
+| `subagent_collect` | Read reports or wait for selected runs. |
+| `subagent_steer` | Guide an active run or revive a parked native or RPC run. |
+| `subagent_stop` | Stop runs and their descendants. |
 
-Continue independent parent work after you spawn a child. Read completed reports. Close children when you do not need follow-up.
+Batch all ready independent tasks in one `subagent_dispatch` call. Give each task a unique key, owned scope, and deliverable.
 
-## Lifecycle and capacity
+The manager rejects these cases before it starts a child:
 
-Up to four Subagents can remain open. Only one can be a Worker.
+- duplicate normalized task text
+- overlapping writer paths or symbols
+- more than one shared-checkout writer by default
+- an unknown or disabled profile
+- a nested profile that the parent profile does not allow
+- a write profile while Plan Mode is active
+- a capability above the profile class ceiling
 
-- `running`: the child has an active turn and uses capacity.
-- `completed`: the report is ready. The child remains open and uses capacity.
-- `failed` or `interrupted`: recent history remains. Transport and capacity release at once.
-- `closed`: the report remains readable. Transport ends and capacity becomes free.
+## Native transport and lifecycle
 
-Parent quit, reload, `/new`, `/resume`, and session replacement close every child. Cleanup waits for poller cancellation, RPC termination, forced-kill fallback, Herdr pane and tab closure, and temporary Context Mode and Todo directory removal.
+The default `native` runner creates an in-process `AgentSession`. It calls `prompt()`, `steer()`, `followUp()`, `abort()`, and `dispose()` directly.
 
-## Activity UI and `/agents`
+The task does not enter shell history. The runner does not need a simulated Enter key.
 
-The working-indicator extension owns the Pi-styled inline activity block. It shows running children first, then completed open children, then recent failed, interrupted, or closed history. It shows at most four rows.
+Each child gets a separate session manager, settings manager, resource loader, transcript directory, and extension runtime. Children do not share a session file. Native children use the parent model runtime for the authenticated provider catalog. Trusted capability extensions must not mutate shared provider registration.
 
-Wide terminals show role, status, model, effort, duration, and current activity. Narrow terminals remove lower-priority metadata but keep the task. Animation stops when no child runs. Ctrl+O expands tool output. It does not hide the activity block.
+A normal run follows these states:
 
-Completion cards use Pi's normal custom-message shell. Compact cards show the task, role, status, model, duration, usage, and a report preview. Ctrl+O expands the full report and diagnostics.
+1. `starting`
+2. `running`
+3. `blocked`, if it waits for the supervisor
+4. `parked`, after it settles
 
-`/agents` shows complete interactive history. `/agents help` documents these controls:
+A parked run has no live model session. Its report and transcript remain available for follow-up.
 
-- Up and Down: navigate.
-- Enter: guide or resume an open child.
-- `s`: stop and redirect a running child.
-- `f`: focus its Herdr pane.
-- `x`: close the child and release capacity.
-- `?`: show help.
-- Escape: close the overlay.
+Other terminal states are `failed` and `stopped`. Parent shutdown aborts active turns and parks their records. An active isolated run keeps its worktree so that the run can be revived or recovered. Retention cleanup removes an expired worktree.
 
-## Herdr
+The default limits are four active runs, one shared-checkout writer, and nesting depth two. The manager keeps history for 30 days and at most 200 records.
 
-RPC is the normal backend. It does not require Herdr. A complete explicit Herdr environment with `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH` selects Herdr after control-plane verification. An incomplete or broken explicit environment blocks spawning. It does not silently select RPC.
+## Agent Hub
 
-Semantic `blocked` state for Ask User and Plan Mode dialogs requires the current official Herdr Pi integration. Install or update the integration, and then verify its status:
+Run `/agents` to open the event-driven Agent Hub.
+
+The Hub has three sections:
+
+- **Runs** shows parent and child lineage, ownership, activity, reports, usage, and transcript paths.
+- **Inbox** shows decisions, approvals, blockers, progress, and integration requests.
+- **Profiles** shows profile source, class, runner, tools, capabilities, and enabled state.
+
+Use these keys:
+
+| Key | Action |
+| --- | --- |
+| Tab | Change the Hub section. |
+| Up or Down | Change the selected item. |
+| Home, End, Page Up, or Page Down | Move through long sections. |
+| Enter | Answer a request, revive a parked run, or toggle a profile. |
+| `s` | Steer the selected run. |
+| `x` | Stop the selected active run and its descendants. |
+| `t` | Open a display-only Herdr transcript. |
+| `e` | Eject a selected built-in profile. |
+| `r` | Reload profiles and configuration. |
+| `?` | Show Hub help. |
+| Escape | Close the Hub. |
+
+These commands also manage profile metadata:
 
 ```text
-herdr integration install pi
-herdr integration status
+/agents enable <profile>
+/agents disable <profile>
+/agents eject <built-in> [user|project]
+/agents doctor
+/agents doctor --json
 ```
 
-The official integration keeps lifecycle authority under `herdr:pi`. Subagents keeps the older `pi-extensions:user-interaction` metadata fallback for visual waiting labels. It does not report or release the parent agent lifecycle.
+Project ejection requires a trusted project. Ejection never replaces an existing file.
 
-Herdr creates one non-focused tab in the parent workspace. It labels the tab from the parent tab, such as `<parent tab label> - Subagents`. If the parent label is unavailable, it uses `Subagents`. The visible label never uses the cwd, project name, or username. `/agents` and pane metadata keep the parent workspace, Subagents tab, and pane IDs.
+## Profile files
 
-Herdr never takes focus by itself. One to four open children use the tab root pane and an adaptive layout. Before each split, Subagents checks current geometry. It selects the largest owned pane and splits right at `0.5` when the pane is at least twice as wide as tall. Otherwise, it splits down. It checks geometry again after closures.
+The manager reloads profile files on each status or dispatch call.
 
-Herdr's public CLI has no tab insertion or reorder operation. A new Subagents tab appears after existing workspace tabs. Exact placement after the orchestrator needs a future Herdr `--after` or tab-move capability. Subagents does not use undocumented reorder commands.
+Discovery uses this precedence:
 
-Pane titles use bounded task labels such as `Explorer · Trace auth flow`. They do not use internal IDs or full prompts. Guidance and redirects update the title. Metadata shows the role, an investigating, implementing, ready, blocked, or closed state, bounded model data, and a monotonic sequence number. Canonical IDs remain internal. Use `f` in `/agents` to focus a pane.
+1. built-in profiles
+2. `~/.pi/agent/subagents/agents/*.md`
+3. `<cwd>/.pi/agents/*.md`, only when Pi marks the project as trusted
 
-When another process deletes a pane, Subagents treats it as released. It does not retry forever. The dedicated tab closes after its last owned pane releases. Older Herdr versions use adjacent splits and show a capability warning.
+A higher layer replaces a profile with the same name. The Hub reports every duplicate and malformed file with its path.
 
-## Sessions and Stats
+Use schema version 2 in each Markdown file:
 
-New child transcripts stay hidden from Pi's `/resume` picker:
-
-```text
-~/.pi/agent/subagents/sessions/<parent>/<child>/
+```md
+---
+schemaVersion: 2
+name: careful-reviewer
+description: Review authentication changes for correctness and regression risk.
+class: review
+runner: native
+tools: [read, grep, find, ls]
+capabilities: [work-docs-read]
+skills: []
+defaultContext: decisions
+allowedNestedProfiles: []
+maxDepth: 0
+workspace: read-only
+timeout: 300
+turnBudget: 8
+tokenBudget: 40000
+costBudget: 2
+infer: true
+hidden: false
+model: inherit
+thinking: high
+---
+Review only the assigned angle. Cite exact files and tests. Do not edit files.
 ```
 
-Stats scans normal Pi sessions, this hidden tree, and the legacy `~/.pi/agent/sessions/subagents/` tree. It does not count a child twice. Legacy transcripts stay in place. To migrate them, stop Pi, back up both trees, and move individual parent directories by hand. Migration is optional because Stats reads both locations.
+`timeout` uses seconds. `costBudget` uses the model provider's reported currency value.
 
-Pi has no extension hook for nested children in the built-in `/resume` picker. Durable cross-parent restoration and nested resume remain deferred.
+The `tools` field can select Pi's built-in `read`, `grep`, `find`, `ls`, `bash`, `edit`, and `write` tools. The package-owned `search` tool is also available to the Researcher. Select all other extension tools through named capabilities.
 
-## Optional child resources
+The supported classes are `read`, `write`, `review`, `advisory`, and `orchestrator`. The supported runners are `native`, `rpc`, and `external`.
 
-Child resources use a `resources` object in `defaults`, a built-in mode entry, or an exact custom-agent entry. Resolution checks the built-in mode profile, `defaults.resources`, the mode entry, and the exact custom-agent entry, in that order. Optional integrations accept `"auto"`, `"enabled"`, or `"disabled"`. `auto` activates an installed capability. `enabled` requests it and warns when it is unavailable. `disabled` skips probing and loading.
+## Configuration
 
-| Resource | Explorer | Worker |
-| --- | --- | --- |
-| Context Mode | Auto-detect | Auto-detect |
-| Context execution | Never | When Context Mode is active |
-| `ctx_execute_file` | Never (execution-only) | When Context Mode execution is active |
-| Web Search | Enabled | Disabled by default |
-| Todos | Disabled | Enabled |
-| RTK | Never | Auto-detect |
-| UV Bash policy | Never | Auto-detect |
+The global file is `~/.pi/agent/subagents/config.json`.
+
+If the file exists, it must use `schemaVersion: 2`.
 
 ```json
 {
-  "agents": {
-    "explorer": {
-      "resources": {
-        "contextMode": "auto",
-        "contextExecution": false,
-        "webSearch": true,
-        "todos": false,
-        "rtk": "disabled",
-        "uv": "disabled"
-      }
+  "schemaVersion": 2,
+  "runtime": {
+    "maxActive": 4,
+    "maxSharedWriters": 1,
+    "maxDepth": 2
+  },
+  "retention": {
+    "days": 30,
+    "entries": 200
+  },
+  "models": {
+    "default": {
+      "model": "inherit",
+      "thinking": "low"
     },
-    "worker": {
-      "resources": {
-        "contextMode": "auto",
-        "contextExecution": true,
-        "webSearch": false,
-        "todos": true,
-        "rtk": "auto",
-        "uv": "auto"
+    "overrides": {
+      "worker": {
+        "model": "openai-codex/gpt-5.6-luna",
+        "thinking": "high"
+      },
+      "reviewer": {
+        "model": "inherit",
+        "thinking": "medium"
       }
+    }
+  },
+  "capabilities": {},
+  "runners": {},
+  "herdr": {
+    "enabled": false,
+    "direction": "right",
+    "maxOutputBytes": 1000000
+  },
+  "profiles": {}
+}
+```
+
+A run captures its effective profile, model, thinking level, and capabilities when it starts. A later file change does not change that run.
+
+## Capability catalog
+
+Only the global configuration can define capability implementation paths. A trusted project profile can select a global capability, but it cannot define an executable or extension path.
+
+A capability can define:
+
+- one absolute `extensionPath` or one installed `extensionPackage`
+- anchored `toolPatterns`
+- token-based `executableArgvPrefixes`
+- skill paths
+- an environment-variable name allowlist
+- state access: `isolated`, `shared-read`, or `shared-write`
+- approval: `allow`, `ask`, or `deny`
+
+Example:
+
+```json
+{
+  "schemaVersion": 2,
+  "capabilities": {
+    "work-docs-read": {
+      "description": "Read Jira and Confluence through the approved extension.",
+      "extensionPackage": "@company/pi-work-docs",
+      "toolPatterns": ["jira_read", "jira_search", "confluence_read", "confluence_search"],
+      "skills": [],
+      "envAllowlist": ["JIRA_TOKEN", "CONFLUENCE_TOKEN"],
+      "state": "shared-read",
+      "approval": "allow"
+    },
+    "release-cli": {
+      "description": "Run the reviewed release inspection command.",
+      "executableArgvPrefixes": [["release-cli", "inspect"]],
+      "envAllowlist": ["RELEASE_TOKEN"],
+      "state": "shared-read",
+      "approval": "allow"
+    },
+    "memory-write": {
+      "description": "Update approved shared memory.",
+      "extensionPackage": "@company/pi-memory",
+      "toolPatterns": ["memory_write", "memory_update"],
+      "state": "shared-write",
+      "approval": "ask"
     }
   }
 }
 ```
 
-Explorers remain read-only. They cannot enable Context execution, Todos, RTK, or UV. Explorer Web Search is enabled by default. Its retrieval calls use separate provider-accounted quota. Workers can enable Web Search. Arbitrary child extension and skill paths are not accepted.
+Tool patterns match the complete tool name. For example, `jira_*` matches `jira_read` but not `prefix_jira_read`.
 
-Context Mode uses only the package-owned narrow child bridge. It does not use the full extension. A missing Context Mode installation never blocks a child. RTK needs version 0.23.0 or newer and fails open. UV needs the package extension and a working `uv` executable. When UV is unavailable, native Pi Bash remains active. When both tools are active, RTK rewrites commands before UV validates and executes them. Todo and Context Mode state is temporary and isolated.
+An executable rule compares argument tokens. `['git', 'status']` does not authorize `git-status`.
 
-Capability state appears in spawn, read, and list results, expanded completion cards, and `/agents`. An example is `UV: enabled → unavailable; native Bash active`.
+The policy is static for a run. A child cannot add a capability while it runs.
 
-Subagents use separate processes, not a security boundary. They inherit the user's process credentials so configured providers can authenticate. Review this extension, child prompts, trusted global definitions, delegated tasks, and Worker changes. Herdr receives only reviewed path overrides. Parent credentials never enter `herdr --env` arguments. Full prompts never become pane labels. Transcript content remains sensitive local data.
+An in-process extension runs with the user's process credentials. The capability policy is not an operating-system security boundary.
+
+## Work systems migration
+
+Use a separate foreground Pi session on the work laptop for Jira, Confluence, MCP, CLI, and memory migration.
+
+1. Run `/agents doctor --json` in that session.
+2. Save the report in a protected local file.
+3. List each trusted extension package or absolute path.
+4. List the exact tool names that each extension registers.
+5. List each approved executable argument prefix.
+6. List environment-variable names only. Do not copy secret values.
+7. Set the state and approval policy for each capability.
+8. Add capability names to the applicable user profiles.
+9. Run `/agents doctor --json` again.
+10. Start one read-only profile and verify its effective tools.
+11. Test each `ask` policy through the Hub inbox.
+12. Enable shared-write capabilities only after the read-only checks pass.
+
+Do not put extension paths, executable paths, or tokens in project profile files. Keep the capability catalog in the user configuration.
+
+## RPC and external runners
+
+The `rpc` runner starts Pi directly with `shell: false`. It sends JSONL frames through stdin.
+
+RPC profiles are limited to non-writing classes. They cannot use supervisor approvals or nested orchestration.
+
+An `external` runner is a one-shot process. The manager sends the full task through stdin and closes stdin.
+
+The task is not an argument. It does not enter shell history.
+
+External profiles can select only pre-approved capabilities. At least one selected capability must provide an executable argument prefix that matches the complete configured command prefix.
+
+The external runner definition uses the profile name as its key:
+
+```json
+{
+  "schemaVersion": 2,
+  "runners": {
+    "company-reviewer": {
+      "command": "company-review",
+      "args": ["run", "--format", "text"],
+      "envAllowlist": ["COMPANY_REVIEW_TOKEN"],
+      "timeoutMs": 300000,
+      "maxOutputBytes": 1000000
+    }
+  }
+}
+```
+
+An external run cannot be steered or revived. Start a new run for a follow-up.
+
+## Sidecar orchestrator
+
+Run `/orchestrate` to start one sidecar mission. The command asks for a task and an exclusive scope.
+
+The sidecar coordinates work. It does not get normal write tools.
+
+The default mission uses a detached Git worktree. The parent checkout must be clean.
+
+If the checkout is dirty, the command offers these choices:
+
+1. Clean the checkout and try again.
+2. Cancel the mission.
+3. Use one shared-checkout writer.
+
+The manager never stashes or copies uncommitted changes.
+
+Mission children share the isolated mission worktree. The shared-writer limit still applies inside that worktree.
+
+A normal top-level Worker task can request `workspace: "worktree"`. This creates a separate worktree for that run. Disjoint top-level worktree writers can run in parallel.
+
+A sidecar does not continue after its parent closes. An unfinished mission worktree remains available for manual recovery until retention cleanup removes its orchestrator record.
+
+The manager captures an integration candidate after a worktree run settles. It does not apply the candidate automatically.
+
+Use the Inbox to apply or keep the candidate. The manager runs `git apply --check` before it changes the source checkout.
+
+## Herdr
+
+Herdr is optional and disabled by default.
+
+When enabled, `t` opens a raw pane that follows the child JSONL transcript. The pane is display-only.
+
+Subagents v2 does not call `herdr agent start`, `herdr agent prompt`, or terminal key injection. Closing the parent session closes all inspector panes that it owns.
+
+The Agent Hub remains the lifecycle authority when Herdr is absent or a pane closes.
+
+## Plan Mode
+
+Plan Mode can use `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, and `subagent_stop`.
+
+The manager rejects write dispatch and write-session revival while Plan Mode is active. Plan Mode uses the hidden `plan-reviewer` profile for plan review.
+
+## Validation
+
+Run these checks from the repository root:
+
+```bash
+npm run typecheck
+npm test -- packages/subagents/test packages/working-indicator/test
+npm run validate:package -- subagents
+```
