@@ -1,7 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BUILTIN_PROFILES,
   discoverAgents,
@@ -25,6 +25,7 @@ import {
 
 const temporary: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(temporary.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -206,6 +207,19 @@ Do the work.`,
       }),
     );
     await expect(loadSubagentConfig(configPath)).rejects.toThrow(/must describe the same state/);
+  });
+
+  it("auto-enables Herdr from a complete environment unless explicitly disabled", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagents-v2-herdr-"));
+    temporary.push(root);
+    const path = join(root, "config.json");
+    vi.stubEnv("HERDR_ENV", "1");
+    vi.stubEnv("HERDR_PANE_ID", "parent-pane");
+    vi.stubEnv("HERDR_SOCKET_PATH", "/tmp/herdr.sock");
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, herdr: { direction: "right" } }));
+    await expect(loadSubagentConfig(path)).resolves.toMatchObject({ herdr: { enabled: true } });
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, herdr: { enabled: false } }));
+    await expect(loadSubagentConfig(path)).resolves.toMatchObject({ herdr: { enabled: false } });
   });
 
   it("loads v2 runtime ceilings and retention defaults", async () => {

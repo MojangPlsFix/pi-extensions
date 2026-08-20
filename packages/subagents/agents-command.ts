@@ -14,7 +14,7 @@ const help = [
   "Enter Answer a request, revive a parked run, or toggle a profile",
   "s    Steer the selected run",
   "x    Stop the selected active run and descendants",
-  "t    Open a display-only Herdr transcript",
+  "t    Open a display-only Herdr transcript when Herdr is enabled and available",
   "e    Eject a selected built-in profile",
   "r    Refresh configuration and profiles",
   "?    Show this help",

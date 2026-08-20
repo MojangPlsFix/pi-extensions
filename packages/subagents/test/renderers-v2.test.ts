@@ -56,6 +56,7 @@ function snapshot(overrides: Partial<HubSnapshot> = {}): HubSnapshot {
     missions: [],
     profiles: BUILTIN_PROFILES.map((profile) => structuredClone(profile)),
     diagnostics: [],
+    herdr: { enabled: false, available: false },
     ...overrides,
   };
 }
@@ -135,6 +136,7 @@ describe("AgentsViewer", () => {
     const make = (
       value: RunSnapshot,
       done = (action: AgentsOverlayAction) => actions.push(action),
+      hub: Partial<HubSnapshot> = {},
     ) =>
       new AgentsViewer(
         { terminal: { rows: 40 }, requestRender: vi.fn() },
@@ -142,16 +144,23 @@ describe("AgentsViewer", () => {
         keybindings,
         () => () => {},
         done,
-        snapshot({ runs: [value] }),
+        snapshot({ ...hub, runs: [value] }),
       );
 
     const active = make({ ...run("active"), sessionFile: "/tmp/active.jsonl" });
     active.handleInput("x");
     expect(actions.pop()).toEqual({ kind: "stop", id: "active" });
 
-    const inspect = make({ ...run("inspect"), sessionFile: "/tmp/inspect.jsonl" });
+    const inspect = make({ ...run("inspect"), sessionFile: "/tmp/inspect.jsonl" }, undefined, {
+      herdr: { enabled: true, available: true },
+    });
     inspect.handleInput("t");
     expect(actions.pop()).toEqual({ kind: "inspect", id: "inspect" });
+
+    const disabled = make({ ...run("disabled"), sessionFile: "/tmp/disabled.jsonl" });
+    disabled.handleInput("t");
+    expect(actions).toEqual([]);
+    disabled.dispose();
 
     const noTranscript = make(run("no-transcript"));
     noTranscript.handleInput("t");

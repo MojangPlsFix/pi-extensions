@@ -42,6 +42,7 @@ import {
   type ThinkingPolicy,
   updateProfileControl,
 } from "./config.js";
+import { HerdrClient } from "./herdr-client.js";
 import { HerdrInspectorManager } from "./herdr-inspector.js";
 import { NativeBackend, type NativeRunEvent } from "./native-backend.js";
 import {
@@ -108,6 +109,7 @@ export type HubSnapshot = {
   missions: MissionSnapshot[];
   profiles: AgentDefinition[];
   diagnostics: AgentDiagnostic[];
+  herdr: { enabled: boolean; available: boolean };
 };
 
 export type SubagentManagerDependencies = {
@@ -302,6 +304,7 @@ export class SubagentManager {
   private planMode = false;
   private profiles: AgentDefinition[] = [];
   private diagnostics: AgentDiagnostic[] = [];
+  private herdr = { enabled: false, available: false };
   private ctx?: ExtensionContext;
   private shutdownPromise?: Promise<void>;
   private readonly shutdownController = new AbortController();
@@ -395,6 +398,7 @@ export class SubagentManager {
       missions: this.missionSnapshots(),
       profiles: this.profiles.map(profileClone),
       diagnostics: this.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+      herdr: { ...this.herdr },
     };
   }
 
@@ -562,6 +566,10 @@ export class SubagentManager {
         });
     }
     this.diagnostics = diagnostics;
+    this.herdr = {
+      enabled: config.herdr.enabled,
+      available: HerdrClient.environmentState() === "complete",
+    };
     return config;
   }
 

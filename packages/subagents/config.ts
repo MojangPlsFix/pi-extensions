@@ -7,6 +7,7 @@ import {
   selectEffectiveCapabilities,
   validateCapabilityCatalog,
 } from "./capabilities.js";
+import { HerdrClient } from "./herdr-client.js";
 import type { AgentDefinition } from "./types.js";
 
 export const PI_AGENT_DIR =
@@ -60,6 +61,10 @@ export type SubagentConfig = {
   profiles: Record<string, ProfileControl>;
 };
 
+export function herdrEnvironmentAvailable(env: NodeJS.ProcessEnv = process.env): boolean {
+  return HerdrClient.environmentState(env) === "complete";
+}
+
 export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   schemaVersion: 2,
   runtime: { maxActive: MAX_ACTIVE, maxSharedWriters: MAX_SHARED_WRITERS, maxDepth: MAX_DEPTH },
@@ -67,7 +72,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   models: { overrides: {} },
   capabilities: {},
   runners: {},
-  herdr: { enabled: false, direction: "right", maxOutputBytes: 1_000_000 },
+  herdr: { enabled: herdrEnvironmentAvailable(), direction: "right", maxOutputBytes: 1_000_000 },
   profiles: {},
 };
 
@@ -210,7 +215,8 @@ function parseHerdr(value: unknown): HerdrInspectorSettings {
   if (direction !== "right" && direction !== "down")
     throw new Error("herdr.direction must be right or down.");
   return {
-    enabled: candidate.enabled === true,
+    enabled:
+      candidate.enabled === undefined ? herdrEnvironmentAvailable() : candidate.enabled === true,
     direction,
     maxOutputBytes: integer(
       candidate.maxOutputBytes ?? 1_000_000,

@@ -205,13 +205,14 @@ If the file exists, it must use `schemaVersion: 2`.
   "capabilities": {},
   "runners": {},
   "herdr": {
-    "enabled": false,
     "direction": "right",
     "maxOutputBytes": 1000000
   },
   "profiles": {}
 }
 ```
+
+If `herdr.enabled` is omitted, Subagents enables transcript inspection only when the complete Herdr environment (`HERDR_ENV`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`) is present. Set `herdr.enabled` to `false` to disable it explicitly. The Agent Hub hides the transcript action when Herdr is disabled or unavailable.
 
 A run captures its effective profile, model, thinking level, and capabilities when it starts. A later file change does not change that run.
 

@@ -272,7 +272,13 @@ export class AgentsViewer {
         return this.close({ kind: "steer", id: run.id });
       if (data === "x" && ["queued", "starting", "running", "blocked"].includes(run.status))
         return this.close({ kind: "stop", id: run.id });
-      if (data === "t" && run.sessionFile) return this.close({ kind: "inspect", id: run.id });
+      if (
+        data === "t" &&
+        run.sessionFile &&
+        this.snapshot.herdr.enabled &&
+        this.snapshot.herdr.available
+      )
+        return this.close({ kind: "inspect", id: run.id });
     } else if (this.section === "inbox" && matchesKey(data, Key.enter)) {
       const request = this.snapshot.requests[this.selected];
       if (request?.status === "pending") return this.close({ kind: "answer", id: request.id });
@@ -326,9 +332,11 @@ export class AgentsViewer {
     if (this.section === "runs") this.renderRuns(body);
     else if (this.section === "inbox") this.renderInbox(body);
     else this.renderProfiles(body);
+    const transcriptHint =
+      this.snapshot.herdr.enabled && this.snapshot.herdr.available ? ["t transcript"] : [];
     const sectionHints =
       this.section === "runs"
-        ? ["enter revive parked", "s steer/revive", "x stop active", "t transcript"]
+        ? ["enter revive parked", "s steer/revive", "x stop active", ...transcriptHint]
         : this.section === "inbox"
           ? ["enter answer pending"]
           : ["enter enable/disable", "e eject built-in"];

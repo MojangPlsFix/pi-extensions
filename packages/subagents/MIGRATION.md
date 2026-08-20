@@ -49,7 +49,6 @@ Start with this file:
   "capabilities": {},
   "runners": {},
   "herdr": {
-    "enabled": false,
     "direction": "right",
     "maxOutputBytes": 1000000
   },
@@ -58,6 +57,8 @@ Start with this file:
 ```
 
 Move each old role model setting into `models.overrides`.
+
+Omit `herdr.enabled` to auto-enable display-only transcript inspection when the complete Herdr environment is present. Set it to `false` to disable Herdr explicitly.
 
 Replace optional resource switches with named capabilities. Do not copy old extension paths into a project file.
 
