@@ -58,6 +58,10 @@ function harness(
 ) {
   const bus = new Map<string, Array<(data: unknown) => void>>();
   const sent: unknown[] = [];
+  const sentMessages: Array<{
+    message: unknown;
+    options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" };
+  }> = [];
   const pi = {
     events: {
       on(name: string, listener: (data: unknown) => void) {
@@ -72,8 +76,12 @@ function harness(
         for (const listener of bus.get(name) ?? []) listener(data);
       },
     },
-    sendMessage(message: unknown) {
+    sendMessage(
+      message: unknown,
+      options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+    ) {
       sent.push(message);
+      sentMessages.push({ message, options });
     },
   } as unknown as ExtensionAPI;
   const native = new FakeNativeBackend();
@@ -109,6 +117,7 @@ function harness(
     native,
     ctx,
     sent,
+    sentMessages,
     setSessionId(id: string) {
       sessionId = id;
     },
@@ -163,6 +172,42 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
     expect(subject.native.aborted).toContain(runs[1]!.id);
     expect(subject.manager.store.get(runs[1]!.id)?.status).toBe("parked");
+  });
+
+  it("wakes an idle parent turn with follow-up completion details once a run parks", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "wake-parent",
+          agent: "scout",
+          task: "Inspect parked completion wake-up.",
+          owns: ["topic:parent-wakeup"],
+          deliverable: "Completion wake-up report.",
+        },
+      ],
+      subject.ctx,
+    );
+
+    subject.native.emit(run!.id, { type: "settled", report: "Wake-up report." });
+
+    await vi.waitFor(() => expect(subject.manager.store.get(run!.id)?.status).toBe("parked"));
+    await vi.waitFor(() => expect(subject.sentMessages).toHaveLength(1));
+
+    const completion = subject.sentMessages[0];
+    expect(completion?.options).toEqual({ triggerTurn: true, deliverAs: "followUp" });
+    expect(completion?.message).toMatchObject({
+      customType: "subagent-completion-v2",
+      content: expect.stringContaining("scout · parked"),
+    });
+    expect(completion?.message).toMatchObject({
+      content: expect.stringContaining("Wake-up report."),
+      details: { run: expect.objectContaining({ id: run!.id, status: "parked" }) },
+    });
+
+    await subject.manager.shutdown();
   });
 
   it("returns child usage deltas once for parent-session accounting", async () => {

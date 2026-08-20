@@ -1867,12 +1867,15 @@ export class SubagentManager {
     if (run.completionReported) return;
     run.completionReported = true;
     if (run.profile.hidden) return;
-    this.pi.sendMessage({
-      customType: "subagent-completion-v2",
-      content: `${run.profile.name} · ${run.status}\n\n${run.report || run.error || "(no report)"}`,
-      display: true,
-      details: { run: runSnapshot(run) },
-    });
+    this.pi.sendMessage(
+      {
+        customType: "subagent-completion-v2",
+        content: `${run.profile.name} · ${run.status}\n\n${run.report || run.error || "(no report)"}`,
+        display: true,
+        details: { run: runSnapshot(run) },
+      },
+      { triggerTurn: true, deliverAs: "followUp" },
+    );
   }
 
   private statePath(parent: string): string {

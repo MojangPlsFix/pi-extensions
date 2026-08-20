@@ -8,6 +8,7 @@ import {
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
+import type { SubagentsStatusEvent } from "../../shared/events.js";
 import type { HubSnapshot } from "./manager.js";
 import type { RunSnapshot, RunStatus } from "./types.js";
 
@@ -39,12 +40,64 @@ export function taskLabel(value: string, max = 120): string {
   return (first || "Untitled task").slice(0, max);
 }
 
+export function shortModel(value: string | undefined): string {
+  const model = cleanDisplayLine(value?.split("/").at(-1) ?? "inherit");
+  if (/luna/iu.test(model)) return "luna";
+  if (/\bsol\b/iu.test(model) || /-sol(?:-|$)/iu.test(model)) return "sol";
+  return model;
+}
+
 function colorForStatus(status: RunStatus): "muted" | "success" | "warning" | "error" | "dim" {
   if (status === "running" || status === "starting" || status === "queued") return "muted";
   if (status === "parked") return "success";
   if (status === "blocked") return "warning";
   if (status === "failed") return "error";
   return "dim";
+}
+
+function styledJoin(
+  theme: Theme,
+  fields: Array<{ value: string; color: Parameters<Theme["fg"]>[0] }>,
+): string {
+  return fields.map((field) => theme.fg(field.color, field.value)).join(theme.fg("dim", " · "));
+}
+
+/** Compact event-driven rows consumed by the working indicator. */
+export function activityViewLines(
+  status: SubagentsStatusEvent,
+  theme: Theme,
+  width: number,
+): string[] {
+  if (width <= 0 || status.agents.length === 0) return [];
+  const safe = (line: string) => truncateToWidth(line, width, "");
+  const header =
+    status.active > 0
+      ? theme.fg(
+          "muted",
+          `Subagents · ${status.active} active${status.blocked ? ` · ${status.blocked} blocked` : ""}`,
+        )
+      : theme.fg("muted", `Subagents · ${status.parked} parked`);
+  const lines = [safe(header)];
+  for (const [index, agent] of status.agents.slice(0, 4).entries()) {
+    const last = index === Math.min(4, status.agents.length) - 1;
+    const connector = theme.fg("dim", last ? "  └─ " : "  ├─ ");
+    lines.push(safe(connector + theme.fg("text", taskLabel(agent.task))));
+    const metadata = styledJoin(theme, [
+      { value: agent.profileClass ?? "agent", color: "dim" },
+      { value: agent.status, color: colorForStatus(agent.status) },
+      { value: shortModel(agent.effectiveModel), color: "dim" },
+      { value: formatDuration(agent.elapsedMs), color: "dim" },
+      {
+        value: taskLabel(
+          agent.latestActivity ?? (agent.status === "running" ? "working…" : agent.status),
+          80,
+        ),
+        color: colorForStatus(agent.status),
+      },
+    ]);
+    lines.push(safe(theme.fg("dim", last ? "     " : "  │  ") + metadata));
+  }
+  return lines;
 }
 
 export function formatRun(run: RunSnapshot): string {

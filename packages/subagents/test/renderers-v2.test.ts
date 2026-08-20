@@ -1,8 +1,9 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { SubagentActivitySnapshot, SubagentsStatusEvent } from "../../../shared/events.js";
 import { BUILTIN_PROFILES } from "../agents.js";
 import type { HubSnapshot } from "../manager.js";
-import { type AgentsOverlayAction, AgentsViewer } from "../renderers.js";
+import { type AgentsOverlayAction, AgentsViewer, activityViewLines } from "../renderers.js";
 import { emptyUsage, type RunSnapshot } from "../types.js";
 
 function theme(): Theme {
@@ -11,6 +12,38 @@ function theme(): Theme {
     bg: (_color: string, text: string) => text,
     bold: (text: string) => text,
   } as Theme;
+}
+
+function activitySnapshot(
+  overrides: Partial<SubagentActivitySnapshot> = {},
+): SubagentActivitySnapshot {
+  return {
+    id: "scout-1",
+    name: "scout",
+    profileClass: "read",
+    status: "running",
+    task: "Follow-up read-only inspection",
+    elapsedMs: 3_631_000,
+    effectiveModel: "openai-codex/gpt-5.6-luna",
+    effectiveThinking: "low",
+    latestActivity: "grep finished",
+    ...overrides,
+  };
+}
+
+function activityStatus(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
+  const active = agents.filter((agent) =>
+    ["queued", "starting", "running", "blocked"].includes(agent.status),
+  );
+  return {
+    active: active.length,
+    blocked: agents.filter((agent) => agent.status === "blocked").length,
+    parked: agents.filter((agent) => agent.status === "parked").length,
+    failed: agents.filter((agent) => agent.status === "failed").length,
+    writers: active.filter((agent) => agent.profileClass === "write").length,
+    total: agents.length,
+    agents,
+  };
 }
 
 function run(id: string, parentId?: string): RunSnapshot {
@@ -62,6 +95,33 @@ function snapshot(overrides: Partial<HubSnapshot> = {}): HubSnapshot {
 }
 
 afterEach(() => vi.useRealTimers());
+
+describe("activityViewLines", () => {
+  it("renders compact subagent activity without any triangle glyph", () => {
+    const output = activityViewLines(activityStatus([activitySnapshot()]), theme(), 120).join("\n");
+    expect(output).toContain("Subagents · 1 active");
+    expect(output).toContain("└─ Follow-up read-only inspection");
+    expect(output).toContain("read · running · luna · 60:31 · grep finished");
+    expect(output).not.toMatch(/[△▵▴▲]/u);
+  });
+
+  it("sanitizes control sequences in task and activity text", () => {
+    const output = activityViewLines(
+      activityStatus([
+        activitySnapshot({
+          task: "Inspect \u001b]0;spoofed\u0007 auth",
+          latestActivity: "reading \u001b[31msecret\u001b[0m",
+        }),
+      ]),
+      theme(),
+      120,
+    ).join("\n");
+    expect(output).toContain("Inspect auth");
+    expect(output).toContain("reading secret");
+    expect(output).not.toContain("spoofed");
+    expect(output).not.toContain("\u001b");
+  });
+});
 
 describe("AgentsViewer", () => {
   it("updates from subscriptions, renders lineage, and unsubscribes on dispose", () => {
