@@ -31,6 +31,25 @@ function safeLine(value) {
   return safeText(value).replace(/\s+/gu, " ").trim();
 }
 
+const maxEntryBytes = Math.min(maxOutputBytes, 16_384);
+
+function truncateText(value, limit = maxEntryBytes) {
+  const text = safeText(value);
+  if (Buffer.byteLength(text, "utf8") <= limit) return text;
+  let truncated = text;
+  while (truncated && Buffer.byteLength(`${truncated}\n[… entry truncated …]`, "utf8") > limit)
+    truncated = truncated.slice(0, -1);
+  return `${truncated}\n[… entry truncated …]`;
+}
+
+function jsonText(value) {
+  try {
+    return truncateText(JSON.stringify(value, null, 2));
+  } catch {
+    return truncateText(String(value));
+  }
+}
+
 function textContent(content) {
   if (!Array.isArray(content)) return "";
   return content
@@ -39,10 +58,23 @@ function textContent(content) {
       if (part.type === "text" && typeof part.text === "string") return [part.text];
       if (part.type === "thinking" && typeof part.thinking === "string")
         return [`[thinking] ${part.thinking}`];
-      if (part.type === "toolCall") return [`[tool] ${part.name ?? "unknown"}`];
+      if (part.type === "toolCall")
+        return [
+          `[tool] ${part.name ?? "unknown"}`,
+          `arguments:\n${jsonText(part.arguments ?? {})}`,
+        ];
       return [];
     })
     .join("\n");
+}
+
+function toolResultText(message) {
+  const name = typeof message.toolName === "string" ? message.toolName : "unknown";
+  const lines = [`[result] ${name}${message.isError ? " · error" : ""}`];
+  const output = textContent(message.content);
+  if (output) lines.push(`output:\n${truncateText(output)}`);
+  if (message.details !== undefined) lines.push(`details:\n${jsonText(message.details)}`);
+  return lines.join("\n");
 }
 
 function render(line) {
@@ -54,7 +86,11 @@ function render(line) {
   }
   if (entry?.type !== "message" || !entry.message) return;
   const role = safeLine(typeof entry.message.role === "string" ? entry.message.role : "event");
-  const body = safeText(textContent(entry.message.content)).trim();
+  const rawBody =
+    entry.message.role === "toolResult"
+      ? toolResultText(entry.message)
+      : textContent(entry.message.content);
+  const body = truncateText(rawBody).trim();
   if (!body) return;
   const stamp = safeLine(typeof entry.timestamp === "string" ? entry.timestamp.slice(11, 19) : "");
   process.stdout.write(`\n\x1b[1m${stamp} ${role}\x1b[0m\n${body}\n`);

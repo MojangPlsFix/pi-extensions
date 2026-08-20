@@ -46,6 +46,32 @@ describe("display-only transcript runner", () => {
       },
     };
     await fs.writeFile(sessionFile, `not-json\n${JSON.stringify(first)}\n`);
+    await fs.appendFile(
+      sessionFile,
+      `${JSON.stringify({
+        type: "message",
+        timestamp: "2026-01-01T12:34:57.000Z",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "toolCall",
+              name: "read",
+              arguments: { path: "src/example.ts", offset: 1, limit: 20 },
+            },
+          ],
+        },
+      })}\n${JSON.stringify({
+        type: "message",
+        timestamp: "2026-01-01T12:34:58.000Z",
+        message: {
+          role: "toolResult",
+          toolName: "read",
+          content: [{ type: "text", text: "const value = 42;" }],
+          details: { truncated: false },
+        },
+      })}\n`,
+    );
 
     const child = spawn(process.execPath, [runner, sessionFile, "4096"], {
       stdio: ["ignore", "pipe", "pipe"],
@@ -61,6 +87,9 @@ describe("display-only transcript runner", () => {
 
     try {
       await waitForOutput(() => stdout, "safe red  text reversed");
+      await waitForOutput(() => stdout, '"path": "src/example.ts"');
+      await waitForOutput(() => stdout, "output:\nconst value = 42;");
+      expect(stdout).toContain("details:");
       await fs.appendFile(
         sessionFile,
         `${JSON.stringify({
