@@ -41,13 +41,15 @@ describe("HerdrInspectorManager", () => {
       close: vi.fn(async (_pane: string) => {}),
     };
     const inspectors = new HerdrInspectorManager(client);
-    const binding = await inspectors.open("run-1", sessionFile, dir);
+    const binding = await inspectors.open("run-1", sessionFile, dir, { themeName: "light" });
     expect(binding.paneId).toBe("inspector-pane");
     expect(client.splitCurrent).toHaveBeenCalledWith("right", dir, false);
     expect(client.runInPane).toHaveBeenCalledOnce();
     const command = client.runInPane.mock.calls[0]?.[1] ?? "";
     expect(command).toContain("inspector-runner.mjs");
     expect(command).toContain(sessionFile);
+    expect(command).toContain(dir);
+    expect(command).toContain("light");
     expect(command).not.toContain("pi --mode");
     expect(command).not.toContain("herdr agent");
     await inspectors.close("run-1");

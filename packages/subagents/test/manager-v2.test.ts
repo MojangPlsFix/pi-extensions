@@ -7,6 +7,7 @@ import { events } from "../../../shared/events.js";
 import { BUILTIN_PROFILES } from "../agents.js";
 import { selectEffectiveCapabilities } from "../capabilities.js";
 import { DEFAULT_SUBAGENT_CONFIG, type SubagentConfig } from "../config.js";
+import type { HerdrInspectorManager } from "../herdr-inspector.js";
 import { SubagentManager } from "../manager.js";
 import type {
   NativeBackend,
@@ -54,7 +55,15 @@ function config(): SubagentConfig {
 
 function harness(
   sessionRoot: string,
-  options: { config?: SubagentConfig; profiles?: AgentDefinition[] } = {},
+  options: {
+    config?: SubagentConfig;
+    profiles?: AgentDefinition[];
+    inspectors?: {
+      open: (...args: unknown[]) => Promise<unknown>;
+      close: (runId: string) => Promise<void>;
+      shutdown: () => Promise<void>;
+    };
+  } = {},
 ) {
   const bus = new Map<string, Array<(data: unknown) => void>>();
   const sent: unknown[] = [];
@@ -87,6 +96,7 @@ function harness(
   const native = new FakeNativeBackend();
   const manager = new SubagentManager(pi, {
     native: native as unknown as NativeBackend,
+    inspectors: options.inspectors as unknown as HerdrInspectorManager,
     loadConfig: async () => structuredClone(options.config ?? config()),
     discoverProfiles: async () => ({
       profiles: (options.profiles ?? BUILTIN_PROFILES).map((profile) => structuredClone(profile)),
@@ -99,6 +109,7 @@ function harness(
     cwd: process.cwd(),
     model: undefined,
     thinkingLevel: "low",
+    ui: { theme: { name: "dark" } },
     modelRegistry: {
       refresh: vi.fn(),
       find: vi.fn(),
@@ -206,6 +217,50 @@ describe("SubagentManager v2", () => {
       content: expect.stringContaining("Wake-up report."),
       details: { run: expect.objectContaining({ id: run!.id, status: "parked" }) },
     });
+
+    await subject.manager.shutdown();
+  });
+
+  it("forwards cwd and active theme name when opening a transcript inspector", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const configWithInspector = config();
+    configWithInspector.herdr.enabled = true;
+    const inspectors = {
+      open: vi.fn(async () => ({
+        runId: "run-id",
+        paneId: "pane-id",
+        sessionFile: "session.jsonl",
+        openedAt: new Date().toISOString(),
+      })),
+      close: vi.fn(async () => {}),
+      shutdown: vi.fn(async () => {}),
+    };
+    const subject = harness(root, { config: configWithInspector, inspectors });
+    subject.ctx.cwd = "/tmp/inspector-cwd";
+    (subject.ctx as unknown as { ui: { theme: { name: string } } }).ui.theme.name = "light";
+
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "open-inspector",
+          agent: "scout",
+          task: "Inspect transcript view wiring.",
+          owns: ["topic:inspector"],
+          deliverable: "Inspector wiring report.",
+        },
+      ],
+      subject.ctx,
+    );
+
+    await subject.manager.openInspector(run!.id);
+
+    expect(inspectors.open).toHaveBeenCalledWith(
+      run!.id,
+      expect.stringContaining(`${run!.id}.jsonl`),
+      "/tmp/inspector-cwd",
+      expect.objectContaining({ themeName: "light" }),
+    );
 
     await subject.manager.shutdown();
   });

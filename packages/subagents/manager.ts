@@ -1628,9 +1628,15 @@ export class SubagentManager {
     const config = await this.loadConfig();
     if (!config.herdr.enabled)
       throw new Error("Herdr transcript inspection is disabled in Subagents v2 configuration.");
+    const activeTheme = this.ctx?.ui?.theme;
+    const themeName =
+      activeTheme && typeof activeTheme.name === "string" && activeTheme.name.trim()
+        ? activeTheme.name
+        : undefined;
     await this.inspectors.open(id, run.sessionFile, this.ctx?.cwd ?? process.cwd(), {
       direction: config.herdr.direction,
       maxOutputBytes: config.herdr.maxOutputBytes,
+      themeName,
     });
     this.store.changed();
   }

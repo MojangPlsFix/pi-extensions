@@ -34,7 +34,11 @@ export class HerdrInspectorManager {
     runId: string,
     sessionFile: string,
     cwd: string,
-    options: { direction?: "right" | "down"; maxOutputBytes?: number } = {},
+    options: {
+      direction?: "right" | "down";
+      maxOutputBytes?: number;
+      themeName?: string;
+    } = {},
   ): Promise<HerdrInspectorBinding> {
     const existing = this.bindings.get(runId);
     if (existing) {
@@ -55,7 +59,8 @@ export class HerdrInspectorManager {
     const paneId = await this.client.splitCurrent(options.direction ?? "right", cwd, false);
     const runner = fileURLToPath(new URL("./inspector-runner.mjs", import.meta.url));
     const maxOutputBytes = Math.max(1, Math.floor(options.maxOutputBytes ?? 1_000_000));
-    const command = `${shellArgument(process.execPath)} ${shellArgument(runner)} ${shellArgument(sessionFile)} ${maxOutputBytes}`;
+    const themeName = options.themeName?.trim() ? options.themeName.trim() : "dark";
+    const command = `${shellArgument(process.execPath)} ${shellArgument(runner)} ${shellArgument(sessionFile)} ${maxOutputBytes} ${shellArgument(cwd)} ${shellArgument(themeName)}`;
     try {
       await this.client.runInPane(paneId, command);
     } catch (cause) {
