@@ -1,75 +1,29 @@
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import {
-  events,
-  type SubagentActivitySnapshot,
-  type SubagentsStatusEvent,
-} from "../../../shared/events.js";
-import workingIndicatorExtension, { SubagentActivityComponent } from "../index.js";
+import { events, type SubagentsStatusEvent } from "../../../shared/events.js";
+import workingIndicatorExtension from "../index.js";
 
 type Handler = (...args: any[]) => any;
 
 type Harness = ReturnType<typeof harness>;
 
-function snapshot(overrides: Partial<SubagentActivitySnapshot> = {}): SubagentActivitySnapshot {
+function status(overrides: Partial<SubagentsStatusEvent> = {}): SubagentsStatusEvent {
   return {
-    id: "scout-1",
-    name: "scout",
-    profileClass: "read",
-    status: "running",
-    task: "Trace the authentication request flow",
-    elapsedMs: 12_000,
-    effectiveModel: "openai-codex/gpt-5.6-luna",
-    effectiveThinking: "low",
-    latestActivity: "reading manager.ts",
+    active: 0,
+    blocked: 0,
+    parked: 0,
+    failed: 0,
+    writers: 0,
+    total: 0,
+    agents: [],
     ...overrides,
   };
-}
-
-function status(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
-  const active = agents.filter((agent) =>
-    ["queued", "starting", "running", "blocked"].includes(agent.status),
-  );
-  return {
-    active: active.length,
-    blocked: agents.filter((agent) => agent.status === "blocked").length,
-    parked: agents.filter((agent) => agent.status === "parked").length,
-    failed: agents.filter((agent) => agent.status === "failed").length,
-    writers: active.filter((agent) => agent.profileClass === "write").length,
-    total: agents.length,
-    agents,
-  };
-}
-
-function theme(): Theme {
-  return {
-    fg: (_color: string, text: string) => text,
-    bg: (_color: string, text: string) => text,
-    bold: (text: string) => text,
-  } as Theme;
 }
 
 function harness() {
   const handlers = new Map<string, Handler[]>();
   const bus = new Map<string, Handler[]>();
-  const tui = { requestRender: vi.fn() };
-  const widgetTheme = theme();
-  let widget: SubagentActivityComponent | undefined;
-
   const ui = {
-    setWidget: vi.fn(
-      (
-        _key: string,
-        factory:
-          | ((
-              tui: typeof import("@earendil-works/pi-tui"),
-              theme: Theme,
-            ) => SubagentActivityComponent)
-          | undefined,
-      ) => {
-        widget = factory?.(tui as never, widgetTheme);
-      },
-    ),
     setWorkingIndicator: vi.fn(),
     setWorkingMessage: vi.fn(),
     setWorkingVisible: vi.fn(),
@@ -98,8 +52,6 @@ function harness() {
     context,
     handlers,
     ui,
-    tui,
-    widget: () => widget,
     emitExtensionEvent(name: string, data: unknown) {
       for (const handler of bus.get(name) ?? []) handler(data);
     },
@@ -112,7 +64,7 @@ async function emit(subject: Harness, name: string): Promise<void> {
 }
 
 describe("working indicator lifecycle", () => {
-  it("restores Pi's default spinner configuration on session start", async () => {
+  it("uses Pi's normal spinner and Hackeln message on session start", async () => {
     const subject = harness();
 
     await emit(subject, "session_start");
@@ -122,66 +74,38 @@ describe("working indicator lifecycle", () => {
     expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
   });
 
-  it("hides the native row while rendering task-first subagent activity", async () => {
+  it("shows the normal loading row while native Subagents work", async () => {
     const subject = harness();
     await emit(subject, "session_start");
 
-    subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
+    subject.emitExtensionEvent(events.subagentsStatus, status({ active: 2, total: 2 }));
 
-    expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(false);
-    expect(subject.widget()).toBeInstanceOf(SubagentActivityComponent);
-    expect(subject.widget()?.render(120).join("\n")).toContain(
-      "Trace the authentication request flow",
-    );
-
-    subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    await emit(subject, "session_shutdown");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler hackeln...");
+    expect(subject.ui.setWorkingIndicator).toHaveBeenCalled();
   });
 
-  it("strips terminal controls from child activity", async () => {
+  it("shows a waiting message for blocked Subagents and restores the idle message", async () => {
     const subject = harness();
     await emit(subject, "session_start");
-    subject.emitExtensionEvent(
-      events.subagentsStatus,
-      status([
-        snapshot({
-          task: "Inspect \u001b]0;spoofed\u0007 auth",
-          latestActivity: "reading \u001b[31msecret\u001b[0m",
-        }),
-      ]),
-    );
 
-    const output = subject.widget()?.render(120).join("\n") ?? "";
-    expect(output).toContain("Inspect auth");
-    expect(output).toContain("reading secret");
-    expect(output).not.toContain("spoofed");
-    expect(output).not.toContain("\u001b");
-    await emit(subject, "session_shutdown");
+    subject.emitExtensionEvent(events.subagentsStatus, status({ active: 1, blocked: 1, total: 1 }));
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler warten auf Polier....");
+
+    subject.emitExtensionEvent(events.subagentsStatus, status());
+    expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackeln...");
   });
 
-  it("restores native visibility and disposes the activity widget on shutdown", async () => {
-    vi.useFakeTimers();
-    try {
-      const subject = harness();
-      await emit(subject, "session_start");
-      subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
-      const rendersBeforeShutdown = subject.tui.requestRender.mock.calls.length;
+  it("restores the normal spinner configuration on shutdown", async () => {
+    const subject = harness();
+    await emit(subject, "session_start");
+    subject.emitExtensionEvent(events.subagentsStatus, status({ active: 1, total: 1 }));
 
-      await emit(subject, "session_shutdown");
-      vi.advanceTimersByTime(1_000);
+    await emit(subject, "session_shutdown");
 
-      expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-      expect(subject.ui.setWidget).toHaveBeenLastCalledWith(
-        "pi-extensions:subagent-working",
-        undefined,
-      );
-      expect(subject.tui.requestRender).toHaveBeenCalledTimes(rendersBeforeShutdown);
-
-      subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
-      expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
+    expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
   });
 });

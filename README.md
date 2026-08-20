@@ -32,7 +32,7 @@ pi update --extensions
 | [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Subagent subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
 | [Subagents](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
-| [Working Indicator](packages/working-indicator/) | Owns the visible Pi-styled Subagent activity block and the animated `Hackeln...` summary. | Automatic | Running, ready, and recent Subagents |
+| [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Subagents run. | Automatic | Running, blocked, and completed Subagents |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
