@@ -3,7 +3,8 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { CollectMode, DispatchInput, SubagentManager } from "./manager.js";
 import { safeDisplayText } from "./renderers.js";
-import type { RunSnapshot } from "./types.js";
+import type { SupervisorRequest } from "./supervisor.js";
+import type { RunSnapshot, Usage } from "./types.js";
 
 function expandHint(): string {
   try {
@@ -79,6 +80,42 @@ function callRenderer(
     `${theme.fg("toolTitle", theme.bold(`${label} `))}${theme.fg("dim", safeDisplayText(preview).slice(0, 100))}${context.isPartial ? theme.fg("muted", " · working") : ""}`,
   );
   return component;
+}
+
+function usageHasValue(usage: Usage): boolean {
+  return (
+    usage.input !== 0 ||
+    usage.output !== 0 ||
+    usage.cacheRead !== 0 ||
+    usage.cacheWrite !== 0 ||
+    usage.total !== 0 ||
+    usage.cost !== 0
+  );
+}
+
+function nestedUsage(usage: Usage) {
+  return {
+    input: usage.input,
+    output: usage.output,
+    cacheRead: usage.cacheRead,
+    cacheWrite: usage.cacheWrite,
+    totalTokens: usage.total,
+    cost: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: usage.cost,
+    },
+  };
+}
+
+function supervisorRequestLines(requests: readonly SupervisorRequest[]): string[] {
+  return requests.flatMap((request) => [
+    `- ${request.id} · ${request.kind} · ${safeDisplayText(request.title)} · from ${request.fromRunId}`,
+    `  ${safeDisplayText(request.detail)}`,
+    `  choices: ${request.choices.map((choice) => choice.value).join(", ") || "free-form response"}`,
+  ]);
 }
 
 const dispatchTaskSchema = Type.Object({
@@ -176,8 +213,18 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
                 ...hub.diagnostics.map((item) => `- ${item.path}: ${item.message}`),
               ]
             : []),
+          ...(manager.pendingRequests().length
+            ? [
+                "",
+                "Pending supervisor requests:",
+                ...supervisorRequestLines(manager.pendingRequests()),
+              ]
+            : []),
         ].join("\n");
-        return { content: [{ type: "text", text }], details: { runs: hub.runs } };
+        return {
+          content: [{ type: "text", text }],
+          details: { runs: hub.runs, requests: manager.pendingRequests() },
+        };
       } catch (error) {
         return {
           content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
@@ -188,6 +235,42 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
     },
     renderCall(args, theme, context) {
       return callRenderer("subagent_status", args as Record<string, unknown>, theme, context);
+    },
+    renderResult: resultRenderer,
+  });
+
+  pi.registerTool({
+    name: "subagent_respond",
+    label: "Respond to subagent",
+    description:
+      "Resolve one pending supervisor request for a blocked subagent. Inspect the request with subagent_status first and use an exact choice value when choices are provided.",
+    promptSnippet: "Resolve a pending supervisor request so a blocked child can continue.",
+    parameters: Type.Object({
+      id: Type.String({ description: "Pending supervisor request ID." }),
+      answer: Type.String({ description: "Exact choice value or free-form response." }),
+    }),
+    async execute(_toolCallId, params) {
+      try {
+        const request = await manager.respondRequest(params.id, params.answer);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Supervisor request ${request.id} answered: ${request.answer ?? params.answer}`,
+            },
+          ],
+          details: { request },
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+    renderCall(args, theme, context) {
+      return callRenderer("subagent_respond", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -209,20 +292,27 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
         (params.wait ?? "none") as CollectMode,
         signal,
       );
+      const usage = manager.takeUnreportedUsage(params.ids);
+      const attached = usageHasValue(usage);
+      const requests = manager.pendingRequests();
+      const reports =
+        runs
+          .map(
+            (run) =>
+              `## ${run.name} · ${run.status}\nOwned: ${run.ownership.owns.join(", ")}\n\n${run.report || run.error || "(no report yet)"}`,
+          )
+          .join("\n\n") || "No matching subagents.";
+      const requestText = requests.length
+        ? `\n\nPending supervisor requests:\n${supervisorRequestLines(requests).join("\n")}`
+        : "";
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              runs
-                .map(
-                  (run) =>
-                    `## ${run.name} · ${run.status}\nOwned: ${run.ownership.owns.join(", ")}\n\n${run.report || run.error || "(no report yet)"}`,
-                )
-                .join("\n\n") || "No matching subagents.",
-          },
-        ],
-        details: { runs },
+        content: [{ type: "text", text: reports + requestText }],
+        ...(attached ? { usage: nestedUsage(usage) } : {}),
+        details: {
+          runs,
+          requests,
+          ...(attached ? { subagentUsageAttached: true } : {}),
+        },
       };
     },
     renderCall(args, theme, context) {
@@ -241,9 +331,12 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       try {
         const run = await manager.steer(params.id, params.message);
         const snapshot = manager.snapshots().find((item) => item.id === run.id)!;
+        const usage = manager.takeUnreportedUsage([run.id]);
+        const attached = usageHasValue(usage);
         return {
           content: [{ type: "text", text: `Guidance accepted by ${run.id}.` }],
-          details: { run: snapshot },
+          ...(attached ? { usage: nestedUsage(usage) } : {}),
+          details: { run: snapshot, ...(attached ? { subagentUsageAttached: true } : {}) },
         };
       } catch (error) {
         return {
@@ -272,9 +365,12 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
         const snapshots = manager
           .snapshots()
           .filter((snapshot) => stopped.some((run) => run.id === snapshot.id));
+        const usage = manager.takeUnreportedUsage(params.ids);
+        const attached = usageHasValue(usage);
         return {
           content: [{ type: "text", text: stopped.map((run) => `Stopped ${run.id}.`).join("\n") }],
-          details: { runs: snapshots },
+          ...(attached ? { usage: nestedUsage(usage) } : {}),
+          details: { runs: snapshots, ...(attached ? { subagentUsageAttached: true } : {}) },
         };
       } catch (error) {
         return {

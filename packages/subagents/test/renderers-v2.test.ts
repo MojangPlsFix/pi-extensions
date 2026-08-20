@@ -81,7 +81,11 @@ describe("AgentsViewer", () => {
     );
 
     listener?.(snapshot({ runs: [run("parent"), run("child", "parent")] }));
-    const output = viewer.render(120).join("\n");
+    const lines = viewer.render(120);
+    const output = lines.join("\n");
+    expect(lines[0]).toMatch(/^┌─+┐$/);
+    expect(lines.at(-1)).toMatch(/^└─+┘$/);
+    expect(output).toContain("│ Agent Hub ");
     expect(output).toContain("Coordinate mission");
     expect(output).toContain("└─ Inspect child scope");
     expect(tui.requestRender).toHaveBeenCalled();

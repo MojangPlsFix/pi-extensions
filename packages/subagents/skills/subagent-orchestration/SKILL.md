@@ -56,7 +56,7 @@ Children do not ask the user directly. Native children use `contact_supervisor` 
 - progress
 - integration-ready
 
-Open `/agents` to answer a blocked request. Review the detail and tool input before you approve an action.
+The parent agent handles pending requests with `subagent_status` and `subagent_respond`. `subagent_collect` returns when a child blocks instead of waiting indefinitely. Review the detail and tool input before you approve an action. Open `/agents` only as a manual fallback.
 
 Do not claim that a pending child succeeded. Read its settled report first.
 
@@ -71,7 +71,7 @@ For each report:
 5. Resolve conflicts and open questions.
 6. Run final checks in the integrated checkout.
 
-A worktree candidate requires an Inbox response. The manager never applies it automatically.
+A worktree candidate requires an Inbox response. The parent agent can answer the integration request with `subagent_respond`; the manager never applies it automatically.
 
 ## Plan Mode
 

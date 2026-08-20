@@ -14,7 +14,7 @@ import type {
   NativeRunListener,
   NativeRunSpec,
 } from "../native-backend.js";
-import type { AgentDefinition } from "../types.js";
+import { type AgentDefinition, emptyUsage } from "../types.js";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -163,6 +163,61 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
     expect(subject.native.aborted).toContain(runs[1]!.id);
     expect(subject.manager.store.get(runs[1]!.id)?.status).toBe("parked");
+  });
+
+  it("returns child usage deltas once for parent-session accounting", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "account-usage",
+          agent: "scout",
+          task: "Inspect usage accounting.",
+          owns: ["topic:usage-accounting"],
+          deliverable: "Usage accounting report.",
+        },
+      ],
+      subject.ctx,
+    );
+
+    subject.native.emit(run!.id, {
+      type: "usage",
+      input: 100,
+      output: 25,
+      cacheRead: 10,
+      cacheWrite: 5,
+      cost: 0.033,
+    });
+    expect(subject.manager.takeUnreportedUsage([run!.id])).toEqual({
+      input: 100,
+      output: 25,
+      cacheRead: 10,
+      cacheWrite: 5,
+      total: 140,
+      cost: 0.033,
+    });
+    expect(subject.manager.takeUnreportedUsage([run!.id])).toEqual(emptyUsage());
+
+    subject.native.emit(run!.id, {
+      type: "usage",
+      input: 20,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0.01,
+    });
+    const secondDelta = subject.manager.takeUnreportedUsage([run!.id]);
+    expect(secondDelta).toMatchObject({
+      input: 20,
+      output: 5,
+      cacheRead: 0,
+      cacheWrite: 0,
+      total: 25,
+    });
+    expect(secondDelta.cost).toBeCloseTo(0.01);
+    await subject.manager.shutdown();
   });
 
   it("stops an active run, releases its claim, and retains its report record", async () => {
@@ -464,6 +519,84 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
     await response;
     expect(subject.manager.store.get(run!.id)?.status).toBe("parked");
+  });
+
+  it("returns from collect when a child blocks so the parent can answer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "needs-answer",
+          agent: "scout",
+          task: "Inspect a decision.",
+          owns: ["topic:decision"],
+          deliverable: "Decision report.",
+        },
+      ],
+      subject.ctx,
+    );
+    const contact = subject.native.starts[0]?.customTools?.find(
+      (tool) => tool.name === "contact_supervisor",
+    );
+    const response = contact!.execute(
+      "tool-call",
+      {
+        kind: "decision",
+        title: "Need a choice",
+        detail: "The task cannot continue without a choice.",
+        choices: [{ value: "continue", label: "Continue" }],
+      },
+      new AbortController().signal,
+      () => {},
+      {} as never,
+    );
+    await vi.waitFor(() => expect(subject.manager.store.get(run!.id)?.status).toBe("blocked"));
+
+    const collected = await subject.manager.collect([run!.id], "all");
+    expect(collected[0]?.status).toBe("blocked");
+    const request = subject.manager.pendingRequests()[0];
+    expect(request).toMatchObject({ kind: "decision", fromRunId: run!.id });
+    await subject.manager.respondRequest(request!.id, "continue");
+    await response;
+    await subject.manager.shutdown();
+  });
+
+  it("does not block read-only children on integration-ready handoffs", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "read-only-handoff",
+          agent: "scout",
+          task: "Inspect the report.",
+          owns: ["topic:report"],
+          deliverable: "Read-only report.",
+        },
+      ],
+      subject.ctx,
+    );
+    const contact = subject.native.starts[0]?.customTools?.find(
+      (tool) => tool.name === "contact_supervisor",
+    );
+    await contact!.execute(
+      "tool-call",
+      {
+        kind: "integration-ready",
+        title: "Report ready",
+        detail: "The read-only report is ready.",
+        choices: [{ value: "accepted", label: "Use report" }],
+      },
+      new AbortController().signal,
+      () => {},
+      {} as never,
+    );
+    expect(subject.manager.pendingRequests()).toEqual([]);
+    expect(subject.manager.store.get(run!.id)?.status).toBe("running");
+    await subject.manager.shutdown();
   });
 
   it("coalesces concurrent supervisor responses", async () => {

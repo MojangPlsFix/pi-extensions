@@ -68,6 +68,7 @@ import {
   type RunRecord,
   type RunSnapshot,
   runSnapshot,
+  type Usage,
 } from "./types.js";
 import {
   applyCandidate,
@@ -140,6 +141,42 @@ type PreparedRun = {
 
 const ACTIVE_STATUSES = new Set<RunRecord["status"]>(["queued", "starting", "running", "blocked"]);
 const WRITE_CLASSES = new Set<ProfileClass>(["write"]);
+
+function usageHasValue(usage: Usage): boolean {
+  return (
+    usage.input !== 0 ||
+    usage.output !== 0 ||
+    usage.cacheRead !== 0 ||
+    usage.cacheWrite !== 0 ||
+    usage.total !== 0 ||
+    usage.cost !== 0
+  );
+}
+
+function cloneUsage(usage: Usage): Usage {
+  return { ...usage };
+}
+
+function addUsage(target: Usage, source: Usage): void {
+  target.input += source.input;
+  target.output += source.output;
+  target.cacheRead += source.cacheRead;
+  target.cacheWrite += source.cacheWrite;
+  target.total += source.total;
+  target.cost += source.cost;
+}
+
+function usageDelta(current: Usage, accounted: Usage | undefined): Usage {
+  const previous = accounted ?? emptyUsage();
+  return {
+    input: Math.max(0, current.input - previous.input),
+    output: Math.max(0, current.output - previous.output),
+    cacheRead: Math.max(0, current.cacheRead - previous.cacheRead),
+    cacheWrite: Math.max(0, current.cacheWrite - previous.cacheWrite),
+    total: Math.max(0, current.total - previous.total),
+    cost: Math.max(0, current.cost - previous.cost),
+  };
+}
 
 function parentSessionId(ctx: ExtensionContext): string {
   const manager = ctx.sessionManager as typeof ctx.sessionManager & {
@@ -336,6 +373,10 @@ export class SubagentManager {
     return this.store.snapshots();
   }
 
+  pendingRequests(): SupervisorRequest[] {
+    return this.inbox.open();
+  }
+
   missionSnapshots(): MissionSnapshot[] {
     return [...this.missions.values()].map((mission) => ({
       ...mission,
@@ -421,7 +462,9 @@ export class SubagentManager {
     const profileNotice = inferred
       ? `\n\nAvailable inferred profiles:\n${inferred}\nSelect a profile by its declared specialty. Do not send the same task or ownership to multiple profiles.`
       : "";
-    return `${systemPrompt}\n\n${ORCHESTRATION_GUIDELINES}${profileNotice}${missionNotice}`;
+    const supervisorNotice =
+      "\n\nIf a child reports a pending supervisor request, inspect it with subagent_status and resolve it with subagent_respond before waiting again. Do not leave a blocked child inside an indefinite subagent_collect wait.";
+    return `${systemPrompt}\n\n${ORCHESTRATION_GUIDELINES}${supervisorNotice}${profileNotice}${missionNotice}`;
   }
 
   private assertOpen(): void {
@@ -953,7 +996,9 @@ export class SubagentManager {
       profileClass(profile) === "orchestrator" ? ORCHESTRATION_GUIDELINES : "",
       "Work only inside the explicitly assigned ownership. Do not duplicate a peer's scope.",
       profile.runner === "native"
-        ? "Do not ask the user directly. Use contact_supervisor for a required decision, approval, blocker, meaningful progress update, or integration handoff."
+        ? ["write", "orchestrator"].includes(profileClass(profile))
+          ? "Do not ask the user directly. Use contact_supervisor for a required decision, approval, blocker, meaningful progress update, or integration handoff."
+          : "Do not ask the user directly. Use contact_supervisor only for a required decision, approval, or blocker. Return progress, integration notes, and final findings in the report; do not send integration-ready for read-only work."
         : "Do not request interactive UI. Return decisions, blockers, and integration notes in the final report.",
       "Do not invent tools or capabilities. The effective capability policy is static and cannot be expanded by the child.",
       `Effective optional capabilities:\n${capabilitySummary}`,
@@ -1070,8 +1115,13 @@ export class SubagentManager {
           ),
         }),
         execute: async (_toolCallId, params) => {
+          const kind =
+            params.kind === "integration-ready" &&
+            !["write", "orchestrator"].includes(profileClass(run.profile))
+              ? "progress"
+              : params.kind;
           const { request, resolution } = this.requestFromRun(run, {
-            kind: params.kind,
+            kind,
             title: params.title,
             detail: params.detail,
             choices: params.choices,
@@ -1340,18 +1390,46 @@ export class SubagentManager {
         const finish = () => {
           if (done) return;
           const settled = selected.filter((run) => !ACTIVE_STATUSES.has(run.status)).length;
-          if (signal?.aborted || (wait === "next" ? settled > 0 : settled === selected.length)) {
+          const blocked = selected.some((run) => run.status === "blocked");
+          if (
+            signal?.aborted ||
+            blocked ||
+            (wait === "next" ? settled > 0 : settled === selected.length)
+          ) {
             done = true;
             unsubscribe();
             signal?.removeEventListener("abort", finish);
             resolve();
           }
         };
-        const unsubscribe = this.store.subscribe(finish);
+        let unsubscribe = (): void => {};
+        unsubscribe = this.store.subscribe(finish);
         signal?.addEventListener("abort", finish, { once: true });
         finish();
       });
     return selected.map((run) => runSnapshot(run));
+  }
+
+  /**
+   * Take child usage that has not yet been attached to a parent Pi tool result.
+   * The ledger is persisted with each run so repeated collection and parent-session
+   * reloads do not double-count the same child turns.
+   */
+  takeUnreportedUsage(ids: readonly string[] | undefined): Usage {
+    const selected = ids?.length
+      ? ids.map((id) => this.store.get(id)).filter((run): run is RunRecord => Boolean(run))
+      : this.store.all();
+    const total = emptyUsage();
+    let changed = false;
+    for (const run of selected) {
+      const delta = usageDelta(run.usage, run.accountedUsage);
+      if (!usageHasValue(delta)) continue;
+      addUsage(total, delta);
+      run.accountedUsage = cloneUsage(run.usage);
+      changed = true;
+    }
+    if (changed) this.store.changed();
+    return total;
   }
 
   async steer(id: string, message: string): Promise<RunRecord> {
@@ -1832,6 +1910,45 @@ export class SubagentManager {
       .catch(() => {});
   }
 
+  private async recoverPersistedCost(run: RunRecord): Promise<void> {
+    if (!run.sessionFile) return;
+    try {
+      const source = await fs.readFile(run.sessionFile, "utf8");
+      let persistedCost = 0;
+      let foundCost = false;
+      for (const line of source.split("\n")) {
+        let entry: unknown;
+        try {
+          entry = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        if (!entry || typeof entry !== "object") continue;
+        const message = (entry as { type?: unknown; message?: unknown }).message;
+        if (!message || typeof message !== "object") continue;
+        const value = message as { role?: unknown; usage?: unknown };
+        if (value.role !== "assistant" || !value.usage || typeof value.usage !== "object") continue;
+        const cost = (value.usage as { cost?: unknown }).cost;
+        const total =
+          typeof cost === "number"
+            ? cost
+            : cost &&
+                typeof cost === "object" &&
+                typeof (cost as { total?: unknown }).total === "number"
+              ? (cost as { total: number }).total
+              : 0;
+        if (Number.isFinite(total)) {
+          persistedCost += total;
+          foundCost = true;
+        }
+      }
+      if (foundCost && persistedCost > 0 && Math.abs(run.usage.cost - persistedCost) > 1e-12)
+        run.usage.cost = persistedCost;
+    } catch {
+      // A missing or partially written child transcript must not block parent restore.
+    }
+  }
+
   private async restore(parent: string): Promise<void> {
     if (this.store.all().length) return;
     try {
@@ -1884,6 +2001,7 @@ export class SubagentManager {
             });
           }
         }
+        await this.recoverPersistedCost(run);
         this.store.add(run);
       }
       for (const mission of parsed.missions ?? []) {

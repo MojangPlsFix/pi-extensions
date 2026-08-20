@@ -41,7 +41,9 @@ Other custom entries are ignored. Malformed, empty, missing, and unreadable file
 report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
 `PI_CODING_AGENT_SESSION_DIR`; hidden Subagent roots and the legacy nested Subagent root are
 scanned once, so Subagent usage is included in the overall totals exactly once and shown separately
-as a subset.
+as a subset. Parent Subagent control-tool results can contain a nested usage attachment for Pi's
+live footer; Stats recognizes that marker and skips the attachment because the child session is the
+canonical usage source.
 
 When the active model is `github-copilot`, Stats makes one best-effort daily Copilot quota
 checkpoint in the shared store at:

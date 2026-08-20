@@ -153,6 +153,37 @@ describe("NativeBackend", () => {
     fakes.resolvePrompt();
   });
 
+  it("forwards the total from Pi's nested usage cost object", async () => {
+    const events: NativeRunEvent[] = [];
+    const backend = new NativeBackend();
+    await backend.start(spec(), (event) => events.push(event));
+    for (const listener of fakes.listeners) {
+      listener({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          usage: {
+            input: 100,
+            output: 25,
+            cacheRead: 10,
+            cacheWrite: 5,
+            cost: { input: 0.01, output: 0.02, cacheRead: 0.001, cacheWrite: 0.002, total: 0.033 },
+          },
+        },
+      });
+    }
+    expect(events).toContainEqual({
+      type: "usage",
+      input: 100,
+      output: 25,
+      cacheRead: 10,
+      cacheWrite: 5,
+      cost: 0.033,
+    });
+    await backend.park("run-1");
+    fakes.resolvePrompt();
+  });
+
   it("activates manager-owned custom tools without exposing unselected built-ins", async () => {
     const backend = new NativeBackend();
     await backend.start(

@@ -302,12 +302,20 @@ export class AgentsViewer {
   }
 
   render(width: number): string[] {
-    const safe = (line: string) => truncateToWidth(line, Math.max(1, width), "");
-    const border = "─".repeat(Math.max(1, width));
+    const innerWidth = Math.max(1, width - 2);
+    const border = (text: string): string => this.theme.fg("borderMuted", text);
+    const frame = (line: string): string => {
+      const truncated = truncateToWidth(line, innerWidth, "");
+      return (
+        border("│") +
+        truncated +
+        " ".repeat(Math.max(0, innerWidth - visibleWidth(truncated))) +
+        border("│")
+      );
+    };
     const itemCount = this.itemsLength();
     const body = [
-      this.theme.fg("border", border),
-      this.theme.fg("accent", " Agent Hub"),
+      this.theme.fg("accent", this.theme.bold(" Agent Hub ")),
       this.tabs(),
       this.theme.fg(
         "dim",
@@ -332,8 +340,10 @@ export class AgentsViewer {
       "? help",
       "esc close",
     ].join(" · ");
-    body.push("", this.theme.fg("dim", footer), this.theme.fg("borderMuted", border));
-    return body.map(safe);
+    body.push("", this.theme.fg("dim", footer));
+    const top = border(`┌${"─".repeat(innerWidth)}┐`);
+    const bottom = border(`└${"─".repeat(innerWidth)}┘`);
+    return [top, ...body.map(frame), bottom].map((line) => truncateToWidth(line, width, ""));
   }
 
   private renderRuns(body: string[]): void {

@@ -41,9 +41,9 @@ async function openHub(
         overlay: true,
         overlayOptions: {
           anchor: "center",
-          width: "94%",
-          maxHeight: "88%",
-          minWidth: 64,
+          width: "92%",
+          maxHeight: "84%",
+          minWidth: 60,
           margin: 1,
         },
       },

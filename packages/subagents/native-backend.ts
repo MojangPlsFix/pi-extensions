@@ -94,13 +94,23 @@ function usageFrom(message: unknown): NativeRunEvent | undefined {
   if (!usage) return undefined;
   const number = (key: string): number =>
     typeof usage[key] === "number" && Number.isFinite(usage[key]) ? (usage[key] as number) : 0;
+  const cost = usage.cost;
+  const totalCost =
+    typeof cost === "number" && Number.isFinite(cost)
+      ? cost
+      : cost &&
+          typeof cost === "object" &&
+          typeof (cost as { total?: unknown }).total === "number" &&
+          Number.isFinite((cost as { total: number }).total)
+        ? (cost as { total: number }).total
+        : 0;
   return {
     type: "usage",
     input: number("input"),
     output: number("output"),
     cacheRead: number("cacheRead"),
     cacheWrite: number("cacheWrite"),
-    cost: number("cost"),
+    cost: totalCost,
   };
 }
 

@@ -42,9 +42,14 @@ A profile class sets an authority ceiling. A read, review, advisory, or orchestr
 | --- | --- |
 | `subagent_dispatch` | Start one batch of independent tasks with explicit ownership. |
 | `subagent_status` | Show profiles, task claims, capacity, requests, and diagnostics. |
-| `subagent_collect` | Read reports or wait for selected runs. |
+| `subagent_respond` | Resolve a pending supervisor request so a blocked child can continue. |
+| `subagent_collect` | Read reports or wait for selected runs; returns early when a child needs supervisor input. |
 | `subagent_steer` | Guide an active run or revive a parked native or RPC run. |
 | `subagent_stop` | Stop runs and their descendants. |
+
+Child model usage is retained per run. `subagent_collect`, `subagent_stop`, and steering a persisted run attach newly observed child usage to the parent tool result, so Pi's normal session cost display includes it once and keeps it after reload. `/stats` scans the child sessions separately and avoids counting those parent attachments twice.
+
+The parent agent handles pending supervisor requests with `subagent_status` followed by `subagent_respond`. `subagent_collect` returns as soon as a selected child becomes blocked, so the parent can resolve the request instead of waiting in a deadlock. `/agents` remains available as a manual UI fallback.
 
 Batch all ready independent tasks in one `subagent_dispatch` call. Give each task a unique key, owned scope, and deliverable.
 
@@ -353,7 +358,7 @@ The Agent Hub remains the lifecycle authority when Herdr is absent or a pane clo
 
 ## Plan Mode
 
-Plan Mode can use `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, and `subagent_stop`.
+Plan Mode can use `subagent_dispatch`, `subagent_status`, `subagent_respond`, `subagent_collect`, `subagent_steer`, and `subagent_stop`.
 
 The manager rejects write dispatch and write-session revival while Plan Mode is active. Plan Mode uses the hidden `plan-reviewer` profile for plan review.
 

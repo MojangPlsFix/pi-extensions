@@ -117,6 +117,8 @@ export type RunRecord = {
   report: string;
   error?: string;
   usage: Usage;
+  /** Child usage already attached to a parent Pi tool result. */
+  accountedUsage?: Usage;
   turns: number;
   activity: RunActivity[];
   currentTool?: string;
@@ -133,7 +135,7 @@ export type RunRecord = {
 
 export type RunSnapshot = Omit<
   RunRecord,
-  "profile" | "profileSnapshot" | "candidate" | "capabilityPolicy"
+  "profile" | "profileSnapshot" | "candidate" | "capabilityPolicy" | "accountedUsage"
 > & {
   name: string;
   profileClass: ProfileClass;
