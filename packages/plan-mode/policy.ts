@@ -15,8 +15,6 @@ export const ALWAYS_DISABLED_TOOLS = new Set([
   "ctx_batch_execute",
   "ctx_upgrade",
   "ctx_purge",
-  "subagent_close",
-  "subagent_interrupt",
 ]);
 
 let configuredTools = new Set<string>();
@@ -40,11 +38,11 @@ const readOnlyTools = new Set([
   "ctx_stats",
   "ctx_doctor",
   "search",
-  "subagent_spawn",
-  "subagent_list",
-  "subagent_read",
-  "subagent_wait",
-  "subagent_send",
+  "subagent_dispatch",
+  "subagent_status",
+  "subagent_collect",
+  "subagent_steer",
+  "subagent_stop",
   "repository_reference",
 ]);
 

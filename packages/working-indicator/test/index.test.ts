@@ -1,47 +1,42 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
-import { events, type SubagentsStatusEvent } from "../../../shared/events.js";
-import { type AgentSnapshot, emptyUsage } from "../../subagents/types.js";
+import {
+  events,
+  type SubagentActivitySnapshot,
+  type SubagentsStatusEvent,
+} from "../../../shared/events.js";
 import workingIndicatorExtension, { SubagentActivityComponent } from "../index.js";
 
 type Handler = (...args: any[]) => any;
 
 type Harness = ReturnType<typeof harness>;
 
-function snapshot(overrides: Partial<AgentSnapshot> = {}): AgentSnapshot {
+function snapshot(overrides: Partial<SubagentActivitySnapshot> = {}): SubagentActivitySnapshot {
   return {
-    id: "explorer-1",
-    name: "explorer",
-    mode: "explorer",
+    id: "scout-1",
+    name: "scout",
+    profileClass: "read",
     status: "running",
-    backend: "rpc",
-    task: "Trace the authentication request flow",
-    taskHistory: ["Trace the authentication request flow"],
-    startedAt: "2026-01-01T00:00:00.000Z",
-    elapsedMs: 12_000,
-    sessionDir: "/tmp/session",
-    requestedModel: "openai-codex/gpt-5.6-luna",
-    requestedThinking: "low",
-    latestActivity: "reading manager.ts",
-    activity: [],
-    report: "",
-    stderr: "",
-    usage: emptyUsage(),
+    task: "Follow-up read-only inspection",
+    elapsedMs: 3_631_000,
+    effectiveModel: "openai-codex/gpt-5.6-luna",
+    effectiveThinking: "low",
+    latestActivity: "grep finished",
     ...overrides,
   };
 }
 
-function status(agents: AgentSnapshot[]): SubagentsStatusEvent {
-  const running = agents.filter((agent) => agent.status === "running");
+function status(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
+  const active = agents.filter((agent) =>
+    ["queued", "starting", "running", "blocked"].includes(agent.status),
+  );
   return {
-    active: running.length,
-    ready: agents.filter((agent) => agent.status === "completed").length,
-    open: agents.filter((agent) => ["running", "completed"].includes(agent.status)).length,
-    explorers: running.filter((agent) => agent.mode === "explorer").length,
-    workers: running.filter((agent) => agent.mode === "worker").length,
+    active: active.length,
+    blocked: agents.filter((agent) => agent.status === "blocked").length,
+    parked: agents.filter((agent) => agent.status === "parked").length,
     failed: agents.filter((agent) => agent.status === "failed").length,
-    interrupted: agents.filter((agent) => agent.status === "interrupted").length,
-    closed: agents.filter((agent) => agent.status === "closed").length,
+    writers: active.filter((agent) => agent.profileClass === "write").length,
+    total: agents.length,
     agents,
   };
 }
@@ -117,7 +112,7 @@ async function emit(subject: Harness, name: string): Promise<void> {
 }
 
 describe("working indicator lifecycle", () => {
-  it("restores Pi's default spinner configuration on session start", async () => {
+  it("uses Pi's normal spinner and Hackeln message on session start", async () => {
     const subject = harness();
 
     await emit(subject, "session_start");
@@ -125,26 +120,57 @@ describe("working indicator lifecycle", () => {
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
     expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackeln...");
     expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
+    expect(subject.widget()).toBeInstanceOf(SubagentActivityComponent);
   });
 
-  it("hides the native row while rendering task-first subagent activity", async () => {
+  it("shows compact Hackler activity without a triangle while native spinner stays active", async () => {
     const subject = harness();
     await emit(subject, "session_start");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
 
-    expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(false);
-    expect(subject.widget()).toBeInstanceOf(SubagentActivityComponent);
-    expect(subject.widget()?.render(120).join("\n")).toContain(
-      "Trace the authentication request flow",
-    );
+    expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler hackeln...");
+    const output = subject.widget()?.render(120).join("\n") ?? "";
+    expect(output).toContain("Hackler · 1 active");
+    expect(output).toContain("└─ Follow-up read-only inspection");
+    expect(output).toContain("read · running · luna · 60:31 · grep finished");
+    expect(output).not.toMatch(/[△▵▴▲]/u);
+  });
+
+  it("shows a waiting message for blocked Hackler runs and restores the idle message", async () => {
+    const subject = harness();
+    await emit(subject, "session_start");
+
+    subject.emitExtensionEvent(events.subagentsStatus, status([snapshot({ status: "blocked" })]));
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler warten auf Polier....");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    await emit(subject, "session_shutdown");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackeln...");
   });
 
-  it("restores native visibility and disposes the activity widget on shutdown", async () => {
+  it("strips terminal controls from child activity", async () => {
+    const subject = harness();
+    await emit(subject, "session_start");
+    subject.emitExtensionEvent(
+      events.subagentsStatus,
+      status([
+        snapshot({
+          task: "Inspect \u001b]0;spoofed\u0007 auth",
+          latestActivity: "reading \u001b[31msecret\u001b[0m",
+        }),
+      ]),
+    );
+
+    const output = subject.widget()?.render(120).join("\n") ?? "";
+    expect(output).toContain("Inspect auth");
+    expect(output).toContain("reading secret");
+    expect(output).not.toContain("spoofed");
+    expect(output).not.toContain("\u001b");
+  });
+
+  it("restores the normal spinner configuration on shutdown", async () => {
     vi.useFakeTimers();
     try {
       const subject = harness();
@@ -153,17 +179,16 @@ describe("working indicator lifecycle", () => {
       const rendersBeforeShutdown = subject.tui.requestRender.mock.calls.length;
 
       await emit(subject, "session_shutdown");
-      vi.advanceTimersByTime(1_000);
+      vi.advanceTimersByTime(1_500);
 
-      expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
       expect(subject.ui.setWidget).toHaveBeenLastCalledWith(
         "pi-extensions:subagent-working",
         undefined,
       );
-      expect(subject.tui.requestRender).toHaveBeenCalledTimes(rendersBeforeShutdown);
-
-      subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
       expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
+      expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
+      expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
+      expect(subject.tui.requestRender).toHaveBeenCalledTimes(rendersBeforeShutdown);
     } finally {
       vi.useRealTimers();
     }

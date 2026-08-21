@@ -86,10 +86,69 @@ describe("stats periods and historical records", () => {
     // The zero-usage tool result is not a model response.
     expect(report.totals.responses).toBe(3);
     expect(report.models.get("github-copilot/gpt-5.4-nano")?.input).toBe(7);
-    expect(buildReport(report)).toContain("SUBAGENTS (included above)");
+    expect(buildReport(report)).toContain("HACKLER (included above)");
   });
 
-  it("scans normal, hidden, and legacy Subagent roots without double-counting nested legacy files", async () => {
+  it("does not double-count usage attached to a parent Hackler tool result", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-extensions-stats-attached-"));
+    directories.push(directory);
+    await mkdir(join(directory, "subagents"));
+    const timestamp = "2026-03-03T10:00:00.000Z";
+    await writeFile(
+      join(directory, "main.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "main", cwd: "/project" }),
+        JSON.stringify({
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            provider: "github-copilot",
+            model: "gpt-5.6-luna",
+            usage: { input: 10, output: 5, cost: { total: 0.01 } },
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          timestamp,
+          message: {
+            role: "toolResult",
+            toolName: "subagent_collect",
+            details: { subagentUsageAttached: true },
+            usage: { input: 100, output: 20, cost: { total: 0.2 } },
+          },
+        }),
+      ].join("\n"),
+    );
+    await writeFile(
+      join(directory, "subagents", "child.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "child", cwd: "/project" }),
+        JSON.stringify({
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            provider: "github-copilot",
+            model: "gpt-5.3-codex",
+            usage: { input: 3, output: 2, cost: { total: 0.03 } },
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const report = await collectStats({
+      mode: "week",
+      now: new Date("2026-03-04"),
+      directory,
+    });
+    expect(report.totals.input).toBe(13);
+    expect(report.totals.cost).toBeCloseTo(0.04);
+    expect(report.subagents.input).toBe(3);
+    expect(report.subagents.cost).toBeCloseTo(0.03);
+  });
+
+  it("scans normal, hidden, and legacy Hackler roots without double-counting nested legacy files", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-extensions-stats-roots-"));
     directories.push(root);
     const normal = join(root, "sessions");
@@ -188,7 +247,7 @@ describe("Bitbucket report layout", () => {
     });
     const output = buildReport(report);
     expect(output).toContain("SUMMARY");
-    expect(output).toContain("SUBAGENTS (included above)");
+    expect(output).toContain("HACKLER (included above)");
     expect(output).toContain("DAILY");
     expect(output).toContain("Start Credits");
     expect(output).toContain("81,055");

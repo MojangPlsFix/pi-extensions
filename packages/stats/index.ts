@@ -86,7 +86,7 @@ export function registerStats(pi: ExtensionAPI, options: StatsExtensionOptions =
   const fetchQuota = options.fetchQuota;
   pi.registerCommand("stats", {
     description:
-      "Show Pi usage by period, model, project, and Subagent subset; use arrows to browse history.",
+      "Show Pi usage by period, model, project, and Hackler subset; use arrows to browse history.",
     getArgumentCompletions: (prefix) =>
       ["all", "workweek", "week", "month", "previous", "-1"]
         .filter((value) => value.startsWith(prefix.trim().toLowerCase()))

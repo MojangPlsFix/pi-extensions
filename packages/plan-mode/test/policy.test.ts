@@ -42,10 +42,11 @@ describe("Plan Mode policy", () => {
       "ctx_doctor",
       "ctx_index",
       "ctx_fetch_and_index",
-      "subagent_spawn",
-      "subagent_list",
-      "subagent_read",
-      "subagent_wait",
+      "subagent_dispatch",
+      "subagent_status",
+      "subagent_collect",
+      "subagent_steer",
+      "subagent_stop",
       "repository_reference",
     ])
       expect(planModeToolBlockReason(tool, {}), tool).toBeUndefined();
@@ -143,8 +144,6 @@ describe("Plan Mode policy", () => {
       "ctx_batch_execute",
       "ctx_upgrade",
       "ctx_purge",
-      "subagent_close",
-      "subagent_interrupt",
     ])
       expect(planModeToolBlockReason(tool, {}), tool).toContain("disabled");
     expect(planModeToolBlockReason("todo", { action: "create" })).toContain("blocked");

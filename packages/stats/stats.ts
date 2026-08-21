@@ -176,6 +176,14 @@ function hasUsage(source: UsageRecord): boolean {
   );
 }
 
+function isAttachedSubagentUsage(record: RecordValue): boolean {
+  return (
+    record.role === "toolResult" &&
+    isRecord(record.details) &&
+    record.details.subagentUsageAttached === true
+  );
+}
+
 function add(target: UsageTotals, source: UsageRecord, session: string): void {
   target.input += source.input;
   target.output += source.output;
@@ -349,6 +357,11 @@ async function collectFile(
       currentModel = summary.model;
       timestampValue = summary.timestamp;
     }
+
+    // Subagents attach a nested usage summary to the parent control-tool result
+    // so Pi's parent footer can display child cost. The child JSONL sessions are
+    // scanned separately below, so do not count this marker a second time.
+    if (entry.type === "message" && isAttachedSubagentUsage(record)) continue;
 
     const timestamp = parsedDate(timestampValue ?? record.timestamp);
     if (!timestamp || timestamp < range.start || timestamp >= range.end) continue;

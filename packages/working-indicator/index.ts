@@ -3,18 +3,16 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { events, type SubagentsStatusEvent } from "../../shared/events.js";
 import { activityViewLines } from "../subagents/renderers.js";
 
-const frames = ["△", "▵", "▴", "▲", "▴", "▵"];
 const widgetKey = "pi-extensions:subagent-working";
+const activeStatuses = new Set<string>(["queued", "starting", "running", "blocked"]);
 
 const emptyStatus = (): SubagentsStatusEvent => ({
   active: 0,
-  ready: 0,
-  open: 0,
-  explorers: 0,
-  workers: 0,
+  blocked: 0,
+  parked: 0,
   failed: 0,
-  interrupted: 0,
-  closed: 0,
+  writers: 0,
+  total: 0,
   agents: [],
 });
 
@@ -24,21 +22,24 @@ function normalized(value: unknown): SubagentsStatusEvent {
     typeof entry === "number" && Number.isFinite(entry) ? Math.max(0, Math.floor(entry)) : 0;
   return {
     active: count(candidate.active),
-    ready: count(candidate.ready),
-    open: count(candidate.open),
-    explorers: count(candidate.explorers),
-    workers: count(candidate.workers),
+    blocked: count(candidate.blocked),
+    parked: count(candidate.parked),
     failed: count(candidate.failed),
-    interrupted: count(candidate.interrupted),
-    closed: count(candidate.closed),
+    writers: count(candidate.writers),
+    total: count(candidate.total),
     agents: Array.isArray(candidate.agents) ? candidate.agents.slice(0, 4) : [],
   };
+}
+
+function workingMessage(status: SubagentsStatusEvent): string {
+  if (status.active === 0) return "Hackeln...";
+  if (status.blocked > 0) return "Hackler warten auf Polier....";
+  return "Hackler hackeln...";
 }
 
 /** Disposable, Pi-themed owner of the always-visible inline Subagent activity. */
 export class SubagentActivityComponent {
   private status = emptyStatus();
-  private frame = 0;
   private updatedAt = Date.now();
   private timer: ReturnType<typeof setInterval> | undefined;
   private disposed = false;
@@ -54,13 +55,12 @@ export class SubagentActivityComponent {
     this.updatedAt = Date.now();
     if (status.active > 0 && !this.timer) {
       this.timer = setInterval(() => {
-        this.frame = (this.frame + 1) % frames.length;
         this.tui.requestRender();
-      }, 120);
+      }, 1_000);
+      this.timer.unref?.();
     } else if (status.active === 0 && this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
-      this.frame = 0;
     }
     this.tui.requestRender();
   }
@@ -72,18 +72,17 @@ export class SubagentActivityComponent {
         ...this.status,
         agents: this.status.agents.map((agent) => ({
           ...agent,
-          elapsedMs:
-            agent.status === "running" ? agent.elapsedMs + elapsedSinceUpdate : agent.elapsedMs,
+          elapsedMs: activeStatuses.has(agent.status)
+            ? agent.elapsedMs + elapsedSinceUpdate
+            : agent.elapsedMs,
         })),
       },
       this.theme,
       width,
-      frames[this.frame] ?? "△",
     );
   }
 
   invalidate(): void {
-    // Content is rebuilt from current theme tokens on every render.
     this.tui.requestRender();
   }
 
@@ -95,6 +94,7 @@ export class SubagentActivityComponent {
   }
 }
 
+/** Keeps Pi's normal working row informative while native Subagents run in parallel. */
 export default function workingIndicatorExtension(pi: ExtensionAPI): void {
   let status = emptyStatus();
   let ctx: ExtensionContext | undefined;
@@ -102,17 +102,16 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
 
   const subscribed = pi.events.on(events.subagentsStatus, (data: unknown) => {
     status = normalized(data);
-    ctx?.ui.setWorkingVisible(status.active === 0);
+    ctx?.ui.setWorkingVisible(true);
+    ctx?.ui.setWorkingMessage(workingMessage(status));
     component?.update(status);
   });
   const unsubscribeStatus = typeof subscribed === "function" ? subscribed : () => {};
 
   pi.on("session_start", (_event, extensionContext) => {
     ctx = extensionContext;
-    // Start each session with Pi's native row visible; active subagents hide it below.
     ctx.ui.setWorkingVisible(true);
-    ctx.ui.setWorkingMessage("Hackeln...");
-    // Native Pi owns parent-turn animation and accent styling.
+    ctx.ui.setWorkingMessage(workingMessage(status));
     ctx.ui.setWorkingIndicator();
     ctx.ui.setWidget(
       widgetKey,
@@ -129,6 +128,7 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
     unsubscribeStatus();
     component?.dispose();
     component = undefined;
+    status = emptyStatus();
     ctx?.ui.setWidget(widgetKey, undefined);
     ctx?.ui.setWorkingVisible(true);
     ctx?.ui.setWorkingMessage();

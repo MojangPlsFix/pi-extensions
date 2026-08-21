@@ -170,7 +170,7 @@ export function buildReport(report: StatsReport, options: ReportOptions = {}): s
       ? [`    other       ${formatCompactTokens(totals.uncategorized)}`]
       : []),
     "",
-    "SUBAGENTS (included above)",
+    "HACKLER (included above)",
     `  Cost          ${formatMoney(report.subagents.cost)}`,
     `  Responses     ${formatTokens(report.subagents.responses)}`,
     `  Sessions      ${formatTokens(report.subagents.sessions.size)}`,

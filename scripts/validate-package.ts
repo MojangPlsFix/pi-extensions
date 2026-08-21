@@ -18,6 +18,7 @@ const expectedEntrypoints = [
   "packages/web-search/index.ts",
   "packages/context-mode/index.ts",
   "packages/usage-meter/index.ts",
+  "packages/session-summary/index.ts",
 ];
 
 const expectedSkills = [

@@ -42,8 +42,6 @@ describe("Plan Mode configuration", () => {
           "ctx_batch_execute",
           "ctx_purge",
           "ctx_upgrade",
-          "subagent_close",
-          "subagent_interrupt",
         ],
       }),
       "utf8",
@@ -59,11 +57,9 @@ describe("Plan Mode configuration", () => {
       "ctx_batch_execute",
       "ctx_purge",
       "ctx_upgrade",
-      "subagent_close",
-      "subagent_interrupt",
     ])
       expect(loaded.readOnlyTools).not.toContain(tool);
-    expect(loaded.warnings).toHaveLength(7);
+    expect(loaded.warnings).toHaveLength(5);
     delete process.env.PI_CODING_AGENT_DIR;
     await rm(root, { recursive: true, force: true });
   });
