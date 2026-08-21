@@ -45,6 +45,14 @@ Credits: balance 25.00
 
 Background refresh failures stay silent and clear the status line.
 
+## Local Session Summary accounting
+
+The footer includes local Session Summary usage. Automatic summaries attach usage to a parent assistant message, so the footer skips the matching custom entry.
+
+Manual and backfill summaries cannot attach to a parent message. The footer reads their custom entries and includes their tokens and cost.
+
+The reader supports new per-attempt metadata and historical combined usage. It never adds attached usage twice.
+
 ## Authentication and endpoints
 
 Pi reads authentication only when a supported provider is active. Copilot uses Pi's `auth.json` credentials and an optional `gh auth token`. Codex uses refreshed OAuth credentials from Pi's model registry. It extracts the ChatGPT account ID from the access token and requests:

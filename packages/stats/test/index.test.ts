@@ -89,6 +89,110 @@ describe("stats periods and historical records", () => {
     expect(buildReport(report)).toContain("HACKLER (included above)");
   });
 
+  it("attributes attached and unattached summary attempts without duplicating totals", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "pi-extensions-stats-summaries-"));
+    directories.push(directory);
+    const timestamp = "2026-03-03T10:00:00.000Z";
+    const messageTimestamp = new Date(timestamp).getTime();
+    const usage = (input: number, output: number, cost: number) => ({
+      input,
+      output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: input + output,
+      cost: { input: 0, output: cost, cacheRead: 0, cacheWrite: 0, total: cost },
+    });
+    const sparkUsage = usage(7, 1, 0.02);
+    const lunaUsage = usage(3, 2, 0.03);
+    const combinedUsage = usage(10, 3, 0.05);
+    await writeFile(
+      join(directory, "main.jsonl"),
+      [
+        JSON.stringify({ type: "session", id: "main", cwd: "/project" }),
+        // Session Summary appends its custom entry from message_end before Pi
+        // persists the replacement parent assistant message.
+        JSON.stringify({
+          type: "custom",
+          customType: "session-summary",
+          timestamp,
+          data: {
+            name: "Fallback title",
+            messageCount: 2,
+            provider: "openai-codex",
+            model: "gpt-5.6-luna",
+            attempts: [
+              {
+                provider: "openai-codex",
+                model: "gpt-5.3-codex-spark",
+                outcome: "empty-output",
+                usage: sparkUsage,
+              },
+              {
+                provider: "openai-codex",
+                model: "gpt-5.6-luna",
+                outcome: "success",
+                usage: lunaUsage,
+              },
+            ],
+            usage: combinedUsage,
+            usageAttached: true,
+            usageAttachment: {
+              messageTimestamp,
+              provider: "main-provider",
+              model: "main-model",
+            },
+          },
+        }),
+        JSON.stringify({
+          type: "message",
+          timestamp,
+          message: {
+            role: "assistant",
+            provider: "main-provider",
+            model: "main-model",
+            timestamp: messageTimestamp,
+            usage: usage(110, 13, 0.15),
+          },
+        }),
+        JSON.stringify({
+          type: "custom",
+          customType: "session-summary",
+          timestamp,
+          data: {
+            name: "Manual title",
+            messageCount: 2,
+            provider: "anthropic",
+            model: "cheap-summary",
+            attempts: [
+              {
+                provider: "anthropic",
+                model: "cheap-summary",
+                outcome: "success",
+                usage: usage(4, 1, 0.01),
+              },
+            ],
+            usage: usage(4, 1, 0.01),
+            usageAttached: false,
+          },
+        }),
+      ].join("\n"),
+    );
+
+    const report = await collectStats({ mode: "week", now: new Date("2026-03-04"), directory });
+    expect(report.totals.input).toBe(114);
+    expect(report.totals.output).toBe(14);
+    expect(report.totals.cost).toBeCloseTo(0.16);
+    expect(report.totals.responses).toBe(4);
+    expect(report.models.get("main-provider/main-model")?.input).toBe(100);
+    expect(report.models.get("main-provider/main-model")?.cost).toBeCloseTo(0.1);
+    expect(report.models.get("openai-codex/gpt-5.3-codex-spark")?.input).toBe(7);
+    expect(report.models.get("openai-codex/gpt-5.6-luna")?.input).toBe(3);
+    expect(report.models.get("anthropic/cheap-summary")?.input).toBe(4);
+    expect([...report.models.values()].reduce((total, bucket) => total + bucket.input, 0)).toBe(
+      report.totals.input,
+    );
+  });
+
   it("does not double-count usage attached to a parent Hackler tool result", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-extensions-stats-attached-"));
     directories.push(directory);

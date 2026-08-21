@@ -5,6 +5,7 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 ## Provider-aware behavior
 
 - Usage Meter runs with the active `github-copilot` or `openai-codex` provider.
+- Session Summary uses the active provider. Copilot uses Luna. Codex tries Spark before Luna. Other providers use their active model by default.
 - The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
 - Hackler resolves model policy when it starts. Resolution checks an explicit review override, `models.overrides`, profile frontmatter, `models.default`, and the parent snapshot. `inherit` selects the parent value.
 
@@ -24,10 +25,38 @@ The local `copilot` CLI and `copilot login` are required only when the Search in
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
 - `PI_COPILOT_SEARCH_TIMEOUT_MS`: Copilot CLI inactivity limit in milliseconds. Copilot output resets the timer. The default is 600,000 (10 minutes).
-- `PI_SESSION_SUMMARY=off`: disables automatic and manual Session Summary title generation.
+- `PI_SESSION_SUMMARY=off`: disables automatic, manual, and backfill Session Summary title generation.
 - `PI_CODING_AGENT_DIR`: Pi's agent directory. User Hackler profiles and configuration live below this directory. New Hackler transcripts use `<agent-dir>/subagents/sessions`.
 - `PI_CODING_AGENT_SESSION_DIR`: the normal Pi session location used by Stats. Stats also scans legacy session trees.
 - `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`: permit optional display-only Hackler transcript panes. Herdr does not run child agents.
+
+## Session Summary profiles
+
+Copilot and Codex work without Session Summary configuration. The built-in profiles are:
+
+```text
+github-copilot: gpt-5.6-luna
+openai-codex: gpt-5.3-codex-spark, gpt-5.6-luna
+```
+
+Spark uses separate five-hour and weekly limits during its research preview. Luna uses standard Codex/Work allowance when Codex falls back.
+
+Other providers use the active model unless a profile replaces it. Session Summary never routes a request to a different provider.
+
+Global profiles use `<agent-dir>/pi-session-summary.json`. Trusted projects can use `<project>/.pi/pi-session-summary.json`.
+
+```json
+{
+  "profiles": {
+    "anthropic": ["claude-haiku-4-5"],
+    "my-provider": ["cheap-summary-model"]
+  }
+}
+```
+
+Built-in profiles have the lowest precedence. Global entries replace built-in entries. Trusted-project entries replace global entries.
+
+An empty provider array disables summaries for that provider. Pi ignores missing files, invalid JSON, and malformed profile entries.
 
 ## Optional capabilities
 

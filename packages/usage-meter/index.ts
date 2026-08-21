@@ -15,6 +15,7 @@ import type { CopilotQuota, UsageMeterOptions, UsageProvider, UsageSnapshot } fr
 
 const defaultCopilotRefreshMs = 30_000;
 const defaultCodexRefreshMs = 60_000;
+const sessionSummaryUsageEvent = "pi-tools:session-summary-usage";
 export const usageStatusKey = "pi-extensions:usage-meter";
 
 export type { CopilotCreditSnapshot } from "../../shared/copilot-snapshots.js";
@@ -123,18 +124,8 @@ function renderUsageFooter(
   let cacheWrite = 0;
   let cost = 0;
   for (const entry of activeContext.sessionManager.getEntries()) {
-    const record =
-      entry.type === "message"
-        ? (entry.message as unknown as Record<string, unknown>)
-        : (entry as unknown as Record<string, unknown>);
-    if (
-      entry.type !== "message" &&
-      entry.type !== "compaction" &&
-      entry.type !== "branch_summary" &&
-      !(entry.type === "custom" && entry.customType === "session-summary")
-    )
-      continue;
-    const usage = usageFromRecord(record);
+    const usage = usageForSessionEntry(entry as unknown as Record<string, unknown>);
+    if (!usage) continue;
     input += usage.input;
     output += usage.output;
     cacheRead += usage.cacheRead;
@@ -234,6 +225,7 @@ export function registerUsageMeter(pi: ExtensionAPI, options: UsageMeterOptions 
   const inFlight = new Map<UsageProvider, Promise<UsageSnapshot | undefined>>();
   const lastRefresh = new Map<UsageProvider, number>();
   let footerRequestRender: (() => void) | undefined;
+  pi.events.on(sessionSummaryUsageEvent, () => footerRequestRender?.());
 
   const intervalFor = (value: UsageProvider): number =>
     value === "github-copilot"
@@ -411,17 +403,61 @@ function rightAlign(text: string, width: number, ellipsis: string): string {
   return `${" ".repeat(Math.max(0, width - visibleWidth(truncated)))}${truncated}`;
 }
 
-function usageFromRecord(record: Record<string, unknown>): {
+type LocalUsage = {
   input: number;
   output: number;
   cacheRead: number;
   cacheWrite: number;
   cost: number;
-} {
-  const usage = record.usage;
-  if (!usage || typeof usage !== "object" || Array.isArray(usage)) {
-    return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+};
+
+function emptyLocalUsage(): LocalUsage {
+  return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0 };
+}
+
+function addLocalUsage(total: LocalUsage, value: LocalUsage): void {
+  total.input += value.input;
+  total.output += value.output;
+  total.cacheRead += value.cacheRead;
+  total.cacheWrite += value.cacheWrite;
+  total.cost += value.cost;
+}
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function usageForSessionEntry(entry: Record<string, unknown>): LocalUsage | undefined {
+  if (entry.type === "message") {
+    const message = record(entry.message);
+    return message ? usageFromRecord(message) : undefined;
   }
+  if (entry.type === "compaction" || entry.type === "branch_summary") {
+    return usageFromRecord(entry);
+  }
+  if (entry.type !== "custom" || entry.customType !== "session-summary") return undefined;
+
+  const data = record(entry.data);
+  if (data?.usageAttached === true || entry.usageAttached === true) return emptyLocalUsage();
+  if (data && Array.isArray(data.attempts)) {
+    const total = emptyLocalUsage();
+    let found = false;
+    for (const attempt of data.attempts) {
+      const attemptRecord = record(attempt);
+      if (!attemptRecord || !record(attemptRecord.usage)) continue;
+      addLocalUsage(total, usageFromRecord(attemptRecord));
+      found = true;
+    }
+    if (found) return total;
+  }
+  return usageFromRecord(data ?? entry);
+}
+
+function usageFromRecord(record: Record<string, unknown>): LocalUsage {
+  const usage = record.usage;
+  if (!usage || typeof usage !== "object" || Array.isArray(usage)) return emptyLocalUsage();
   const value = usage as Record<string, unknown>;
   const number = (candidate: unknown): number =>
     typeof candidate === "number" && Number.isFinite(candidate) ? candidate : 0;

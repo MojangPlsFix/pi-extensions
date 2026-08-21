@@ -26,22 +26,33 @@ function token(accountId = "account-123"): string {
   })}.signature`;
 }
 
-function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>) {
+function harness(
+  fetchQuota: () => Promise<any>,
+  fetchCodex?: () => Promise<any>,
+  entries: unknown[] = [],
+) {
   const handlers = new Map<string, Handler[]>();
   const statuses: Array<[string, string | undefined]> = [];
   const footers: Array<((width: number) => string[]) | undefined> = [];
   const notifications: unknown[][] = [];
+  const sharedHandlers = new Map<string, Handler[]>();
+  const footerRenderRequests = vi.fn();
   const api = {
     on(name: string, handler: Handler) {
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
     registerCommand: vi.fn(),
+    events: {
+      on(name: string, handler: Handler) {
+        sharedHandlers.set(name, [...(sharedHandlers.get(name) ?? []), handler]);
+      },
+    },
   } as any;
   const context = (provider: string) =>
     ({
       model: { provider },
       sessionManager: {
-        getEntries: () => [],
+        getEntries: () => entries,
         getCwd: () => "/home/test/project",
       },
       getContextUsage: () => ({ contextWindow: 128_000, percent: 12.5 }),
@@ -59,7 +70,7 @@ function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>
             return;
           }
           const widget = footer(
-            { requestRender: vi.fn() },
+            { requestRender: footerRenderRequests },
             { fg: (_color: string, value: string) => value },
             {
               getGitBranch: () => "main",
@@ -85,7 +96,19 @@ function harness(fetchQuota: () => Promise<any>, fetchCodex?: () => Promise<any>
     for (const handler of handlers.get(name) ?? []) await handler(event, next);
     for (let index = 0; index < 8; index += 1) await Promise.resolve();
   };
-  return { api, context, emit, statuses, footers, notifications };
+  const emitShared = (name: string) => {
+    for (const handler of sharedHandlers.get(name) ?? []) handler(undefined);
+  };
+  return {
+    api,
+    context,
+    emit,
+    emitShared,
+    statuses,
+    footers,
+    notifications,
+    footerRenderRequests,
+  };
 }
 
 afterEach(() => vi.useRealTimers());
@@ -413,6 +436,78 @@ describe("Usage meter lifecycle", () => {
     await subject.emit("session_shutdown");
     expect(subject.statuses.at(-1)).toEqual(["pi-extensions:usage-meter", undefined]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("counts unattached summary usage and skips usage attached to a parent message", async () => {
+    const usage = (input: number, output: number, cost: number) => ({
+      input,
+      output,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: input + output,
+      cost: { input: 0, output: cost, cacheRead: 0, cacheWrite: 0, total: cost },
+    });
+    const entries = [
+      {
+        type: "message",
+        message: {
+          role: "assistant",
+          provider: "github-copilot",
+          model: "main",
+          usage: usage(110, 13, 0.15),
+        },
+      },
+      {
+        type: "custom",
+        customType: "session-summary",
+        data: {
+          usage: usage(10, 3, 0.05),
+          usageAttached: true,
+          attempts: [
+            {
+              provider: "openai-codex",
+              model: "gpt-5.3-codex-spark",
+              usage: usage(7, 1, 0.02),
+            },
+            {
+              provider: "openai-codex",
+              model: "gpt-5.6-luna",
+              usage: usage(3, 2, 0.03),
+            },
+          ],
+        },
+      },
+      {
+        type: "custom",
+        customType: "session-summary",
+        data: {
+          usage: usage(4, 1, 0.01),
+          usageAttached: false,
+          attempts: [{ provider: "anthropic", model: "cheap", usage: usage(4, 1, 0.01) }],
+        },
+      },
+      {
+        type: "custom",
+        customType: "session-summary",
+        data: { usage: usage(2, 0, 0.02), usageAttached: false },
+      },
+    ];
+    const subject = harness(
+      async () => ({ remaining: 4, unlimited: false, unit: "ai_credits" }),
+      undefined,
+      entries,
+    );
+    const copilot = subject.context("github-copilot");
+    await subject.emit("session_start", copilot);
+    const footer = subject.footers.at(-1)?.(100).join("\n") ?? "";
+    expect(footer).toContain("↑116");
+    expect(footer).toContain("↓14");
+    expect(footer).toContain("$0.180");
+    expect(footer).not.toContain("↑126");
+    const renderCount = subject.footerRenderRequests.mock.calls.length;
+    subject.emitShared("pi-tools:session-summary-usage");
+    expect(subject.footerRenderRequests).toHaveBeenCalledTimes(renderCount + 1);
+    await subject.emit("session_shutdown");
   });
 
   it("renders Copilot and Codex usage as right-aligned footer rows", async () => {

@@ -34,11 +34,14 @@ the report as a widget fallback.
 
 ## Accounting and optional Copilot history
 
-Stats reads usage recorded by Pi in assistant messages, tool results, compaction entries, branch
-summaries, and compatible historical `session-summary` custom entries. A `session-summary` with
-`data.usageAttached: true` is skipped because its usage is already attached to a provider message.
-Other custom entries are ignored. Malformed, empty, missing, and unreadable files do not prevent a
-report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
+Stats reads usage from assistant messages, tool results, compaction entries, branch summaries, and
+compatible `session-summary` custom entries. New summary entries store each attempted provider model.
+Stats attributes returned usage to those models, including failed attempts that returned usage.
+Automatic summary usage is already present in its parent assistant message. Attachment metadata lets
+Stats reassign that usage without adding its tokens or cost again. Manual and backfill summary usage
+stays in the custom entry. Historical attached entries remain skipped, and historical unattached
+entries remain supported. Other custom entries are ignored. Malformed, empty, missing, and unreadable
+files do not prevent a report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
 `PI_CODING_AGENT_SESSION_DIR`; hidden Hackler roots and the legacy nested Hackler root are
 scanned once, so Hackler usage is included in the overall totals exactly once and shown separately
 as a subset. Parent Hackler control-tool results can contain a nested usage attachment for Pi's

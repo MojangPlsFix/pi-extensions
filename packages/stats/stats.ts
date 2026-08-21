@@ -278,26 +278,175 @@ function modelKey(record: RecordValue, activeModel: string): string {
   return id ?? activeModel;
 }
 
-function customSummaryRecord(
-  entry: RecordValue,
-): { record: RecordValue; model: string; timestamp: unknown } | undefined {
+type SummaryUsageRecord = {
+  record: RecordValue;
+  model: string;
+  timestamp: unknown;
+};
+
+type SummaryAttachment = {
+  key: string;
+  parentModel: string;
+  timestamp: Date;
+};
+
+type CustomSummaryUsage = {
+  records: SummaryUsageRecord[];
+  attached: boolean;
+  attachment?: SummaryAttachment;
+  combined: UsageRecord;
+};
+
+type AttachedSummaryAdjustment = {
+  records: SummaryUsageRecord[];
+  combined: UsageRecord;
+  attachment: SummaryAttachment;
+  session: string;
+  project: string;
+};
+
+function parentMessageKey(timestamp: Date, model: string): string {
+  return `${timestamp.getTime()}|${model}`;
+}
+
+function sumUsage(records: SummaryUsageRecord[]): UsageRecord {
+  return records.reduce<UsageRecord>(
+    (total, item) => {
+      const value = usage(item.record);
+      total.input += value.input;
+      total.output += value.output;
+      total.cacheRead += value.cacheRead;
+      total.cacheWrite += value.cacheWrite;
+      total.uncategorized += value.uncategorized;
+      total.cost += value.cost;
+      return total;
+    },
+    { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, uncategorized: 0, cost: 0 },
+  );
+}
+
+function summaryModel(record: RecordValue, fallback = "github-copilot/gpt-5.4-nano"): string {
+  const provider = text(record.provider);
+  const id = text(record.model ?? record.modelId);
+  return provider && id ? `${provider}/${id}` : (id ?? fallback);
+}
+
+function customSummaryUsage(entry: RecordValue): CustomSummaryUsage | undefined {
   if (entry.type !== "custom" || entry.customType !== "session-summary") return undefined;
 
   const data = isRecord(entry.data) ? entry.data : undefined;
-  // A summary with attached usage is already represented by the provider
-  // message that produced it. Counting it again would inflate every total.
-  if (data?.usageAttached === true || entry.usageAttached === true) return undefined;
+  const attached = data?.usageAttached === true || entry.usageAttached === true;
+  const records: SummaryUsageRecord[] = [];
+  if (data && Array.isArray(data.attempts)) {
+    for (const candidate of data.attempts) {
+      if (!isRecord(candidate) || !isRecord(candidate.usage)) continue;
+      records.push({
+        record: candidate,
+        model: summaryModel(candidate, summaryModel(data)),
+        timestamp: candidate.timestamp ?? data.timestamp ?? entry.timestamp,
+      });
+    }
+  }
 
-  // Historical session-summary entries store their usage in data.usage. A
-  // direct entry.usage variant was used by an older writer and is harmless to
-  // support, but arbitrary custom entries never reach this path.
-  const record = data && isRecord(data.usage) ? data : isRecord(entry.usage) ? entry : undefined;
-  if (!record) return undefined;
+  // New entries store one usage record per attempted model. Older entries store
+  // one combined record under data.usage or directly under entry.usage.
+  if (records.length === 0) {
+    const record = data && isRecord(data.usage) ? data : isRecord(entry.usage) ? entry : undefined;
+    if (record) {
+      records.push({
+        record,
+        model: summaryModel(record),
+        timestamp: record.timestamp ?? entry.timestamp,
+      });
+    }
+  }
 
-  const provider = text(record.provider);
-  const id = text(record.model ?? record.modelId);
-  const model = provider && id ? `${provider}/${id}` : (id ?? "github-copilot/gpt-5.4-nano");
-  return { record, model, timestamp: record.timestamp ?? entry.timestamp };
+  let attachment: SummaryAttachment | undefined;
+  if (attached && data && isRecord(data.usageAttachment)) {
+    const provider = text(data.usageAttachment.provider);
+    const id = text(data.usageAttachment.model ?? data.usageAttachment.modelId);
+    const timestamp = parsedDate(data.usageAttachment.messageTimestamp);
+    if (provider && id && timestamp) {
+      const parentModel = `${provider}/${id}`;
+      attachment = {
+        key: parentMessageKey(timestamp, parentModel),
+        parentModel,
+        timestamp,
+      };
+    }
+  }
+
+  const combinedRecord = data && isRecord(data.usage) ? usage(data) : undefined;
+  const combined = combinedRecord && hasUsage(combinedRecord) ? combinedRecord : sumUsage(records);
+  return { records, attached, ...(attachment ? { attachment } : {}), combined };
+}
+
+function adjustUsage(target: UsageTotals, source: UsageRecord, factor: 1 | -1): void {
+  target.input += factor * source.input;
+  target.output += factor * source.output;
+  target.cacheRead += factor * source.cacheRead;
+  target.cacheWrite += factor * source.cacheWrite;
+  target.uncategorized += factor * source.uncategorized;
+  target.cost += factor * source.cost;
+}
+
+function adjustBucketUsage(
+  map: Map<string, Bucket>,
+  key: string,
+  value: UsageRecord,
+  session: string,
+  factor: 1 | -1,
+): void {
+  const bucket = map.get(key) ?? { key, ...emptyTotals() };
+  adjustUsage(bucket, value, factor);
+  bucket.sessions.add(session);
+  map.set(key, bucket);
+}
+
+function addResponseOnly(target: UsageTotals, count: number, session: string): void {
+  target.responses += count;
+  target.sessions.add(session);
+}
+
+function includesUsage(total: UsageRecord, subset: UsageRecord): boolean {
+  const tolerance = 1e-9;
+  return (
+    total.input + tolerance >= subset.input &&
+    total.output + tolerance >= subset.output &&
+    total.cacheRead + tolerance >= subset.cacheRead &&
+    total.cacheWrite + tolerance >= subset.cacheWrite &&
+    total.uncategorized + tolerance >= subset.uncategorized &&
+    total.cost + tolerance >= subset.cost
+  );
+}
+
+function addRecordToReport(options: {
+  record: RecordValue;
+  model: string;
+  timestampValue: unknown;
+  session: string;
+  project: string;
+  subagent: boolean;
+  range: { start: Date; end: Date };
+  report: StatsReport;
+}): Date | undefined {
+  const timestamp = parsedDate(options.timestampValue ?? options.record.timestamp);
+  if (!timestamp || timestamp < options.range.start || timestamp >= options.range.end)
+    return undefined;
+
+  const value = usage(options.record);
+  add(options.report.totals, value, options.session);
+  if (options.subagent) add(options.report.subagents, value, options.session);
+  addBucket(options.report.models, options.model, value, options.session);
+  addBucket(options.report.projects, options.project, value, options.session);
+
+  const periodDate =
+    options.report.mode === "month" ? monthPeriodStart(timestamp, options.range.start) : timestamp;
+  const key = dayKey(periodDate);
+  const day = options.report.days.get(key) ?? emptyTotals();
+  add(day, value, options.session);
+  options.report.days.set(key, day);
+  return timestamp;
 }
 
 async function collectFile(
@@ -313,7 +462,8 @@ async function collectFile(
     input: createReadStream(path, { encoding: "utf8" }),
     crlfDelay: Infinity,
   });
-  const mode = report.mode;
+  const countedParentMessages = new Map<string, UsageRecord>();
+  const attachedSummaries: AttachedSummaryAdjustment[] = [];
 
   for await (const line of input) {
     let entry: unknown;
@@ -337,10 +487,39 @@ async function collectFile(
       continue;
     }
 
+    if (entry.type === "custom") {
+      const summary = customSummaryUsage(entry);
+      if (!summary) continue;
+      if (summary.attached) {
+        if (summary.attachment && summary.records.length > 0 && hasUsage(summary.combined)) {
+          attachedSummaries.push({
+            records: summary.records,
+            combined: summary.combined,
+            attachment: summary.attachment,
+            session,
+            project,
+          });
+        }
+        continue;
+      }
+      for (const item of summary.records) {
+        addRecordToReport({
+          record: item.record,
+          model: item.model,
+          timestampValue: item.timestamp,
+          session,
+          project,
+          subagent,
+          range,
+          report,
+        });
+      }
+      continue;
+    }
+
     let record: RecordValue | undefined;
     let currentModel = activeModel;
     let timestampValue: unknown;
-
     if (entry.type === "message" && isRecord(entry.message)) {
       const message = entry.message;
       if (!["assistant", "toolResult"].includes(String(message.role))) continue;
@@ -350,32 +529,65 @@ async function collectFile(
     } else if (entry.type === "compaction" || entry.type === "branch_summary") {
       record = entry;
       timestampValue = entry.timestamp;
-    } else {
-      const summary = customSummaryRecord(entry);
-      if (!summary) continue;
-      record = summary.record;
-      currentModel = summary.model;
-      timestampValue = summary.timestamp;
-    }
+    } else continue;
 
     // Subagents attach a nested usage summary to the parent control-tool result
     // so Pi's parent footer can display child cost. The child JSONL sessions are
     // scanned separately below, so do not count this marker a second time.
     if (entry.type === "message" && isAttachedSubagentUsage(record)) continue;
 
-    const timestamp = parsedDate(timestampValue ?? record.timestamp);
-    if (!timestamp || timestamp < range.start || timestamp >= range.end) continue;
+    const timestamp = addRecordToReport({
+      record,
+      model: currentModel,
+      timestampValue,
+      session,
+      project,
+      subagent,
+      range,
+      report,
+    });
+    if (timestamp && entry.type === "message" && record.role === "assistant") {
+      countedParentMessages.set(parentMessageKey(timestamp, currentModel), usage(record));
+    }
+  }
 
-    const value = usage(record);
-    add(report.totals, value, session);
-    if (subagent) add(report.subagents, value, session);
-    addBucket(report.models, currentModel, value, session);
-    addBucket(report.projects, project, value, session);
+  for (const summary of attachedSummaries) {
+    const parentUsage = countedParentMessages.get(summary.attachment.key);
+    if (!parentUsage || !includesUsage(parentUsage, summary.combined)) continue;
 
-    const periodDate = mode === "month" ? monthPeriodStart(timestamp, range.start) : timestamp;
-    const day = report.days.get(dayKey(periodDate)) ?? emptyTotals();
-    add(day, value, session);
-    report.days.set(dayKey(periodDate), day);
+    // The parent assistant record already contains the combined summary usage.
+    // Move that usage from the parent model to each model that handled an attempt.
+    adjustBucketUsage(
+      report.models,
+      summary.attachment.parentModel,
+      summary.combined,
+      summary.session,
+      -1,
+    );
+    let responses = 0;
+    for (const item of summary.records) {
+      const value = usage(item.record);
+      if (hasUsage(value)) responses += 1;
+      addBucket(report.models, item.model, value, summary.session);
+    }
+    if (responses === 0) continue;
+
+    addResponseOnly(report.totals, responses, summary.session);
+    if (subagent) addResponseOnly(report.subagents, responses, summary.session);
+    const projectBucket = report.projects.get(summary.project) ?? {
+      key: summary.project,
+      ...emptyTotals(),
+    };
+    addResponseOnly(projectBucket, responses, summary.session);
+    report.projects.set(summary.project, projectBucket);
+    const periodDate =
+      report.mode === "month"
+        ? monthPeriodStart(summary.attachment.timestamp, range.start)
+        : summary.attachment.timestamp;
+    const key = dayKey(periodDate);
+    const day = report.days.get(key) ?? emptyTotals();
+    addResponseOnly(day, responses, summary.session);
+    report.days.set(key, day);
   }
 }
 

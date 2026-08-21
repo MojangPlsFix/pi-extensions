@@ -31,4 +31,11 @@ PI_CONFIG_DIR="$(mktemp -d)" pi install "$(pwd)"
 PI_CONFIG_DIR="$PI_CONFIG_DIR" pi
 ```
 
-Test `/reload`, a non-Copilot model, provider switching when configured, `/plan`, `/plan off`, plan implementation, `/agents`, `/session-summary`, and `/session-summary-cost` without optional tools.
+Test `/reload`, `/plan`, `/plan off`, plan implementation, and `/agents`. Test Session Summary with these active-provider cases:
+
+1. Use Copilot Luna without a profile file.
+2. Use Codex Spark while Spark is available.
+3. Make Spark unavailable and confirm the Codex Luna fallback.
+4. Use an unprofiled provider and confirm that its active model handles the request.
+5. Switch providers and confirm that Session Summary never sends data across providers.
+6. Run `/session-summary`, `/session-summaries`, and `/session-summary-cost` without optional tools.
