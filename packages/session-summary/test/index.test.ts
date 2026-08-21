@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -122,8 +123,20 @@ function makeSummaryEntry(data: Record<string, unknown>, id = "summary-1"): Sess
   } as SessionEntry;
 }
 
+function makeAttemptEntry(id = "attempt-1"): SessionEntry {
+  return {
+    type: "custom",
+    customType: "session-summary-auto-attempt",
+    id,
+    parentId: null,
+    timestamp: new Date().toISOString(),
+    data: { version: 1, messageCount: 2 },
+  } as SessionEntry;
+}
+
 function createHarness(options?: {
   branch?: SessionEntry[];
+  allEntries?: SessionEntry[];
   activeModel?: SummaryModel;
   models?: SummaryModel[];
   findModel?: (provider: string, modelId: string) => SummaryModel | undefined;
@@ -134,7 +147,10 @@ function createHarness(options?: {
     context: CompletionCall["context"],
     requestOptions: Record<string, unknown>,
   ) => AssistantMessage | Promise<AssistantMessage>;
+  appendEntry?: (customType: string, data: unknown) => void;
+  sessionManager?: SessionManager;
   name?: string;
+  mode?: ExtensionContext["mode"];
   hasUI?: boolean;
   cwd?: string;
   trusted?: boolean;
@@ -143,7 +159,9 @@ function createHarness(options?: {
 }) {
   const activeModel = options?.activeModel ?? makeModel();
   const models = options?.models ?? [activeModel];
-  const entries = [...(options?.branch ?? [makeUserEntry()])];
+  const realSessionManager = options?.sessionManager;
+  const entries = [...(realSessionManager?.getBranch() ?? options?.branch ?? [makeUserEntry()])];
+  const allEntries = options?.allEntries ? [...options.allEntries] : entries;
   const events = new Map<string, Handler[]>();
   const commands = new Map<string, Handler>();
   const statuses: Array<{ key: string; text: string | undefined }> = [];
@@ -152,7 +170,8 @@ function createHarness(options?: {
   const findCalls: Array<{ provider: string; model: string }> = [];
   const authCalls: SummaryModel[] = [];
   const emittedEvents: string[] = [];
-  let sessionName = options?.name;
+  let sessionName = options?.name ?? realSessionManager?.getSessionName();
+  let currentSessionId = options?.sessionId ?? realSessionManager?.getSessionId() ?? "session-1";
 
   const registry = {
     find(provider: string, modelId: string) {
@@ -195,7 +214,7 @@ function createHarness(options?: {
   };
 
   const context = {
-    mode: "tui",
+    mode: options?.mode ?? "tui",
     hasUI: options?.hasUI ?? true,
     cwd: options?.cwd ?? "/tmp/session-summary-test",
     model: activeModel,
@@ -211,11 +230,14 @@ function createHarness(options?: {
       },
     },
     sessionManager: {
-      getSessionId: () => options?.sessionId ?? "session-1",
-      getBranch: () => entries,
-      getEntries: () => entries,
-      getSessionFile: () => options?.sessionFile ?? "/tmp/session-summary-test.jsonl",
-      getSessionDir: () => "/tmp",
+      getSessionId: () => realSessionManager?.getSessionId() ?? currentSessionId,
+      getBranch: () => realSessionManager?.getBranch() ?? entries,
+      getEntries: () => realSessionManager?.getEntries() ?? allEntries,
+      getSessionFile: () =>
+        realSessionManager?.getSessionFile() ??
+        options?.sessionFile ??
+        "/tmp/session-summary-test.jsonl",
+      getSessionDir: () => realSessionManager?.getSessionDir() ?? "/tmp",
     },
     isIdle: () => true,
     isProjectTrusted: () => options?.trusted ?? true,
@@ -237,6 +259,10 @@ function createHarness(options?: {
     },
     setSessionName(name: string) {
       sessionName = name;
+      if (realSessionManager) {
+        realSessionManager.appendSessionInfo(name);
+        return;
+      }
       entries.push({
         type: "session_info",
         id: `session-info-${entries.length}`,
@@ -247,14 +273,21 @@ function createHarness(options?: {
     },
     getSessionName: () => sessionName,
     appendEntry(customType: string, data: unknown) {
-      entries.push({
+      options?.appendEntry?.(customType, data);
+      if (realSessionManager) {
+        realSessionManager.appendCustomEntry(customType, data);
+        return;
+      }
+      const entry = {
         type: "custom",
         customType,
         id: `custom-${entries.length}`,
         parentId: entries.at(-1)?.id ?? null,
         timestamp: new Date().toISOString(),
         data,
-      } as SessionEntry);
+      } as SessionEntry;
+      entries.push(entry);
+      if (allEntries !== entries) allEntries.push(entry);
     },
     events: {
       emit(name: string) {
@@ -269,6 +302,8 @@ function createHarness(options?: {
     api,
     context,
     entries,
+    allEntries,
+    realSessionManager,
     events,
     commands,
     statuses,
@@ -278,6 +313,9 @@ function createHarness(options?: {
     authCalls,
     emittedEvents,
     getSessionName: () => sessionName,
+    setSessionId: (value: string) => {
+      currentSessionId = value;
+    },
   };
 }
 
@@ -294,14 +332,20 @@ async function startSession(harness: Harness): Promise<void> {
 }
 
 async function emitAssistant(harness: Harness, message: AssistantMessage): Promise<unknown[]> {
-  const results = await emit(harness, "message_end", { message });
-  const replacement = results.find((result): result is { message: AssistantMessage } =>
+  const messageResults = await emit(harness, "message_end", { message });
+  const replacement = messageResults.find((result): result is { message: AssistantMessage } =>
     Boolean(result && typeof result === "object" && "message" in result),
   )?.message;
-  harness.entries.push(
-    makeAssistantEntry(replacement ?? message, `assistant-${harness.entries.length}`),
-  );
-  return results;
+  const finalMessage = replacement ?? message;
+  if (harness.realSessionManager) harness.realSessionManager.appendMessage(finalMessage);
+  else {
+    harness.entries.push(makeAssistantEntry(finalMessage, `assistant-${harness.entries.length}`));
+  }
+  const endResults = await emit(harness, "agent_end", {
+    type: "agent_end",
+    messages: [finalMessage],
+  });
+  return [...messageResults, ...endResults];
 }
 
 async function temporaryDirectory(prefix: string): Promise<string> {
@@ -430,7 +474,7 @@ describe("provider-aware model selection and fallback", () => {
       "gpt-5.6-luna",
       1234,
     );
-    const results = await emitAssistant(harness, eventMessage);
+    await emitAssistant(harness, eventMessage);
 
     expect(harness.findCalls).toEqual([{ provider: "github-copilot", model: "gpt-5.6-luna" }]);
     expect(harness.completionCalls).toHaveLength(1);
@@ -443,9 +487,13 @@ describe("provider-aware model selection and fallback", () => {
     expect(Object.hasOwn(call.options, "reasoning")).toBe(false);
     expect(Object.hasOwn(call.options, "reasoningEffort")).toBe(false);
     expect(harness.getSessionName()).toBe("Add persistent session titles");
-    expect(results[0]).toMatchObject({
-      message: { usage: { input: 9, output: 6, totalTokens: 15 } },
-    });
+    const summary = harness.entries.find(
+      (entry) => entry.type === "custom" && entry.customType === "session-summary",
+    ) as Extract<SessionEntry, { type: "custom" }>;
+    expect(summary.data).toMatchObject({ usage, usageAttached: false });
+    expect(summary.data).not.toHaveProperty("usageAttachment");
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
   });
 
   test("uses Spark first for Codex and does not call Luna after Spark succeeds", async () => {
@@ -549,17 +597,15 @@ describe("provider-aware model selection and fallback", () => {
       provider: "openai-codex",
       model: "gpt-5.6-luna",
       usage: { input: 15, output: 3, totalTokens: 18, cost: { total: 0.03 } },
-      usageAttached: true,
-      usageAttachment: {
-        messageTimestamp: 2345,
-        provider: "openai-codex",
-        model: "gpt-5.6-luna",
-      },
+      usageAttached: false,
       attempts: [
         { model: spark.id, outcome: "empty-output", usage: sparkUsage },
         { model: luna.id, outcome: "success", usage: lunaUsage },
       ],
     });
+    expect(summary.data).not.toHaveProperty("usageAttachment");
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
 
     await harness.commands.get("session-summary-cost")?.("", harness.context);
     const report = harness.notices.at(-1)?.message ?? "";
@@ -568,7 +614,7 @@ describe("provider-aware model selection and fallback", () => {
     expect(report).toContain(`openai-codex/${luna.id} | 6 tokens`);
   });
 
-  test("pins the first successful fallback for later requests in the same provider session", async () => {
+  test("pins the first successful fallback for explicit refreshes in the same provider session", async () => {
     const spark = makeModel("openai-codex", "gpt-5.3-codex-spark");
     const luna = makeModel("openai-codex", "gpt-5.6-luna");
     let sparkCalls = 0;
@@ -601,16 +647,7 @@ describe("provider-aware model selection and fallback", () => {
       ),
     );
     harness.entries.push(makeUserEntry("Continue", "user-2"));
-    await emitAssistant(
-      harness,
-      makeAssistantMessage(
-        [{ type: "text", text: "Second turn" }],
-        makeUsage(),
-        "stop",
-        "openai-codex",
-        luna.id,
-      ),
-    );
+    await harness.commands.get("session-summary")?.("", harness.context);
 
     expect(sparkCalls).toBe(1);
     expect(harness.completionCalls.map((call) => call.model.id)).toEqual([
@@ -668,7 +705,11 @@ describe("provider-aware model selection and fallback", () => {
     );
 
     expect(harness.completionCalls).toHaveLength(0);
-    expect(harness.statuses.at(-1)?.text).toContain("resolved to another provider");
+    expect(harness.notices.at(-1)).toMatchObject({
+      message: expect.stringContaining("resolved to another provider"),
+      type: "warning",
+    });
+    expect(harness.statuses).toEqual([]);
   });
 
   test("treats configured profiles and empty arrays as authoritative", async () => {
@@ -698,7 +739,11 @@ describe("provider-aware model selection and fallback", () => {
     );
     expect(unauthenticated.findCalls).toEqual([{ provider: "openai-codex", model: configured.id }]);
     expect(unauthenticated.completionCalls).toHaveLength(0);
-    expect(unauthenticated.statuses.at(-1)?.text).toContain("authentication is unavailable");
+    expect(unauthenticated.notices.at(-1)).toMatchObject({
+      message: expect.stringContaining("authentication is unavailable"),
+      type: "warning",
+    });
+    expect(unauthenticated.statuses).toEqual([]);
 
     await writeFile(
       join(root, "pi-session-summary.json"),
@@ -717,9 +762,333 @@ describe("provider-aware model selection and fallback", () => {
       ),
     );
     expect(disabled.findCalls).toHaveLength(0);
-    expect(disabled.statuses.at(-1)?.text).toContain(
-      "Session summaries are disabled for openai-codex",
+    expect(disabled.notices.at(-1)).toMatchObject({
+      message: expect.stringContaining("Session summaries are disabled for openai-codex"),
+      type: "warning",
+    });
+    expect(disabled.statuses).toEqual([]);
+  });
+});
+
+describe("one-shot automatic cadence", () => {
+  test("persists the attempt marker before model lookup", async () => {
+    const directory = await temporaryDirectory("pi-session-summary-persist-");
+    const manager = SessionManager.create("/project", directory);
+    const user = makeUserEntry();
+    if (user.type !== "message" || user.message.role !== "user") {
+      throw new Error("Expected a user message entry");
+    }
+    const assistant = makeAssistantMessage([{ type: "text", text: "First completed turn" }]);
+    manager.appendMessage(user.message);
+    manager.appendMessage(assistant);
+    const sessionFile = manager.getSessionFile();
+    if (!sessionFile) throw new Error("Expected a persisted session file");
+
+    let markerFoundOnDisk = false;
+    const harness = createHarness({
+      cwd: "/project",
+      sessionManager: manager,
+      findModel: () => {
+        markerFoundOnDisk = readFileSync(sessionFile, "utf8").includes(
+          '"customType":"session-summary-auto-attempt"',
+        );
+        return undefined;
+      },
+    });
+    await startSession(harness);
+    await emit(harness, "agent_end", { type: "agent_end", messages: [assistant] });
+
+    expect(markerFoundOnDisk).toBe(true);
+    expect(harness.completionCalls).toHaveLength(1);
+  });
+
+  test("writes the attempt marker before the request and runs only once", async () => {
+    let markerSeenByLookup = false;
+    let markerSeenByProvider = false;
+    let harness!: Harness;
+    harness = createHarness({
+      findModel: () => {
+        markerSeenByLookup = harness.entries.some(
+          (entry) => entry.type === "custom" && entry.customType === "session-summary-auto-attempt",
+        );
+        return undefined;
+      },
+      complete: (model) => {
+        markerSeenByProvider = harness.entries.some(
+          (entry) => entry.type === "custom" && entry.customType === "session-summary-auto-attempt",
+        );
+        return makeAssistantMessage(
+          [{ type: "text", text: "One-shot session title" }],
+          makeUsage(),
+          "stop",
+          model.provider,
+          model.id,
+        );
+      },
+    });
+    await startSession(harness);
+
+    await emitAssistant(
+      harness,
+      makeAssistantMessage([{ type: "text", text: "First completed turn" }]),
     );
+    harness.entries.push(makeUserEntry("Add another change", "user-2"));
+    await emitAssistant(
+      harness,
+      makeAssistantMessage([{ type: "text", text: "Second completed turn" }]),
+    );
+
+    expect(markerSeenByLookup).toBe(true);
+    expect(markerSeenByProvider).toBe(true);
+    expect(harness.completionCalls).toHaveLength(1);
+    expect(
+      harness.entries.filter(
+        (entry) => entry.type === "custom" && entry.customType === "session-summary-auto-attempt",
+      ),
+    ).toHaveLength(1);
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("does not retry a failed automatic attempt later or after reload", async () => {
+    const complete = (model: SummaryModel) =>
+      makeAssistantMessage(
+        [{ type: "thinking", thinking: "No final title" }],
+        makeUsage(),
+        "length",
+        model.provider,
+        model.id,
+      );
+    const harness = createHarness({ complete });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Done" }]));
+
+    harness.entries.push(makeUserEntry("Try another turn", "user-2"));
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Done again" }]));
+
+    expect(harness.completionCalls).toHaveLength(1);
+    expect(harness.notices).toHaveLength(1);
+
+    const reloaded = createHarness({ branch: harness.entries, complete });
+    await startSession(reloaded);
+    reloaded.entries.push(makeUserEntry("Try after reload", "user-3"));
+    await emitAssistant(reloaded, makeAssistantMessage([{ type: "text", text: "Still done" }]));
+
+    expect(reloaded.completionCalls).toHaveLength(0);
+    expect(reloaded.notices).toEqual([]);
+    expect(reloaded.statuses).toEqual([]);
+  });
+
+  test("uses all session entries so tree navigation cannot re-enable automation", async () => {
+    const branchUser = makeUserEntry();
+    const harness = createHarness({
+      branch: [branchUser],
+      allEntries: [branchUser, makeAttemptEntry()],
+    });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test.each([
+    { label: "successful", data: { name: "Old title", messageCount: 2 } },
+    {
+      label: "failed",
+      data: {
+        messageCount: 2,
+        attempts: [{ provider: "github-copilot", model: "old", outcome: "request-failed" }],
+      },
+    },
+    { label: "minimal", data: {} },
+  ])("treats $label legacy summary entries as prior attempts", async ({ data }) => {
+    const harness = createHarness({ branch: [makeUserEntry(), makeSummaryEntry(data)] });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(harness.notices).toEqual([]);
+  });
+
+  test("does not call a provider when the write-ahead marker cannot be saved", async () => {
+    const harness = createHarness({
+      appendEntry(customType) {
+        if (customType === "session-summary-auto-attempt") throw new Error("disk full");
+      },
+    });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+    harness.entries.push(makeUserEntry("Try again", "user-2"));
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(harness.notices).toEqual([
+      {
+        message: "Session title unavailable: The automatic title attempt could not be recorded",
+        type: "warning",
+      },
+    ]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("defers a greeting and summarizes the later meaningful turn", async () => {
+    const harness = createHarness({ branch: [makeUserEntry("hello")] });
+    await startSession(harness);
+    await emitAssistant(
+      harness,
+      makeAssistantMessage([{ type: "text", text: "EARLY_GREETING_REPLY" }]),
+    );
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(
+      harness.entries.some(
+        (entry) => entry.type === "custom" && entry.customType === "session-summary-auto-attempt",
+      ),
+    ).toBe(false);
+
+    harness.entries.push(makeUserEntry("Fix the parser", "user-2"));
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Parser fixed" }]));
+
+    expect(harness.completionCalls).toHaveLength(1);
+    const prompt = harness.completionCalls[0]?.context.messages[0]?.content[0]?.text ?? "";
+    expect(prompt).toContain("Fix the parser");
+    expect(prompt).not.toContain("EARLY_GREETING_REPLY");
+  });
+
+  test.each(["hello, fix the parser", "go"])("treats %j as meaningful input", async (input) => {
+    const harness = createHarness({ branch: [makeUserEntry(input)] });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.completionCalls).toHaveLength(1);
+  });
+
+  test("treats an image-only request as meaningful input", async () => {
+    const imageUser = {
+      type: "message",
+      id: "user-image",
+      parentId: null,
+      timestamp: new Date(0).toISOString(),
+      message: {
+        role: "user",
+        content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+        timestamp: 0,
+      },
+    } as SessionEntry;
+    const harness = createHarness({ branch: [imageUser] });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Image reviewed" }]));
+
+    expect(harness.completionCalls).toHaveLength(1);
+  });
+
+  test("does not consume the attempt on incomplete or tool-call assistant messages", async () => {
+    const harness = createHarness();
+    await startSession(harness);
+    await emitAssistant(
+      harness,
+      makeAssistantMessage([{ type: "text", text: "Cut short" }], makeUsage(), "length"),
+    );
+    await emitAssistant(
+      harness,
+      makeAssistantMessage([
+        {
+          type: "toolCall",
+          id: "tool-1",
+          name: "read",
+          arguments: { path: "README.md" },
+        },
+      ]),
+    );
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(
+      harness.entries.some(
+        (entry) => entry.type === "custom" && entry.customType === "session-summary-auto-attempt",
+      ),
+    ).toBe(false);
+
+    harness.entries.push(makeUserEntry("Finish without tools", "user-2"));
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Finished" }]));
+    expect(harness.completionCalls).toHaveLength(1);
+  });
+
+  test("does not run automatically outside the interactive TUI", async () => {
+    const harness = createHarness({ mode: "rpc" });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(harness.entries.some((entry) => entry.type === "custom")).toBe(false);
+  });
+
+  test("ignores a completion from a replaced session without pinning its fallback", async () => {
+    const spark = makeModel("openai-codex", "gpt-5.3-codex-spark");
+    const luna = makeModel("openai-codex", "gpt-5.6-luna");
+    let phase: "old" | "new" = "old";
+    let resolveOld!: (message: AssistantMessage) => void;
+    const oldCompletion = new Promise<AssistantMessage>((resolve) => {
+      resolveOld = resolve;
+    });
+    const harness = createHarness({
+      activeModel: luna,
+      models: [spark, luna],
+      complete: (model) => {
+        if (phase === "old") {
+          if (model.id === spark.id) throw new Error("Spark unavailable");
+          return oldCompletion;
+        }
+        return makeAssistantMessage(
+          [{ type: "text", text: "New session title" }],
+          makeUsage(),
+          "stop",
+          model.provider,
+          model.id,
+        );
+      },
+    });
+    await startSession(harness);
+    const oldMessage = makeAssistantMessage([{ type: "text", text: "Old completion" }]);
+    harness.entries.push(makeAssistantEntry(oldMessage, "assistant-old"));
+    const pending = emit(harness, "agent_end", {
+      type: "agent_end",
+      messages: [oldMessage],
+    });
+    await vi.waitFor(() => expect(harness.completionCalls).toHaveLength(2));
+
+    const oldRequestSignal = harness.completionCalls[1]?.options.signal as AbortSignal | undefined;
+    await emit(harness, "session_shutdown", { type: "session_shutdown" });
+    expect(oldRequestSignal?.aborted).toBe(true);
+    harness.setSessionId("session-2");
+    await startSession(harness);
+    phase = "new";
+    resolveOld(
+      makeAssistantMessage(
+        [{ type: "text", text: "Stale title" }],
+        makeUsage(),
+        "stop",
+        luna.provider,
+        luna.id,
+      ),
+    );
+    await pending;
+
+    expect(harness.getSessionName()).toBeUndefined();
+    expect(
+      harness.entries.filter(
+        (entry) => entry.type === "custom" && entry.customType === "session-summary",
+      ),
+    ).toHaveLength(0);
+
+    await harness.commands.get("session-summary")?.("", harness.context);
+    expect(harness.completionCalls.map((call) => call.model.id)).toEqual([
+      spark.id,
+      luna.id,
+      spark.id,
+    ]);
+    expect(harness.getSessionName()).toBe("New session title");
   });
 });
 
@@ -755,7 +1124,11 @@ describe("request deadline and transcript bounds", () => {
     expect(harness.completionCalls[1]?.options.timeoutMs).toBeLessThanOrEqual(8_000);
     await vi.advanceTimersByTimeAsync(8_000);
     await pending;
-    expect(harness.statuses.at(-1)?.text).toContain("shared deadline");
+    expect(harness.notices.at(-1)).toMatchObject({
+      message: expect.stringContaining("shared deadline"),
+      type: "warning",
+    });
+    expect(harness.statuses).toEqual([]);
   });
 
   test("caps output and trims the transcript for the selected model context", async () => {
@@ -803,7 +1176,7 @@ describe("persistence and command flows", () => {
         ),
     });
     await startSession(harness);
-    const results = await emitAssistant(
+    await emitAssistant(
       harness,
       makeAssistantMessage([{ type: "text", text: "The turn is complete" }]),
     );
@@ -815,11 +1188,15 @@ describe("persistence and command flows", () => {
     expect(summary.data).toMatchObject({
       messageCount: 2,
       usage,
-      usageAttached: true,
+      usageAttached: false,
       attempts: [{ outcome: "empty-output", usage }],
     });
-    expect(results[0]).toMatchObject({ message: { usage: { input: 11, output: 6 } } });
-    expect(harness.statuses.at(-1)?.text).toContain("returned no final text");
+    expect(summary.data).not.toHaveProperty("usageAttachment");
+    expect(harness.notices.at(-1)).toMatchObject({
+      message: expect.stringContaining("returned no final text"),
+      type: "warning",
+    });
+    expect(harness.statuses).toEqual([]);
   });
 
   test("manual summaries keep usage unattached", async () => {
@@ -852,6 +1229,78 @@ describe("persistence and command flows", () => {
     expect(summary.data).not.toHaveProperty("usageAttachment");
   });
 
+  test("manual refreshes bypass automatic markers and stay silent on success", async () => {
+    const harness = createHarness({
+      branch: [
+        makeUserEntry(),
+        makeAssistantEntry(makeAssistantMessage([{ type: "text", text: "Existing reply" }])),
+        makeAttemptEntry(),
+      ],
+    });
+    await startSession(harness);
+
+    await harness.commands.get("session-summary")?.("", harness.context);
+    await harness.commands.get("session-summary")?.("", harness.context);
+
+    expect(harness.completionCalls).toHaveLength(2);
+    expect(harness.getSessionName()).toBe("Implement session titles");
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("warns for each genuine manual failure", async () => {
+    const harness = createHarness({
+      branch: [
+        makeUserEntry(),
+        makeAssistantEntry(makeAssistantMessage([{ type: "text", text: "Existing reply" }])),
+        makeAttemptEntry(),
+      ],
+      complete: (model) =>
+        makeAssistantMessage(
+          [{ type: "thinking", thinking: "No title" }],
+          makeUsage(),
+          "length",
+          model.provider,
+          model.id,
+        ),
+    });
+    await startSession(harness);
+
+    await harness.commands.get("session-summary")?.("", harness.context);
+    await harness.commands.get("session-summary")?.("", harness.context);
+
+    expect(harness.completionCalls).toHaveLength(2);
+    expect(harness.notices).toHaveLength(2);
+    expect(harness.notices.every((notice) => notice.type === "warning")).toBe(true);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("does not overwrite a manual name set while automatic generation is pending", async () => {
+    let harness!: Harness;
+    harness = createHarness({
+      complete: (model) => {
+        harness.api.setSessionName("Manual title wins");
+        return makeAssistantMessage(
+          [{ type: "text", text: "Generated title loses" }],
+          makeUsage(),
+          "stop",
+          model.provider,
+          model.id,
+        );
+      },
+    });
+    await startSession(harness);
+    await emitAssistant(harness, makeAssistantMessage([{ type: "text", text: "Complete" }]));
+
+    expect(harness.getSessionName()).toBe("Manual title wins");
+    const summary = harness.entries.find(
+      (entry) => entry.type === "custom" && entry.customType === "session-summary",
+    ) as Extract<SessionEntry, { type: "custom" }>;
+    expect(summary.data).toMatchObject({ source: "automatic", usageAttached: false });
+    expect(summary.data).not.toHaveProperty("name");
+    expect(harness.notices).toEqual([]);
+  });
+
   test("backfills titles with the active provider and stores unattached usage", async () => {
     const oldBranch = [
       makeUserEntry("Old task"),
@@ -878,9 +1327,140 @@ describe("persistence and command flows", () => {
         name: "Implement session titles",
         provider: "github-copilot",
         model: "gpt-5.6-luna",
+        source: "backfill",
         usageAttached: false,
       }),
     );
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("keeps an empty backfill silent", async () => {
+    vi.spyOn(SessionManager, "list").mockResolvedValue([]);
+    const harness = createHarness();
+    await startSession(harness);
+    await harness.commands.get("session-summaries")?.("", harness.context);
+
+    expect(harness.completionCalls).toHaveLength(0);
+    expect(harness.notices).toEqual([]);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("reports mixed backfill failures once with a bounded warning", async () => {
+    const branches = new Map<string, SessionEntry[]>([
+      [
+        "/tmp/good-session.jsonl",
+        [
+          makeUserEntry("Good task"),
+          makeAssistantEntry(makeAssistantMessage([{ type: "text", text: "Good reply" }])),
+        ],
+      ],
+      [
+        "/tmp/no-title-session.jsonl",
+        [
+          makeUserEntry("Hard task"),
+          makeAssistantEntry(makeAssistantMessage([{ type: "text", text: "Hard reply" }])),
+        ],
+      ],
+    ]);
+    vi.spyOn(SessionManager, "list").mockResolvedValue([
+      { path: "/tmp/good-session.jsonl", name: undefined } as never,
+      { path: "/tmp/no-title-session.jsonl", name: undefined } as never,
+      { path: "/tmp/broken-session.jsonl", name: undefined } as never,
+    ]);
+    vi.spyOn(SessionManager, "open").mockImplementation((path) => {
+      if (path === "/tmp/broken-session.jsonl") throw new Error("Unreadable session");
+      return {
+        getBranch: () => branches.get(path) ?? [],
+        appendSessionInfo: vi.fn(),
+        appendCustomEntry: vi.fn(),
+      } as never;
+    });
+    const harness = createHarness({
+      complete: (model, callIndex) =>
+        callIndex === 0
+          ? makeAssistantMessage(
+              [{ type: "text", text: "Good title" }],
+              makeUsage(),
+              "stop",
+              model.provider,
+              model.id,
+            )
+          : makeAssistantMessage(
+              [{ type: "thinking", thinking: "No title" }],
+              makeUsage(),
+              "length",
+              model.provider,
+              model.id,
+            ),
+    });
+    await startSession(harness);
+    await harness.commands.get("session-summaries")?.("", harness.context);
+
+    expect(harness.completionCalls).toHaveLength(2);
+    expect(harness.notices).toHaveLength(1);
+    expect(harness.notices[0]).toMatchObject({
+      message: expect.stringContaining("Could not complete title backfill for 2 of 3 sessions"),
+      type: "warning",
+    });
+    expect(harness.notices[0]?.message.length).toBeLessThanOrEqual(600);
+    expect(harness.statuses).toEqual([]);
+  });
+
+  test("counts a backfill persistence failure once and retains its in-memory usage", async () => {
+    const usage = makeUsage(12, 3, 0.07);
+    const branch = [
+      makeUserEntry("Old task"),
+      makeAssistantEntry(makeAssistantMessage([{ type: "text", text: "Old reply" }])),
+    ];
+    const appendSessionInfo = vi.fn();
+    vi.spyOn(SessionManager, "list").mockResolvedValue([
+      { path: "/tmp/write-failure.jsonl", name: undefined } as never,
+    ]);
+    vi.spyOn(SessionManager, "open").mockReturnValue({
+      getBranch: () => branch,
+      appendSessionInfo,
+      appendCustomEntry: () => {
+        throw new Error("Disk full");
+      },
+    } as never);
+    const harness = createHarness({
+      complete: (model) =>
+        makeAssistantMessage(
+          [{ type: "text", text: "Saved title" }],
+          usage,
+          "stop",
+          model.provider,
+          model.id,
+        ),
+    });
+    await startSession(harness);
+    await harness.commands.get("session-summaries")?.("", harness.context);
+
+    expect(appendSessionInfo).toHaveBeenCalledWith("Saved title");
+    expect(harness.notices).toHaveLength(1);
+    expect(harness.notices[0]).toMatchObject({
+      message: expect.stringContaining("title backfill for 1 of 1 sessions"),
+      type: "warning",
+    });
+    expect(harness.notices[0]?.message).not.toContain("2 of 1");
+
+    await harness.commands.get("session-summary-cost")?.("", harness.context);
+    expect(harness.notices.at(-1)?.message).toContain(
+      "Session Summary total | 15 tokens | cost: $0.0700",
+    );
+  });
+
+  test("warns once when sessions cannot be listed for backfill", async () => {
+    vi.spyOn(SessionManager, "list").mockRejectedValue(new Error("Index unavailable"));
+    const harness = createHarness();
+    await startSession(harness);
+    await harness.commands.get("session-summaries")?.("", harness.context);
+
+    expect(harness.notices).toEqual([
+      { message: "Could not list sessions for title backfill", type: "warning" },
+    ]);
+    expect(harness.statuses).toEqual([]);
   });
 
   test("respects manual names and PI_SESSION_SUMMARY=off", async () => {

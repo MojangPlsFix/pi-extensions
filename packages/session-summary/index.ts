@@ -2,8 +2,8 @@
  * Give sessions a useful one-line title in /resume.
  *
  * Pi's session picker displays session_info names instead of the first user
- * message. This extension uses the active provider to generate a short title
- * after each settled turn and stores it as the session name.
+ * message. This extension uses the active provider to generate one automatic
+ * title after the first meaningful completed turn.
  */
 
 import { readFile } from "node:fs/promises";
@@ -22,19 +22,34 @@ import {
 import { agentDirectory } from "../../shared/copilot-snapshots.js";
 
 const CUSTOM_TYPE = "session-summary";
+const AUTO_ATTEMPT_CUSTOM_TYPE = "session-summary-auto-attempt";
 const CONFIG_FILE = "pi-session-summary.json";
 const MAX_TRANSCRIPT_CHARS = 80_000;
+const MAX_AUTOMATIC_TRANSCRIPT_CHARS = 8_000;
 const MAX_TITLE_CHARS = 140;
 const MAX_OUTPUT_TOKENS = 800;
 const SUMMARY_TIMEOUT_MS = 20_000;
 const RESUMMARIZE_TOKEN_THRESHOLD = 20_000;
-const STATUS_KEY = "session-summary";
 const USAGE_CHANGED_EVENT = "pi-tools:session-summary-usage";
 const TRANSCRIPT_TOKEN_RATIO = 4;
 const REQUEST_OVERHEAD_CHARS = 256;
 const MAX_DIAGNOSTIC_CHARS = 600;
 const MAX_DIAGNOSTIC_ATTEMPTS = 4;
 const LEGACY_MODEL_LABEL = "github-copilot/gpt-5.6-luna";
+const TERMINAL_ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)/gu;
+const LOW_SIGNAL_INPUTS = new Set([
+  "hi",
+  "hello",
+  "hey",
+  "thanks",
+  "thank you",
+  "ok",
+  "okay",
+  "yes",
+  "no",
+  "test",
+  "ping",
+]);
 
 const BUILTIN_PROFILES: ReadonlyMap<string, readonly string[]> = new Map([
   ["github-copilot", ["gpt-5.6-luna"]],
@@ -70,11 +85,14 @@ type UsageAttachment = {
   model: string;
 };
 
+type SummaryRunSource = "automatic" | "manual" | "backfill";
+
 type AutoSummaryData = {
   name?: string;
   messageCount: number;
   provider?: string;
   model?: string;
+  source?: SummaryRunSource;
   attempts?: SummaryAttempt[];
   usage?: Usage;
   usageAttached?: boolean;
@@ -82,6 +100,7 @@ type AutoSummaryData = {
 };
 
 type SummaryUpdate = {
+  status: "skipped" | "busy" | "success" | "failure";
   title?: string;
   usage?: Usage;
   usageAttached: boolean;
@@ -199,7 +218,8 @@ function formatCost(cost: number): string {
 
 function boundedText(text: string, max = 120): string {
   const normalized = text
-    .replace(/[\r\n\t]+/g, " ")
+    .replace(TERMINAL_ESCAPE, "")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
   return normalized.length <= max ? normalized : `${normalized.slice(0, max - 1)}…`;
@@ -249,6 +269,44 @@ function serializeConversationText(entries: SessionEntry[], fromMessage = 0): st
   return serializeConversation(convertToLlm(messages)).trim();
 }
 
+function latestUserMessage(
+  entries: SessionEntry[],
+): Extract<SessionEntry, { type: "message" }> | undefined {
+  return [...getMessageEntries(entries)].reverse().find((entry) => entry.message.role === "user");
+}
+
+function meaningfulUserInput(entries: SessionEntry[]): boolean {
+  const entry = latestUserMessage(entries);
+  if (entry?.message.role !== "user") return false;
+  const content = entry.message.content;
+  if (typeof content === "string") {
+    const normalized = content
+      .toLocaleLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, " ")
+      .trim();
+    return Boolean(normalized && !LOW_SIGNAL_INPUTS.has(normalized));
+  }
+
+  const text: string[] = [];
+  for (const block of content) {
+    if (block.type === "image") return true;
+    if (block.type === "text") text.push(block.text);
+  }
+  const normalized = text
+    .join(" ")
+    .toLocaleLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+  return Boolean(normalized && !LOW_SIGNAL_INPUTS.has(normalized));
+}
+
+function automaticConversation(entries: SessionEntry[], currentMessage: AssistantMessage): string {
+  const user = latestUserMessage(entries);
+  if (user?.message.role !== "user") return "";
+  const conversation = serializeConversation(convertToLlm([user.message, currentMessage])).trim();
+  return truncateTranscript(conversation, MAX_AUTOMATIC_TRANSCRIPT_CHARS);
+}
+
 function getLatestSessionInfo(
   entries: SessionEntry[],
 ): Extract<SessionEntry, { type: "session_info" }> | undefined {
@@ -259,7 +317,7 @@ function getLatestSessionInfo(
     });
 }
 
-function getLatestAutoSummary(entries: SessionEntry[]): AutoSummaryData | undefined {
+function getLatestSuccessfulSummary(entries: SessionEntry[]): AutoSummaryData | undefined {
   for (const entry of [...entries].reverse()) {
     if (entry.type !== "custom" || entry.customType !== CUSTOM_TYPE) continue;
     const data = entry.data;
@@ -279,6 +337,14 @@ function getLatestAutoSummary(entries: SessionEntry[]): AutoSummaryData | undefi
     };
   }
   return undefined;
+}
+
+function hasAutomaticAttempt(entries: SessionEntry[]): boolean {
+  return entries.some(
+    (entry) =>
+      entry.type === "custom" &&
+      (entry.customType === AUTO_ATTEMPT_CUSTOM_TYPE || entry.customType === CUSTOM_TYPE),
+  );
 }
 
 function usageFromUnknown(value: unknown): Usage | undefined {
@@ -370,7 +436,7 @@ function hasExplicitName(entries: SessionEntry[], currentName: string | undefine
   const latestInfo = getLatestSessionInfo(entries);
   if (!latestInfo) return currentName !== undefined;
 
-  const auto = getLatestAutoSummary(entries);
+  const auto = getLatestSuccessfulSummary(entries);
   if (auto && currentName === auto.name) return false;
 
   // A latest session_info entry without a name represents an intentional clear
@@ -584,12 +650,15 @@ async function generateTitle(
   previousSummary: string,
   lastSummaryMessageCount: number,
   profiles: SessionSummaryProfiles,
-  pinnedModels: Map<string, string>,
-  onAttempt?: (label: string) => void,
+  pinnedModels: ReadonlyMap<string, string>,
+  options?: { conversation?: string; forceFull?: boolean; signal?: AbortSignal },
 ): Promise<TitleResult> {
   const tokenEstimate = (text: string) => Math.ceil(text.length / TRANSCRIPT_TOKEN_RATIO);
-  const previousConversation = serializeConversationText(entries, lastSummaryMessageCount);
-  if (!previousConversation)
+  const suppliedConversation = options?.conversation?.trim();
+  const previousConversation = options?.forceFull
+    ? serializeConversationText(entries)
+    : serializeConversationText(entries, lastSummaryMessageCount);
+  if (!suppliedConversation && !previousConversation)
     return { attempts: [], diagnostic: "No conversation is available to summarize" };
 
   const activeModel = ctx.model;
@@ -602,10 +671,17 @@ async function generateTitle(
 
   const fullConversation = serializeConversationText(entries);
   const shouldResummarize =
-    !previousSummary || tokenEstimate(previousConversation) >= RESUMMARIZE_TOKEN_THRESHOLD;
-  const conversation = shouldResummarize ? fullConversation : previousConversation;
+    Boolean(suppliedConversation) ||
+    options?.forceFull === true ||
+    !previousSummary ||
+    tokenEstimate(previousConversation) >= RESUMMARIZE_TOKEN_THRESHOLD;
+  const conversation =
+    suppliedConversation ?? (shouldResummarize ? fullConversation : previousConversation);
   const attempts: SummaryAttempt[] = [];
   const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (options?.signal?.aborted) controller.abort();
+  else options?.signal?.addEventListener("abort", abort, { once: true });
   const deadline = Date.now() + SUMMARY_TIMEOUT_MS;
   const timeout = setTimeout(() => controller.abort(), SUMMARY_TIMEOUT_MS);
 
@@ -613,7 +689,6 @@ async function generateTitle(
     for (const candidate of candidates) {
       if (controller.signal.aborted || Date.now() >= deadline) break;
       const label = `${provider}/${candidate}`;
-      onAttempt?.(label);
       let model: NonNullable<ExtensionContext["model"]> | undefined;
       try {
         model = ctx.modelRegistry.find(provider, candidate);
@@ -749,7 +824,6 @@ async function generateTitle(
       }
 
       attempts.push({ provider, model: candidate, outcome: "success", usage: response.usage });
-      pinnedModels.set(provider, candidate);
       return {
         title,
         provider,
@@ -760,6 +834,7 @@ async function generateTitle(
     }
   } finally {
     clearTimeout(timeout);
+    options?.signal?.removeEventListener("abort", abort);
   }
 
   return {
@@ -772,12 +847,14 @@ async function generateTitle(
 function persistedSummaryData(
   result: TitleResult,
   messageCount: number,
+  source: SummaryRunSource,
   usageAttached: boolean,
   usageAttachment?: UsageAttachment,
 ): AutoSummaryData {
   return {
     ...(result.title ? { name: result.title } : {}),
     messageCount,
+    source,
     ...(result.provider ? { provider: result.provider } : {}),
     ...(result.model ? { model: result.model } : {}),
     attempts: result.attempts,
@@ -791,6 +868,7 @@ function persistCurrentSummary(
   pi: ExtensionAPI,
   result: TitleResult,
   messageCount: number,
+  source: SummaryRunSource,
   usageAttached: boolean,
   usageAttachment?: UsageAttachment,
 ): void {
@@ -798,13 +876,24 @@ function persistCurrentSummary(
   if (result.title || result.attempts.length > 0) {
     pi.appendEntry(
       CUSTOM_TYPE,
-      persistedSummaryData(result, messageCount, usageAttached, usageAttachment),
+      persistedSummaryData(result, messageCount, source, usageAttached, usageAttachment),
     );
   }
 }
 
 function notifyUsageChanged(pi: ExtensionAPI): void {
   pi.events.emit(USAGE_CHANGED_EVENT, undefined);
+}
+
+function backfillFailureMessage(failures: string[], total: number): string {
+  const shown = failures
+    .slice(0, MAX_DIAGNOSTIC_ATTEMPTS)
+    .map((failure) => boundedText(failure, 140));
+  if (failures.length > shown.length) shown.push(`and ${failures.length - shown.length} more`);
+  return boundedText(
+    `Could not complete title backfill for ${failures.length} of ${total} sessions${shown.length ? ` (${shown.join("; ")})` : ""}`,
+    MAX_DIAGNOSTIC_CHARS,
+  );
 }
 
 function costReport(ledger: UsageLedger): string {
@@ -823,152 +912,225 @@ function costReport(ledger: UsageLedger): string {
 }
 
 export default function (pi: ExtensionAPI) {
-  let summarizing = false;
+  let runtimeActive = false;
   let sessionId: string | undefined;
+  let sessionGeneration = 0;
+  let automaticAttempted = false;
   let lastSummary = "";
   let lastSummaryMessageCount = 0;
   let summaryUsage = createUsageLedger();
   let profiles: SessionSummaryProfiles = BUILTIN_PROFILES;
-  const pinnedModels = new Map<string, string>();
+  let pinnedModels = new Map<string, string>();
+  let activeRun:
+    | {
+        token: symbol;
+        sessionId: string;
+        generation: number;
+        source: SummaryRunSource;
+        controller: AbortController;
+      }
+    | undefined;
+
+  const isCurrentSession = (capturedSessionId: string, generation: number): boolean =>
+    runtimeActive && sessionId === capturedSessionId && sessionGeneration === generation;
+
+  function releaseRun(token: symbol): void {
+    if (activeRun?.token === token) activeRun = undefined;
+  }
 
   async function updateCurrentSession(
     ctx: ExtensionContext,
-    force: boolean,
+    source: "automatic" | "manual",
     currentMessage?: AssistantMessage,
-  ): Promise<SummaryUpdate | undefined> {
-    if (summarizing) return undefined;
-    if (process.env.PI_SESSION_SUMMARY === "off") return undefined;
+  ): Promise<SummaryUpdate> {
+    if (process.env.PI_SESSION_SUMMARY === "off") {
+      return { status: "skipped", usageAttached: false };
+    }
 
-    const branch = ctx.sessionManager.getBranch();
-    const entries: SessionEntry[] = currentMessage
-      ? [
-          ...branch,
-          {
-            type: "message",
-            id: "session-summary-current-message",
-            parentId: branch.at(-1)?.id ?? null,
-            timestamp: new Date().toISOString(),
-            message: currentMessage,
-          },
-        ]
-      : branch;
+    const capturedSessionId = sessionId;
+    const capturedGeneration = sessionGeneration;
+    if (!capturedSessionId || !isCurrentSession(capturedSessionId, capturedGeneration)) {
+      return { status: "skipped", usageAttached: false };
+    }
+
+    const entries = ctx.sessionManager.getBranch();
     const messageCount = getMessageEntries(entries).length;
-    const currentName = pi.getSessionName();
-    const auto = getLatestAutoSummary(entries);
 
-    if (!force) {
-      if (hasExplicitName(entries, currentName)) return undefined;
-      if (messageCount < 2 || messageCount === lastSummaryMessageCount) return undefined;
-      if (auto?.messageCount === messageCount && currentName === auto.name) {
-        return { title: auto.name, usage: undefined, usageAttached: false };
+    if (source === "automatic") {
+      if (
+        automaticAttempted ||
+        hasAutomaticAttempt(ctx.sessionManager.getEntries()) ||
+        hasExplicitName(entries, pi.getSessionName()) ||
+        !currentMessage ||
+        !meaningfulUserInput(entries)
+      ) {
+        return { status: "skipped", usageAttached: false };
       }
     }
 
-    summarizing = true;
-    let diagnosticShown = false;
-    const setAttemptStatus = (label: string) => {
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(STATUS_KEY, ctx.ui.theme.fg("muted", `summary prompt fired (${label})…`));
-      }
+    if (activeRun) {
+      return source === "automatic"
+        ? { status: "skipped", usageAttached: false }
+        : {
+            status: "busy",
+            usageAttached: false,
+            diagnostic: "Session Summary is already running",
+          };
+    }
+
+    const token = Symbol("session-summary-run");
+    const controller = new AbortController();
+    activeRun = {
+      token,
+      sessionId: capturedSessionId,
+      generation: capturedGeneration,
+      source,
+      controller,
     };
+
     try {
+      if (source === "automatic") {
+        automaticAttempted = true;
+        try {
+          pi.appendEntry(AUTO_ATTEMPT_CUSTOM_TYPE, { version: 1, messageCount });
+        } catch {
+          return {
+            status: "failure",
+            usageAttached: false,
+            diagnostic: "The automatic title attempt could not be recorded",
+          };
+        }
+      }
+
       const result = await generateTitle(
         ctx,
         entries,
-        lastSummary,
-        lastSummaryMessageCount,
+        source === "manual" ? "" : lastSummary,
+        source === "manual" ? 0 : lastSummaryMessageCount,
         profiles,
         pinnedModels,
-        setAttemptStatus,
-      );
-      const usageAttached = Boolean(currentMessage && result.usage);
-      const usageAttachment =
-        usageAttached && currentMessage
+        source === "automatic" && currentMessage
           ? {
-              messageTimestamp: currentMessage.timestamp,
-              provider: currentMessage.provider,
-              model: currentMessage.model,
+              conversation: automaticConversation(entries, currentMessage),
+              signal: controller.signal,
             }
-          : undefined;
-      persistCurrentSummary(pi, result, messageCount, usageAttached, usageAttachment);
+          : { forceFull: true, signal: controller.signal },
+      );
+
+      if (!isCurrentSession(capturedSessionId, capturedGeneration)) {
+        return { status: "skipped", usageAttached: false };
+      }
+
+      if (result.provider && result.model && result.title) {
+        pinnedModels.set(result.provider, result.model);
+      }
+
+      const usageAttached = false;
+      const usageAttachment = undefined;
+      const manualNameWon =
+        source === "automatic" &&
+        Boolean(result.title) &&
+        hasExplicitName(ctx.sessionManager.getBranch(), pi.getSessionName());
+      const persistedResult = manualNameWon ? { ...result, title: undefined } : result;
+      let persistenceDiagnostic: string | undefined;
+      try {
+        persistCurrentSummary(
+          pi,
+          persistedResult,
+          messageCount,
+          source,
+          usageAttached,
+          usageAttachment,
+        );
+      } catch {
+        persistenceDiagnostic = "The session title result could not be saved";
+      }
+
       addAttemptUsage(summaryUsage, result.attempts);
       if (result.usage) notifyUsageChanged(pi);
 
+      if (persistenceDiagnostic) {
+        return {
+          status: "failure",
+          diagnostic: persistenceDiagnostic,
+          usage: result.usage,
+          usageAttached,
+        };
+      }
+      if (manualNameWon) {
+        return { status: "skipped", usage: result.usage, usageAttached };
+      }
       if (!result.title) {
-        const diagnostic = result.diagnostic ?? "The active provider returned no title";
-        if (ctx.hasUI) {
-          ctx.ui.setStatus(
-            STATUS_KEY,
-            ctx.ui.theme.fg("warning", `summary unavailable: ${diagnostic}`),
-          );
-          diagnosticShown = true;
-        }
-        return { diagnostic, usage: result.usage, usageAttached };
+        return {
+          status: "failure",
+          diagnostic: result.diagnostic ?? "The active provider returned no title",
+          usage: result.usage,
+          usageAttached,
+        };
       }
 
       lastSummary = result.title;
       lastSummaryMessageCount = messageCount;
-      return { title: result.title, usage: result.usage, usageAttached };
-    } catch {
-      const diagnostic = "The session summary could not persist its result";
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(
-          STATUS_KEY,
-          ctx.ui.theme.fg("warning", `summary unavailable: ${diagnostic}`),
-        );
-        diagnosticShown = true;
-      }
-      return { diagnostic, usageAttached: false };
+      return { status: "success", title: result.title, usage: result.usage, usageAttached };
     } finally {
-      summarizing = false;
-      if (ctx.hasUI && !diagnosticShown) ctx.ui.setStatus(STATUS_KEY, undefined);
+      releaseRun(token);
     }
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    activeRun?.controller.abort();
+    runtimeActive = true;
+    sessionGeneration += 1;
+    const capturedGeneration = sessionGeneration;
     const nextSessionId = ctx.sessionManager.getSessionId();
-    if (sessionId !== nextSessionId) pinnedModels.clear();
     sessionId = nextSessionId;
-    const entries = ctx.sessionManager.getBranch();
-    const auto = getLatestAutoSummary(entries);
-    lastSummary = auto?.name ?? "";
-    lastSummaryMessageCount = auto?.messageCount ?? 0;
-    summaryUsage = getSummaryUsage(ctx.sessionManager.getEntries());
-    profiles = await loadSessionSummaryProfiles({
+    activeRun = undefined;
+    pinnedModels = new Map();
+
+    const branch = ctx.sessionManager.getBranch();
+    const latest = getLatestSuccessfulSummary(branch);
+    lastSummary = latest?.name ?? "";
+    lastSummaryMessageCount = latest?.messageCount ?? 0;
+    const allEntries = ctx.sessionManager.getEntries();
+    automaticAttempted = hasAutomaticAttempt(allEntries);
+    summaryUsage = getSummaryUsage(allEntries);
+
+    const loadedProfiles = await loadSessionSummaryProfiles({
       cwd: ctx.cwd,
       trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
     });
-    if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+    if (!isCurrentSession(nextSessionId, capturedGeneration)) return;
+    profiles = loadedProfiles;
     notifyUsageChanged(pi);
   });
 
-  pi.on("message_end", async (event, ctx) => {
+  pi.on("session_shutdown", () => {
+    activeRun?.controller.abort();
+    runtimeActive = false;
+    sessionGeneration += 1;
+    activeRun = undefined;
+  });
+
+  pi.on("agent_end", async (event, ctx) => {
     if (ctx.mode !== "tui" || sessionId !== ctx.sessionManager.getSessionId()) return;
-    if (event.message.role !== "assistant") return;
-    if (event.message.content.some((content) => content.type === "toolCall")) return;
+    const message = [...event.messages]
+      .reverse()
+      .find((candidate): candidate is AssistantMessage => candidate.role === "assistant");
+    if (message?.stopReason !== "stop") return;
+    if (message.content.some((content) => content.type === "toolCall")) return;
 
-    const result = await updateCurrentSession(ctx, false, event.message);
-    if (!result?.usage || !result.usageAttached) return;
-
-    return {
-      message: {
-        ...event.message,
-        usage: mergeUsage(event.message.usage, result.usage),
-      },
-    };
+    const result = await updateCurrentSession(ctx, "automatic", message);
+    if (result.status === "failure" && ctx.hasUI) {
+      ctx.ui.notify(`Session title unavailable: ${result.diagnostic}`, "warning");
+    }
   });
 
   pi.registerCommand("session-summary", {
     description: "Generate or refresh the current session title shown by /resume",
     handler: async (_args, ctx) => {
-      const result = await updateCurrentSession(ctx, true);
-      if (ctx.hasUI && !result?.title) {
-        ctx.ui.notify(
-          `Could not generate a session summary${result?.diagnostic ? `: ${result.diagnostic}` : ""}`,
-          "warning",
-        );
-      } else if (result?.title && ctx.hasUI) {
-        ctx.ui.notify(`Session title: ${result.title}`, "info");
+      const result = await updateCurrentSession(ctx, "manual");
+      if ((result.status === "busy" || result.status === "failure") && ctx.hasUI) {
+        ctx.ui.notify(result.diagnostic ?? "The session title could not be generated", "warning");
       }
     },
   });
@@ -985,62 +1147,96 @@ export default function (pi: ExtensionAPI) {
     handler: async (_args, ctx) => {
       if (process.env.PI_SESSION_SUMMARY === "off") return;
 
-      const currentPath = ctx.sessionManager.getSessionFile();
-      const sessions = await SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
-      const unnamed = sessions.filter((session) => !session.name && session.path !== currentPath);
-      if (unnamed.length === 0) {
-        if (ctx.hasUI) ctx.ui.notify("No unnamed sessions found in this project", "info");
+      const capturedSessionId = sessionId;
+      const capturedGeneration = sessionGeneration;
+      if (!capturedSessionId || !isCurrentSession(capturedSessionId, capturedGeneration)) return;
+      if (activeRun) {
+        if (ctx.hasUI) ctx.ui.notify("Session Summary is already running", "warning");
         return;
       }
 
-      let updated = 0;
-      for (const [index, session] of unnamed.entries()) {
+      const token = Symbol("session-summary-backfill");
+      const controller = new AbortController();
+      activeRun = {
+        token,
+        sessionId: capturedSessionId,
+        generation: capturedGeneration,
+        source: "backfill",
+        controller,
+      };
+      try {
+        let sessions: Awaited<ReturnType<typeof SessionManager.list>>;
         try {
-          const manager = SessionManager.open(session.path, ctx.sessionManager.getSessionDir());
-          const branch = manager.getBranch();
-          const existing = getLatestAutoSummary(branch);
-          const result = await generateTitle(
-            ctx,
-            branch,
-            existing?.name ?? "",
-            existing?.messageCount ?? 0,
-            profiles,
-            pinnedModels,
-            (label) => {
-              if (ctx.hasUI) {
-                ctx.ui.setStatus(
-                  STATUS_KEY,
-                  ctx.ui.theme.fg(
-                    "muted",
-                    `summary prompt fired (${label}) for session ${index + 1}/${unnamed.length}…`,
-                  ),
-                );
-              }
-            },
-          );
-          const messageCount = getMessageEntries(branch).length;
-          if (result.title) {
-            manager.appendSessionInfo(result.title);
-            updated += 1;
-          }
-          if (result.title || result.attempts.length > 0) {
-            manager.appendCustomEntry(
-              CUSTOM_TYPE,
-              persistedSummaryData(result, messageCount, false),
-            );
-          }
-          addAttemptUsage(summaryUsage, result.attempts);
+          sessions = await SessionManager.list(ctx.cwd, ctx.sessionManager.getSessionDir());
         } catch {
-          // One unreadable or unauthenticated session must not stop the batch.
+          if (isCurrentSession(capturedSessionId, capturedGeneration) && ctx.hasUI) {
+            ctx.ui.notify("Could not list sessions for title backfill", "warning");
+          }
+          return;
         }
-      }
-      notifyUsageChanged(pi);
-      if (ctx.hasUI) {
-        ctx.ui.setStatus(STATUS_KEY, undefined);
-        ctx.ui.notify(
-          `Added summaries to ${updated} of ${unnamed.length} unnamed sessions`,
-          "info",
-        );
+        if (!isCurrentSession(capturedSessionId, capturedGeneration)) return;
+
+        const currentPath = ctx.sessionManager.getSessionFile();
+        const unnamed = sessions.filter((session) => !session.name && session.path !== currentPath);
+        if (unnamed.length === 0) return;
+
+        const failures: string[] = [];
+        let usageChanged = false;
+        for (const [index, session] of unnamed.entries()) {
+          if (!isCurrentSession(capturedSessionId, capturedGeneration)) return;
+          let failure: string | undefined;
+          try {
+            const manager = SessionManager.open(session.path, ctx.sessionManager.getSessionDir());
+            const branch = manager.getBranch();
+            const existing = getLatestSuccessfulSummary(branch);
+            const result = await generateTitle(
+              ctx,
+              branch,
+              existing?.name ?? "",
+              existing?.messageCount ?? 0,
+              profiles,
+              pinnedModels,
+              { forceFull: true, signal: controller.signal },
+            );
+            if (!isCurrentSession(capturedSessionId, capturedGeneration)) return;
+
+            const messageCount = getMessageEntries(branch).length;
+            addAttemptUsage(summaryUsage, result.attempts);
+            if (result.usage) usageChanged = true;
+            if (result.provider && result.model && result.title) {
+              pinnedModels.set(result.provider, result.model);
+            }
+            if (result.title) {
+              try {
+                manager.appendSessionInfo(result.title);
+              } catch {
+                failure = "the generated title could not be saved";
+              }
+            } else {
+              failure = result.diagnostic ?? "the provider returned no title";
+            }
+            if (result.title || result.attempts.length > 0) {
+              try {
+                manager.appendCustomEntry(
+                  CUSTOM_TYPE,
+                  persistedSummaryData(result, messageCount, "backfill", false),
+                );
+              } catch {
+                failure ??= "the title usage record could not be saved";
+              }
+            }
+          } catch {
+            failure = "the session could not be read or updated";
+          }
+          if (failure) failures.push(`Session ${index + 1}: ${failure}`);
+        }
+
+        if (usageChanged) notifyUsageChanged(pi);
+        if (failures.length > 0 && ctx.hasUI) {
+          ctx.ui.notify(backfillFailureMessage(failures, unnamed.length), "warning");
+        }
+      } finally {
+        releaseRun(token);
       }
     },
   });

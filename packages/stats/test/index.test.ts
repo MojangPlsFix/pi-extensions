@@ -65,6 +65,12 @@ describe("stats periods and historical records", () => {
         }),
         JSON.stringify({
           type: "custom",
+          customType: "session-summary-auto-attempt",
+          timestamp,
+          data: { version: 1, messageCount: 2 },
+        }),
+        JSON.stringify({
+          type: "custom",
           customType: "unrelated-summary",
           timestamp,
           usage: { input: 1000 },
@@ -109,8 +115,8 @@ describe("stats periods and historical records", () => {
       join(directory, "main.jsonl"),
       [
         JSON.stringify({ type: "session", id: "main", cwd: "/project" }),
-        // Session Summary appends its custom entry from message_end before Pi
-        // persists the replacement parent assistant message.
+        // Historical Session Summary runs could append their custom entry from
+        // message_end before Pi persisted the replacement assistant message.
         JSON.stringify({
           type: "custom",
           customType: "session-summary",

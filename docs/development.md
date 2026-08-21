@@ -38,4 +38,11 @@ Test `/reload`, `/plan`, `/plan off`, plan implementation, and `/agents`. Test S
 3. Make Spark unavailable and confirm the Codex Luna fallback.
 4. Use an unprofiled provider and confirm that its active model handles the request.
 5. Switch providers and confirm that Session Summary never sends data across providers.
-6. Run `/session-summary`, `/session-summaries`, and `/session-summary-cost` without optional tools.
+6. Confirm that the first meaningful completed turn starts one automatic attempt.
+7. Confirm that later turns, restarts, and `/tree` navigation do not start another automatic attempt.
+8. Confirm that a greeting, a tool call, and an incomplete response do not consume the attempt.
+9. Confirm that Pi's working row stays visible and that Session Summary adds no status row.
+10. Confirm that an automatic failure shows one warning and does not retry.
+11. Confirm that successful manual and backfill commands are silent.
+12. Confirm that manual failures show a warning and mixed backfill failures show one aggregate warning.
+13. Run `/session-summary`, `/session-summaries`, and `/session-summary-cost` without optional tools.

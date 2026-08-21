@@ -37,10 +37,10 @@ the report as a widget fallback.
 Stats reads usage from assistant messages, tool results, compaction entries, branch summaries, and
 compatible `session-summary` custom entries. New summary entries store each attempted provider model.
 Stats attributes returned usage to those models, including failed attempts that returned usage.
-Automatic summary usage is already present in its parent assistant message. Attachment metadata lets
-Stats reassign that usage without adding its tokens or cost again. Manual and backfill summary usage
-stays in the custom entry. Historical attached entries remain skipped, and historical unattached
-entries remain supported. Other custom entries are ignored. Malformed, empty, missing, and unreadable
+Current Session Summary runs keep usage in the custom entry. Historical automatic runs can attach
+usage to a parent assistant message. Stats reassigns that attached usage without adding its tokens or
+cost again. Historical attached and unattached entries remain supported. Other custom entries are
+ignored. Malformed, empty, missing, and unreadable
 files do not prevent a report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
 `PI_CODING_AGENT_SESSION_DIR`; hidden Hackler roots and the legacy nested Hackler root are
 scanned once, so Hackler usage is included in the overall totals exactly once and shown separately

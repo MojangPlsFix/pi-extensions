@@ -491,6 +491,11 @@ describe("Usage meter lifecycle", () => {
         customType: "session-summary",
         data: { usage: usage(2, 0, 0.02), usageAttached: false },
       },
+      {
+        type: "custom",
+        customType: "session-summary-auto-attempt",
+        data: { version: 1, messageCount: 2 },
+      },
     ];
     const subject = harness(
       async () => ({ remaining: 4, unlimited: false, unit: "ai_credits" }),

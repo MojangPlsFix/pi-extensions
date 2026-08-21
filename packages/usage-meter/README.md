@@ -47,11 +47,11 @@ Background refresh failures stay silent and clear the status line.
 
 ## Local Session Summary accounting
 
-The footer includes local Session Summary usage. Automatic summaries attach usage to a parent assistant message, so the footer skips the matching custom entry.
+The footer includes local Session Summary usage. Current summary runs keep usage in their custom entries.
 
-Manual and backfill summaries cannot attach to a parent message. The footer reads their custom entries and includes their tokens and cost.
+Historical automatic summaries can attach usage to a parent assistant message. The footer skips the matching custom entry in this case.
 
-The reader supports new per-attempt metadata and historical combined usage. It never adds attached usage twice.
+The reader supports per-attempt metadata and historical combined usage. It never adds attached usage twice.
 
 ## Authentication and endpoints
 

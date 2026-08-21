@@ -5,7 +5,7 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 ## Provider-aware behavior
 
 - Usage Meter runs with the active `github-copilot` or `openai-codex` provider.
-- Session Summary uses the active provider. Copilot uses Luna. Codex tries Spark before Luna. Other providers use their active model by default.
+- Session Summary makes one automatic attempt with the active provider. Copilot uses Luna. Codex tries Spark before Luna. Other providers use their active model.
 - The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
 - Hackler resolves model policy when it starts. Resolution checks an explicit review override, `models.overrides`, profile frontmatter, `models.default`, and the parent snapshot. `inherit` selects the parent value.
 
@@ -44,6 +44,8 @@ openai-codex: gpt-5.3-codex-spark, gpt-5.6-luna
 Spark uses separate five-hour and weekly limits during its research preview. Luna uses standard Codex/Work allowance when Codex falls back.
 
 Other providers use the active model unless a profile replaces it. Session Summary never routes a request to a different provider.
+
+Automatic generation runs after the first meaningful completed TUI turn. A persisted marker prevents automatic retries after restarts and `/tree` navigation. Session Summary uses Pi's current working row and creates no persistent status line.
 
 Global profiles use `<agent-dir>/pi-session-summary.json`. Trusted projects can use `<project>/.pi/pi-session-summary.json`.
 

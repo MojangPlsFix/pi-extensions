@@ -30,7 +30,7 @@ pi update --extensions
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private cache and sends a file reference to the model. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
 | [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Hackler subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
-| [Session Summary](packages/session-summary/) | Generates concise titles for unnamed sessions and shows them in `/resume`. | `/session-summary`, `/session-summary-cost`, `/session-summaries` | Active provider. Built-in Copilot and Codex profiles |
+| [Session Summary](packages/session-summary/) | Makes one automatic title attempt for an unnamed session and shows the result in `/resume`. | `/session-summary`, `/session-summary-cost`, `/session-summaries` | Active provider. Built-in Copilot and Codex profiles |
 | [Hackler](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
@@ -41,7 +41,7 @@ The package installs all 17 extension entrypoints. Missing optional tools do not
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
-- **Session Summary:** Session Summary uses the active provider. Copilot and Codex work without configuration. Set `PI_SESSION_SUMMARY=off` to disable it.
+- **Session Summary:** Session Summary uses the active provider. Copilot and Codex work without configuration. Automatic generation runs once after the first meaningful completed turn. It uses Pi's current working row and creates no persistent status. Set `PI_SESSION_SUMMARY=off` to disable it.
 - **Herdr:** Hackler can open display-only transcript panes. Herdr does not run or prompt child agents.
 - **Capabilities:** User configuration can load reviewed extensions, skills, and executable rules for selected profiles.
 - **External runners:** The manager starts configured commands without a shell and sends tasks through stdin.
@@ -109,7 +109,7 @@ Authenticate the selected provider before you start a child. Run `/agents doctor
 
 Use the [Hackler model-selection guide](packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral criteria.
 
-Session Summary uses `github-copilot/gpt-5.6-luna` for Copilot. Codex tries `gpt-5.3-codex-spark` before `gpt-5.6-luna`.
+Session Summary uses `github-copilot/gpt-5.6-luna` for Copilot. Codex tries `gpt-5.3-codex-spark` before `gpt-5.6-luna`. Automatic generation makes one persisted attempt per session. Use `/session-summary` for an explicit refresh.
 
 Spark uses separate five-hour and weekly limits during its research preview. The Luna fallback uses standard Codex/Work allowance.
 
