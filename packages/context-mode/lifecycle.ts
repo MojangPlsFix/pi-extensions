@@ -26,22 +26,102 @@ if (root) {
   upstreamLoadError = contextModeDiagnostic();
 }
 
-const ROUTING_ANCHOR =
-  "context-mode active. Hierarchy: ctx_batch_execute > ctx_execute > ctx_execute_file > ctx_search. " +
-  "Read/analyze one file → ctx_execute_file. Multi-command research → ctx_batch_execute. " +
-  "Web pages → ctx_fetch_and_index then ctx_search. Index docs → ctx_index. " +
-  "Stats → ctx_stats. Diagnostics → ctx_doctor.";
+const ROUTING_PREFIX = "context-mode active.";
 
-export function sanitizeInjectedRouting(messages: unknown): void {
+/** Build routing guidance from one authoritative Pi active-tool snapshot. */
+export function contextRoutingAnchor(activeTools: readonly string[]): string {
+  const active = new Set(activeTools);
+  const guidance: string[] = [];
+
+  if (active.has("read")) guidance.push("Exact file reads → read.");
+  if (active.has("ctx_execute_file"))
+    guidance.push(
+      "Code-driven analysis of one file → ctx_execute_file (not for exact file retrieval).",
+    );
+  if (active.has("ctx_execute")) guidance.push("General code-driven analysis → ctx_execute.");
+  if (active.has("ctx_batch_execute")) guidance.push("Multi-command research → ctx_batch_execute.");
+  if (active.has("ctx_search")) guidance.push("Search indexed material → ctx_search.");
+  if (active.has("ctx_fetch_and_index") && active.has("ctx_search"))
+    guidance.push("Web pages → ctx_fetch_and_index then ctx_search.");
+  if (active.has("ctx_index")) guidance.push("Index documents → ctx_index.");
+  if (active.has("ctx_stats")) guidance.push("Index and search statistics → ctx_stats.");
+  if (active.has("ctx_doctor")) guidance.push("Runtime diagnostics → ctx_doctor.");
+
+  return guidance.length === 0 ? ROUTING_PREFIX : `${ROUTING_PREFIX} ${guidance.join(" ")}`;
+}
+
+export const ROUTING_ANCHOR = contextRoutingAnchor([
+  "read",
+  "ctx_execute_file",
+  "ctx_execute",
+  "ctx_batch_execute",
+  "ctx_search",
+  "ctx_fetch_and_index",
+  "ctx_index",
+  "ctx_stats",
+  "ctx_doctor",
+]);
+
+/** Replace only the first routing paragraph; any memory/content suffix remains byte-for-byte. */
+export function sanitizeInjectedRouting(messages: unknown, routingAnchor = ROUTING_ANCHOR): void {
   if (!Array.isArray(messages)) return;
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
     const record = message as { role?: unknown; content?: unknown };
     if (record.role !== "user" || typeof record.content !== "string") continue;
-    if (!record.content.startsWith("context-mode active.")) continue;
-    const [, ...rest] = record.content.split("\n\n");
-    record.content = [ROUTING_ANCHOR, ...rest].join("\n\n");
+    if (!record.content.startsWith(ROUTING_PREFIX)) continue;
+    const paragraphBreak = /\r?\n\r?\n/u.exec(record.content);
+    const suffix = paragraphBreak ? record.content.slice(paragraphBreak.index) : "";
+    record.content = `${routingAnchor}${suffix}`;
   }
+}
+
+function activeRoutingAnchor(pi: ExtensionAPI): string {
+  try {
+    return contextRoutingAnchor(pi.getActiveTools());
+  } catch {
+    // A stale/replaced runtime can make the active-tool lookup unavailable. Never guess visibility.
+    return ROUTING_PREFIX;
+  }
+}
+
+function applySettledRouting(pi: ExtensionAPI, event: unknown, result: unknown): void {
+  // Use exactly one snapshot for the mutable event and any separately returned message array.
+  const routingAnchor = activeRoutingAnchor(pi);
+  sanitizeInjectedRouting((event as { messages?: unknown } | undefined)?.messages, routingAnchor);
+  sanitizeInjectedRouting(
+    Array.isArray(result) ? result : (result as { messages?: unknown } | undefined)?.messages,
+    routingAnchor,
+  );
+}
+
+/** Run an upstream context hook and route only after its synchronous/async work has settled. */
+export function runContextHandlerWithRouting(
+  pi: ExtensionAPI,
+  handler: Handler,
+  args: unknown[],
+): unknown {
+  let result: unknown;
+  try {
+    result = handler(...args);
+  } catch (error) {
+    applySettledRouting(pi, args[0], undefined);
+    throw error;
+  }
+  if (result && typeof (result as { then?: unknown }).then === "function") {
+    return Promise.resolve(result).then(
+      (value) => {
+        applySettledRouting(pi, args[0], value);
+        return value;
+      },
+      (error: unknown) => {
+        applySettledRouting(pi, args[0], undefined);
+        throw error;
+      },
+    );
+  }
+  applySettledRouting(pi, args[0], result);
+  return result;
 }
 
 async function withoutUpstreamBridge<T>(operation: () => T | Promise<T>): Promise<T> {
@@ -109,23 +189,7 @@ function lifecycleApi(pi: ExtensionAPI): ExtensionAPI {
           if (event === "context") {
             return pi.on(
               event as never,
-              ((...args: unknown[]) => {
-                const result = handler(...args);
-                if (result && typeof result.then === "function") {
-                  return Promise.resolve(result).then((value) => {
-                    sanitizeInjectedRouting(
-                      (args[0] as { messages?: unknown } | undefined)?.messages,
-                    );
-                    sanitizeInjectedRouting(
-                      (value as { messages?: unknown } | undefined)?.messages,
-                    );
-                    return value;
-                  });
-                }
-                sanitizeInjectedRouting((args[0] as { messages?: unknown } | undefined)?.messages);
-                sanitizeInjectedRouting((result as { messages?: unknown } | undefined)?.messages);
-                return result;
-              }) as never,
+              ((...args: unknown[]) => runContextHandlerWithRouting(pi, handler, args)) as never,
             );
           }
           return pi.on(event as never, handler as never);
@@ -148,5 +212,3 @@ export function registerContextLifecycle(pi: ExtensionAPI): void {
   }
   upstreamExtension(lifecycleApi(pi));
 }
-
-export { ROUTING_ANCHOR };

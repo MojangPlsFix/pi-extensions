@@ -50,10 +50,12 @@ export {
 export type { ContextDetails, ContextToolParams, ContextUpdate } from "./types.js";
 
 export const BRIDGE_TOOL_DESCRIPTIONS: Record<string, string> = {
-  ctx_index: "Index project text or files into the external Context Mode knowledge base.",
+  ctx_index:
+    "Write explicitly selected project text or files to the external Context Mode knowledge base.",
   ctx_search: "Search indexed Context Mode material and return bounded matching sections.",
-  ctx_fetch_and_index: "Fetch external sources and index the bounded results for later search.",
-  ctx_stats: "Show Context Mode indexing, search, and sandbox statistics.",
+  ctx_fetch_and_index:
+    "Perform a network fetch for an explicitly selected external source and write the bounded result to the external Context Mode knowledge base.",
+  ctx_stats: "Show read-only Context Mode indexing, search, and runtime statistics.",
   ctx_doctor: "Run read-only Context Mode runtime, storage, hook, and registration diagnostics.",
 };
 
@@ -695,14 +697,14 @@ export default function contextModeExtension(pi: ExtensionAPI): void {
       name: "ctx_execute",
       label: "Context Execute",
       description:
-        "Run code in a Pi-owned, abort-aware subprocess with bounded output, project-bound cwd, process-tree cleanup, and temporary-file cleanup.",
+        "Run caller-supplied code for bounded, code-driven analysis in a Pi-owned, abort-aware subprocess with a project-confined cwd and process-tree cleanup. This execution tool is unavailable in Plan Mode.",
       parameters: executionSchema,
     });
     register({
       name: "ctx_execute_file",
       label: "Context Execute File",
       description:
-        "Read a project-contained file into FILE_CONTENT and run code over it in a Pi-owned, abort-aware subprocess.",
+        "Run caller-supplied code over one project-contained file via FILE_CONTENT in a Pi-owned, abort-aware subprocess. This is code-driven analysis, not a read-only replacement for Pi's built-in read tool. This execution tool is unavailable in Plan Mode.",
       parameters: fileSchema,
       file: true,
     });
@@ -710,7 +712,7 @@ export default function contextModeExtension(pi: ExtensionAPI): void {
       name: "ctx_batch_execute",
       label: "Context Batch Execute",
       description:
-        "Run multiple shell commands with bounded concurrency and hard cancellation, index their combined output, then return matching indexed sections.",
+        "Run caller-supplied shell commands with bounded concurrency and hard cancellation, index their combined output, then return matching indexed sections. This execution tool is unavailable in Plan Mode.",
       parameters: batchSchema,
     });
   }

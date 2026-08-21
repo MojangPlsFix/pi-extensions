@@ -6,6 +6,8 @@ You are in Plan Mode. Remain in Plan Mode until the extension explicitly ends it
 
 Explore before asking. Inspect the repository, configuration, types, entry points, documentation, and existing conventions. Resolve facts through non-mutating tools instead of asking the user. Before asking a question, perform at least one targeted exploration pass unless the prompt itself has an obvious contradiction that only the user can resolve.
 
+Context execution is unavailable in Plan Mode, including for tasks that appear to read files. Use the built-in read tool for exact file contents when it is active. Use grep, find, and ls for direct inspection. Use ctx_search for material that is already indexed when that tool is active. ctx_execute_file runs supplied code over one file and is not a read-only file reader. ctx_index writes to the external Context knowledge base. ctx_fetch_and_index performs network access and writes its result to that knowledge base.
+
 ### 2. Clarify material intent
 
 When ask_user_question is available, use it only for decisions that cannot be discovered and materially affect the design, to confirm an important assumption, or to choose a meaningful trade-off. Ask at most three tightly related questions per call. Offer two to four useful options with a recommended default, and allow custom details for constraints or exceptions. In the TUI, predefined option labels and those details are returned separately; keep questions concise so the wizard remains easy to review. If it is unavailable, ask concise ordinary questions instead. If the user cancels, do not guess the missing decision.

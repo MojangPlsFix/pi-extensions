@@ -5,9 +5,17 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
-import planModeExtension from "../index.js";
+import planModeExtension, { PlanModeBashPolicyError } from "../index.js";
 
 type Handler = (...args: any[]) => any;
+type MockExecResult = { stdout: string; stderr: string; code: number; killed: boolean };
+const contextMutators = [
+  "ctx_execute",
+  "ctx_execute_file",
+  "ctx_batch_execute",
+  "ctx_upgrade",
+  "ctx_purge",
+] as const;
 
 function harness(
   options: {
@@ -42,6 +50,11 @@ function harness(
     replacementSendError?: Error;
     newSessionErrorAfterInvalidation?: Error;
     replacementHasUI?: boolean;
+    rtkVersion?: string;
+    rtkVersions?: Array<string | undefined>;
+    rtkProbeResults?: MockExecResult[];
+    rtkProbeError?: Error;
+    rtkProbeDelayMs?: number;
   } = {},
 ) {
   const selections = [...(options.selections ?? [])];
@@ -63,7 +76,11 @@ function harness(
   const replacementNotifications: Array<{ message: string; level: string }> = [];
   const staleAccesses: string[] = [];
   const selectCalls: Array<{ title: string; options: string[] }> = [];
-  let activeTools = ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"];
+  const execCalls: Array<{ command: string; args: string[]; timeout?: number }> = [];
+  const rtkVersions = [...(options.rtkVersions ?? [])];
+  const rtkProbeResults = [...(options.rtkProbeResults ?? [])];
+  const allToolNames = ["read", "bash", "edit", "write", "ask_user_question", ...contextMutators];
+  let activeTools = [...allToolNames];
   let oldRuntimeActive = true;
   const assertOldRuntimeActive = (operation: string): void => {
     if (oldRuntimeActive) return;
@@ -85,6 +102,26 @@ function harness(
       assertOldRuntimeActive("pi.appendEntry");
       entries.push({ type: "custom", customType, data, id: `entry-${entries.length}` });
     },
+    async exec(command: string, args: string[], execOptions?: { timeout?: number }) {
+      assertOldRuntimeActive("pi.exec");
+      execCalls.push({
+        command,
+        args: [...args],
+        ...(execOptions?.timeout ? { timeout: execOptions.timeout } : {}),
+      });
+      if (options.rtkProbeDelayMs) {
+        await new Promise((resolve) => setTimeout(resolve, options.rtkProbeDelayMs));
+      }
+      if (options.rtkProbeError) throw options.rtkProbeError;
+      const queuedResult = rtkProbeResults.shift();
+      if (queuedResult) return queuedResult;
+      const hasQueuedVersion = rtkVersions.length > 0;
+      const queuedVersion = hasQueuedVersion ? rtkVersions.shift() : undefined;
+      const stdout = hasQueuedVersion ? queuedVersion : (options.rtkVersion ?? "rtk 0.27.4\n");
+      return stdout === undefined
+        ? { stdout: "", stderr: "not found", code: 127, killed: false }
+        : { stdout, stderr: "", code: 0, killed: false };
+    },
     getActiveTools: () => {
       assertOldRuntimeActive("pi.getActiveTools");
       return [...activeTools];
@@ -95,9 +132,7 @@ function harness(
     },
     getAllTools: () => {
       assertOldRuntimeActive("pi.getAllTools");
-      return ["read", "bash", "edit", "write", "ask_user_question", "ctx_execute"].map((name) => ({
-        name,
-      }));
+      return allToolNames.map((name) => ({ name }));
     },
     sendUserMessage(message: string) {
       assertOldRuntimeActive("pi.sendUserMessage");
@@ -229,8 +264,12 @@ function harness(
     replacementNotifications,
     staleAccesses,
     selectCalls,
+    execCalls,
     context,
     activeTools: () => activeTools,
+    setActiveToolsForTest(names: string[]) {
+      activeTools = [...names];
+    },
     emitExtensionEvent(name: string, data: unknown) {
       for (const handler of bus.get(name) ?? []) handler(data);
     },
@@ -252,6 +291,20 @@ async function emit(
   );
 }
 
+async function emitSequential(
+  subject: ReturnType<typeof harness>,
+  name: string,
+  event: unknown,
+): Promise<any[]> {
+  const results: any[] = [];
+  for (const handler of subject.handlers.get(name) ?? []) {
+    const result = await handler(event, subject.context as ExtensionContext);
+    results.push(result);
+    if (result?.block) break;
+  }
+  return results;
+}
+
 describe("Plan Mode lifecycle", () => {
   it("offers only the active /plan off completion and fresh implementation completion", async () => {
     const subject = harness();
@@ -271,12 +324,308 @@ describe("Plan Mode lifecycle", () => {
     await emit(subject, "session_start", {});
     await subject.commands.get("plan")?.("review auth", subject.context);
     expect(subject.sent).toEqual(["review auth"]);
-    expect(subject.activeTools()).not.toContain("edit");
+    expect(subject.activeTools()).toContain("read");
+    for (const tool of ["edit", ...contextMutators])
+      expect(subject.activeTools(), tool).not.toContain(tool);
     expect((await emit(subject, "tool_call", { toolName: "edit", input: {} }))[0]).toMatchObject({
       block: true,
     });
     await subject.commands.get("plan")?.("off", subject.context);
     expect(subject.activeTools()).toEqual(expect.arrayContaining(["edit", "write"]));
+  });
+
+  it("restores persisted Plan state across tree changes and restores tools on shutdown", async () => {
+    const subject = harness();
+    subject.entries.push({
+      type: "custom",
+      customType: "pi-extensions:plan-mode-state",
+      data: {
+        version: 1,
+        mode: "plan",
+        disabledTools: ["edit", "write", ...contextMutators],
+      },
+    });
+    await emit(subject, "session_start", {});
+    expect(subject.activeTools()).toContain("read");
+    for (const tool of ["edit", "write", ...contextMutators])
+      expect(subject.activeTools(), tool).not.toContain(tool);
+
+    subject.entries.push({
+      type: "custom",
+      customType: "pi-extensions:plan-mode-state",
+      data: { version: 1, mode: "default", disabledTools: [] },
+    });
+    await emit(subject, "session_tree", {});
+    expect(subject.activeTools()).toEqual(
+      expect.arrayContaining(["edit", "write", ...contextMutators]),
+    );
+
+    subject.entries.push({
+      type: "custom",
+      customType: "pi-extensions:plan-mode-state",
+      data: {
+        version: 1,
+        mode: "plan",
+        disabledTools: ["edit", ...contextMutators],
+      },
+    });
+    await emit(subject, "session_tree", {});
+    expect(subject.activeTools()).not.toContain("edit");
+    await emit(subject, "session_shutdown", {});
+    expect(subject.activeTools()).toEqual(expect.arrayContaining(["edit", ...contextMutators]));
+  });
+
+  it("probes RTK on policy reload and fails closed for unsupported versions", async () => {
+    for (const rtkVersion of ["rtk 0.26.9\n", "rtk 0.28.0\n", "malformed\n"]) {
+      const subject = harness({ rtkVersion });
+      await emit(subject, "session_start", {});
+      await subject.commands.get("plan")?.("", subject.context);
+      const result = await emitSequential(subject, "tool_call", {
+        toolName: "bash",
+        input: { command: "rtk rg pattern README.md" },
+      });
+      expect(result.at(-1), rtkVersion).toMatchObject({ block: true });
+      expect(subject.execCalls).toContainEqual({
+        command: "rtk",
+        args: ["--version"],
+        timeout: 2_000,
+      });
+    }
+
+    const missing = harness({ rtkProbeError: new Error("missing") });
+    await emit(missing, "session_start", {});
+    await missing.commands.get("plan")?.("", missing.context);
+    expect(
+      (
+        await emitSequential(missing, "tool_call", {
+          toolName: "bash",
+          input: { command: "rtk rg pattern README.md" },
+        })
+      ).at(-1),
+    ).toMatchObject({ block: true });
+  });
+
+  it("waits for an asynchronous RTK probe before applying session policy", async () => {
+    const subject = harness({ rtkProbeDelayMs: 20, rtkVersion: "rtk 0.27.7\n" });
+    let settled = false;
+    const starting = emit(subject, "session_start", {}).then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(settled).toBe(false);
+    await starting;
+    await subject.commands.get("plan")?.("", subject.context);
+    expect(
+      (
+        await emitSequential(subject, "tool_call", {
+          toolName: "bash",
+          input: { command: "rtk rg pattern README.md" },
+        })
+      ).some((result) => result?.block),
+    ).toBe(false);
+  });
+
+  it("revokes RTK delegation when a later policy reload probe fails", async () => {
+    const subject = harness({ rtkVersions: ["rtk 0.27.8\n", "rtk 0.28.0\n"] });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    expect(
+      (
+        await emitSequential(subject, "tool_call", {
+          toolName: "bash",
+          input: { command: "rtk rg pattern README.md" },
+        })
+      ).some((result) => result?.block),
+    ).toBe(false);
+
+    await emit(subject, "session_tree", {});
+    expect(
+      (
+        await emitSequential(subject, "tool_call", {
+          toolName: "bash",
+          input: { command: "rtk rg pattern README.md" },
+        })
+      ).at(-1),
+    ).toMatchObject({ block: true });
+    expect(subject.execCalls).toHaveLength(2);
+
+    const missing = harness({ rtkVersions: ["rtk 0.27.8\n", undefined] });
+    await emit(missing, "session_start", {});
+    await missing.commands.get("plan")?.("", missing.context);
+    await emit(missing, "session_tree", {});
+    expect(
+      (
+        await emitSequential(missing, "tool_call", {
+          toolName: "bash",
+          input: { command: "rtk rg pattern README.md" },
+        })
+      ).at(-1),
+    ).toMatchObject({ block: true });
+
+    for (const failedResult of [
+      { stdout: "rtk 0.27.8\n", stderr: "warning", code: 0, killed: false },
+      { stdout: "rtk 0.27.8\n", stderr: "", code: 1, killed: false },
+      { stdout: "rtk 0.27.8\n", stderr: "", code: 0, killed: true },
+    ]) {
+      const failed = harness({ rtkProbeResults: [failedResult] });
+      await emit(failed, "session_start", {});
+      await failed.commands.get("plan")?.("", failed.context);
+      expect(
+        (
+          await emitSequential(failed, "tool_call", {
+            toolName: "bash",
+            input: { command: "rtk rg pattern README.md" },
+          })
+        ).at(-1),
+      ).toMatchObject({ block: true });
+    }
+  });
+
+  it("revalidates safe Bash rewrites registered before and after Plan Mode", async () => {
+    const before = harness();
+    await emit(before, "session_start", {});
+    await before.commands.get("plan")?.("", before.context);
+    before.handlers.get("tool_call")?.unshift(async (event: any) => {
+      await Promise.resolve();
+      event.input.command =
+        "rtk rg -n -i -S 'working indicator|working status|session summary' README.md docs packages";
+    });
+    const beforeEvent = { toolName: "bash", input: { command: "rg original README.md" } };
+    expect(await emitSequential(before, "tool_call", beforeEvent)).not.toContainEqual(
+      expect.objectContaining({ block: true }),
+    );
+    expect(beforeEvent.input.command).toContain("rtk rg -n -i -S");
+
+    const after = harness();
+    await emit(after, "session_start", {});
+    await after.commands.get("plan")?.("", after.context);
+    after.handlers.get("tool_call")?.push((event: any) => {
+      event.input.command = "rtk rg safe README.md";
+    });
+    const afterEvent = { toolName: "bash", input: { command: "rg original README.md" } };
+    expect(await emitSequential(after, "tool_call", afterEvent)).not.toContainEqual(
+      expect.objectContaining({ block: true }),
+    );
+    expect(afterEvent.input.command).toBe("rtk rg safe README.md");
+    expect(Object.getOwnPropertyDescriptor(afterEvent.input, "command")).toMatchObject({
+      enumerable: true,
+      configurable: false,
+      get: expect.any(Function),
+      set: expect.any(Function),
+    });
+  });
+
+  it("never replaces an approved command with an unsafe later rewrite", async () => {
+    const caught = harness();
+    await emit(caught, "session_start", {});
+    await caught.commands.get("plan")?.("", caught.context);
+    const errors: unknown[] = [];
+    caught.handlers.get("tool_call")?.push((event: any) => {
+      try {
+        event.input.command = "cat README.md > generated.txt";
+      } catch (error) {
+        errors.push(error);
+      }
+    });
+    const caughtEvent = { toolName: "bash", input: { command: "rg safe README.md" } };
+    await emitSequential(caught, "tool_call", caughtEvent);
+    expect(errors[0]).toBeInstanceOf(PlanModeBashPolicyError);
+    expect(caughtEvent.input.command).toBe("rg safe README.md");
+
+    const uncaught = harness();
+    await emit(uncaught, "session_start", {});
+    await uncaught.commands.get("plan")?.("", uncaught.context);
+    uncaught.handlers.get("tool_call")?.push((event: any) => {
+      event.input.command = "find . -delete";
+    });
+    const uncaughtEvent = { toolName: "bash", input: { command: "find . -print" } };
+    await expect(emitSequential(uncaught, "tool_call", uncaughtEvent)).rejects.toBeInstanceOf(
+      PlanModeBashPolicyError,
+    );
+    expect(uncaughtEvent.input.command).toBe("find . -print");
+  });
+
+  it("guards deferred rewrites and retains the latest approved command", async () => {
+    const subject = harness();
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    const errors: unknown[] = [];
+    subject.handlers.get("tool_call")?.push(async (event: any) => {
+      await Promise.resolve();
+      event.input.command = "rtk rg rewritten README.md";
+      try {
+        event.input.command = "cat README.md > generated.txt";
+      } catch (error) {
+        errors.push(error);
+      }
+    });
+    const event = { toolName: "bash", input: { command: "rg original README.md" } };
+    await emitSequential(subject, "tool_call", event);
+    expect(errors[0]).toBeInstanceOf(PlanModeBashPolicyError);
+    expect(event.input.command).toBe("rtk rg rewritten README.md");
+
+    const fixed = harness();
+    await emit(fixed, "session_start", {});
+    await fixed.commands.get("plan")?.("", fixed.context);
+    const fixedInput = { command: "rg safe README.md" };
+    Object.defineProperty(fixedInput, "command", {
+      value: "rg safe README.md",
+      enumerable: true,
+      configurable: false,
+      writable: true,
+    });
+    expect(
+      (
+        await emitSequential(fixed, "tool_call", {
+          toolName: "bash",
+          input: fixedInput,
+        })
+      ).at(-1),
+    ).toMatchObject({ block: true });
+  });
+
+  it("blocks unsafe rewrites before validation and rejects non-string assignments", async () => {
+    const before = harness();
+    await emit(before, "session_start", {});
+    await before.commands.get("plan")?.("", before.context);
+    before.handlers.get("tool_call")?.unshift((event: any) => {
+      event.input.command = "git status && git clean -fd";
+    });
+    const beforeEvent = { toolName: "bash", input: { command: "git status" } };
+    expect((await emitSequential(before, "tool_call", beforeEvent)).at(-1)).toMatchObject({
+      block: true,
+    });
+
+    const after = harness();
+    await emit(after, "session_start", {});
+    await after.commands.get("plan")?.("", after.context);
+    after.handlers.get("tool_call")?.push((event: any) => {
+      event.input.command = 42;
+    });
+    const afterEvent = { toolName: "bash", input: { command: "git status" } };
+    await expect(emitSequential(after, "tool_call", afterEvent)).rejects.toBeInstanceOf(
+      PlanModeBashPolicyError,
+    );
+    expect(afterEvent.input.command).toBe("git status");
+  });
+
+  it("removes reactivated Context execution tools before each agent turn", async () => {
+    const subject = harness();
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.setActiveToolsForTest([...subject.activeTools(), ...contextMutators]);
+    for (const tool of contextMutators) expect(subject.activeTools(), tool).toContain(tool);
+    await emit(subject, "before_agent_start", { systemPrompt: "base" });
+    expect(subject.activeTools()).toContain("read");
+    for (const tool of contextMutators) expect(subject.activeTools(), tool).not.toContain(tool);
+    expect(
+      (
+        await emitSequential(subject, "tool_call", {
+          toolName: "ctx_execute_file",
+          input: { path: "README.md", code: "FILE_CONTENT" },
+        })
+      ).at(-1),
+    ).toMatchObject({ block: true });
   });
 
   it("allows an active read profile but blocks Plan Mode for an active writer", async () => {
