@@ -118,7 +118,7 @@ export async function createMissionWorktree(
   if (!state) throw new Error("An isolated mission requires a Git repository.");
   if (state.dirty)
     throw new Error(
-      "The repository has uncommitted changes. Clean it, cancel, or explicitly choose one shared-tree writer; Subagents never stash or copy local changes automatically.",
+      "The repository has uncommitted changes. Clean it, cancel, or explicitly choose one shared-tree writer; Hackler never stash or copy local changes automatically.",
     );
   const id = safeId(missionId);
   const root = join(resolve(baseDirectory), `pi-mission-${id}`);

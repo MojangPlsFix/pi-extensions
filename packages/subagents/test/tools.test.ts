@@ -16,9 +16,13 @@ function usage() {
 
 describe("Subagent parent usage accounting", () => {
   it("attaches collected child usage as nested Pi tool usage", async () => {
-    const tools = new Map<string, { execute: (...args: any[]) => Promise<any> }>();
+    const tools = new Map<string, { execute: (...args: any[]) => Promise<any>; label?: string }>();
     const pi = {
-      registerTool(definition: { name: string; execute: (...args: any[]) => Promise<any> }) {
+      registerTool(definition: {
+        name: string;
+        label?: string;
+        execute: (...args: any[]) => Promise<any>;
+      }) {
         tools.set(definition.name, definition);
       },
     } as unknown as ExtensionAPI;
@@ -42,6 +46,22 @@ describe("Subagent parent usage accounting", () => {
     } as unknown as SubagentManager;
 
     registerSubagentTools(pi, manager);
+    expect([...tools.keys()]).toEqual([
+      "subagent_dispatch",
+      "subagent_status",
+      "subagent_respond",
+      "subagent_collect",
+      "subagent_steer",
+      "subagent_stop",
+    ]);
+    expect([...tools.values()].map((tool) => tool.label)).toEqual([
+      "Dispatch Hackler",
+      "Hackler status",
+      "Respond to Hackler",
+      "Collect Hackler",
+      "Steer Hackler",
+      "Stop Hackler",
+    ]);
     const result = await tools
       .get("subagent_collect")!
       .execute("tool-call", { ids: ["scout-1"], wait: "all" }, undefined);

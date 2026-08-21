@@ -117,7 +117,7 @@ function usageFrom(message: unknown): NativeRunEvent | undefined {
 function abortError(signal: AbortSignal | undefined): Error {
   return signal?.reason instanceof Error
     ? signal.reason
-    : new Error("Native subagent startup was aborted.");
+    : new Error("Native Hackler startup was aborted.");
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
@@ -148,7 +148,7 @@ export class NativeBackend {
   }
 
   async start(spec: NativeRunSpec, listener: NativeRunListener): Promise<void> {
-    if (this.runs.has(spec.id)) throw new Error(`Native subagent ${spec.id} is already active.`);
+    if (this.runs.has(spec.id)) throw new Error(`Native Hackler ${spec.id} is already active.`);
     throwIfAborted(spec.signal);
     await fs.mkdir(spec.sessionDir, { recursive: true });
     throwIfAborted(spec.signal);
@@ -243,7 +243,7 @@ export class NativeBackend {
           if (live.stopping) return;
           listener({
             type: "error",
-            error: new Error(`Native subagent timed out after ${spec.timeoutMs} ms.`),
+            error: new Error(`Native Hackler timed out after ${spec.timeoutMs} ms.`),
           });
           live.stopping = true;
           void live.session.abort().catch(() => {});
@@ -263,7 +263,7 @@ export class NativeBackend {
           source: "rpc",
           preflightResult: (success) => {
             if (!success) {
-              reject?.(new Error(`Native subagent ${spec.id} rejected its initial prompt.`));
+              reject?.(new Error(`Native Hackler ${spec.id} rejected its initial prompt.`));
               return;
             }
             live.accepted = true;
@@ -276,7 +276,7 @@ export class NativeBackend {
           if (!live.accepted) {
             reject?.(
               new Error(
-                `Native subagent ${spec.id} completed without accepting its initial prompt.`,
+                `Native Hackler ${spec.id} completed without accepting its initial prompt.`,
               ),
             );
             return;
@@ -337,14 +337,14 @@ export class NativeBackend {
 
   async steer(id: string, message: string): Promise<void> {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`Native subagent ${id} is not active.`);
+    if (!run) throw new Error(`Native Hackler ${id} is not active.`);
     if (run.session.isStreaming) await run.session.steer(message);
     else await run.session.prompt(message, { source: "rpc" });
   }
 
   async followUp(id: string, message: string): Promise<void> {
     const run = this.runs.get(id);
-    if (!run) throw new Error(`Native subagent ${id} is not active.`);
+    if (!run) throw new Error(`Native Hackler ${id} is not active.`);
     if (run.session.isStreaming) await run.session.followUp(message);
     else await run.session.prompt(message, { source: "rpc" });
   }
@@ -368,7 +368,7 @@ export class NativeBackend {
       try {
         run.stopping = true;
         if (!run.accepted)
-          run.rejectStartup?.(new Error(`Native subagent ${id} was parked during startup.`));
+          run.rejectStartup?.(new Error(`Native Hackler ${id} was parked during startup.`));
         run.rejectStartup = undefined;
         if (run.timer) clearTimeout(run.timer);
         run.removeAbortListener();

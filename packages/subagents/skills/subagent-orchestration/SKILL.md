@@ -1,11 +1,11 @@
 ---
 name: subagent-orchestration
-description: Coordinate Subagents v2 profiles with explicit ownership, batch dispatch, supervisor requests, parked reports, and reviewed integration.
+description: Coordinate Hackler v2 profiles with explicit ownership, batch dispatch, supervisor requests, parked reports, and reviewed integration.
 ---
 
-# Subagent Orchestration
+# Hackler Orchestration
 
-Use Subagents for substantial independent work or specialist work. Keep decisions, review, and final verification in the parent.
+Use Hackler for substantial independent work or specialist work. Keep decisions, review, and final verification in the parent.
 
 ## Select a profile
 
@@ -75,7 +75,7 @@ A worktree candidate requires an Inbox response. The parent agent can answer the
 
 ## Plan Mode
 
-Plan Mode permits Subagent control tools. The manager rejects write dispatch and write-session revival during Plan Mode.
+Plan Mode permits Hackler control tools. The manager rejects write dispatch and write-session revival during Plan Mode.
 
 Use Scout, Researcher, Reviewer, Oracle, or the hidden Plan Reviewer for plan work.
 

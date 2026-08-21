@@ -143,6 +143,7 @@ type PreparedRun = {
 
 const ACTIVE_STATUSES = new Set<RunRecord["status"]>(["queued", "starting", "running", "blocked"]);
 const WRITE_CLASSES = new Set<ProfileClass>(["write"]);
+const ASSISTANT_WRITING_ACTIVITY = "writing response";
 
 function usageHasValue(usage: Usage): boolean {
   return (
@@ -201,6 +202,12 @@ function recordActivity(run: RunRecord, kind: RunActivityKind, text: string): vo
     text: text.replace(/\s+/gu, " ").trim(),
   });
   if (run.activity.length > 200) run.activity.splice(0, run.activity.length - 200);
+}
+
+function recordAssistantWritingActivity(run: RunRecord): void {
+  const latest = run.activity.at(-1);
+  if (latest?.kind === "status" && latest.text === ASSISTANT_WRITING_ACTIVITY) return;
+  recordActivity(run, "status", ASSISTANT_WRITING_ACTIVITY);
 }
 
 function profileClone(profile: AgentDefinition): AgentDefinition {
@@ -425,7 +432,7 @@ export class SubagentManager {
       if (claim)
         return {
           block: true,
-          reason: `Subagent ${claim.runId} owns ${claim.owns.join(", ")}. Stop or collect that run before editing its scope in the parent.`,
+          reason: `Hackler run ${claim.runId} owns ${claim.owns.join(", ")}. Stop or collect that run before editing its scope in the parent.`,
         };
     }
     if (toolName === "bash" && typeof value.command === "string") {
@@ -440,7 +447,7 @@ export class SubagentManager {
       if (claim)
         return {
           block: true,
-          reason: `Subagent ${claim.runId} owns a path referenced by this command.`,
+          reason: `Hackler run ${claim.runId} owns a path referenced by this command.`,
         };
     }
     return undefined;
@@ -711,7 +718,7 @@ export class SubagentManager {
       const depthLimit = Math.min(config.runtime.maxDepth, parent.profile.maxDepth);
       if (this.depth(parent) >= depthLimit)
         throw new Error(
-          `Nested subagent depth is limited to ${depthLimit} for ${parent.profile.name}.`,
+          `Nested Hackler depth is limited to ${depthLimit} for ${parent.profile.name}.`,
         );
     }
     validateDispatchBatch(effectiveTasks, {
@@ -999,7 +1006,7 @@ export class SubagentManager {
           .join("\n")
       : "No optional workplace capabilities are enabled.";
     return [
-      `You are the ${profile.name} subagent running through the ${profile.runner} runner.`,
+      `You are the ${profile.name} Hackler running through the ${profile.runner} runner.`,
       profile.prompt,
       profileClass(profile) === "orchestrator" ? ORCHESTRATION_GUIDELINES : "",
       "Work only inside the explicitly assigned ownership. Do not duplicate a peer's scope.",
@@ -1155,7 +1162,7 @@ export class SubagentManager {
     tools.push(
       defineTool({
         name: "subagent_dispatch",
-        label: "Dispatch subagents",
+        label: "Dispatch Hackler",
         description:
           "Dispatch all independent ready specialist tasks in one batch with disjoint ownership.",
         parameters: Type.Object({
@@ -1203,7 +1210,7 @@ export class SubagentManager {
       }),
       defineTool({
         name: "subagent_collect",
-        label: "Collect subagents",
+        label: "Collect Hackler",
         description: "Wait for owned children and return their reports.",
         parameters: Type.Object({
           ids: Type.Optional(Type.Array(Type.String())),
@@ -1252,10 +1259,10 @@ export class SubagentManager {
       separator > 0
         ? ctx.modelRegistry.find(name.slice(0, separator), name.slice(separator + 1))
         : ctx.modelRegistry.getAll().find((candidate) => candidate.id === name);
-    if (!model) throw new Error(`Configured subagent model ${name} is unavailable.`);
+    if (!model) throw new Error(`Configured Hackler model ${name} is unavailable.`);
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
     if (!auth.ok)
-      throw new Error(`Configured subagent model ${name} is not authenticated: ${auth.error}.`);
+      throw new Error(`Configured Hackler model ${name} is not authenticated: ${auth.error}.`);
     return model;
   }
 
@@ -1284,7 +1291,7 @@ export class SubagentManager {
       run.sessionFile = event.sessionFile;
     } else if (event.type === "text") {
       run.report = event.text;
-      recordActivity(run, "message", event.delta.slice(-160));
+      recordAssistantWritingActivity(run);
     } else if (event.type === "tool_start") {
       run.currentTool = event.toolName;
       recordActivity(run, "tool", `started ${event.toolName}`);
@@ -1337,7 +1344,7 @@ export class SubagentManager {
 
   private async park(id: string): Promise<RunRecord> {
     const run = this.store.get(id);
-    if (!run) throw new Error(`Unknown subagent: ${id}.`);
+    if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
     if (run.status === "parked") return run;
     await this.parkTransport(run);
     if (ACTIVE_STATUSES.has(run.status) && run.worktree && !run.candidate) {
@@ -1442,7 +1449,7 @@ export class SubagentManager {
 
   async steer(id: string, message: string): Promise<RunRecord> {
     const run = this.store.get(id);
-    if (!run) throw new Error(`Unknown subagent: ${id}.`);
+    if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
     if (!message.trim()) throw new Error("Steering guidance must not be empty.");
     if (this.planMode && run.profile.class === "write")
       throw new Error(
@@ -1450,7 +1457,7 @@ export class SubagentManager {
       );
     if (run.status === "parked") return this.revive(run, message);
     if (run.status !== "running" && run.status !== "blocked")
-      throw new Error(`Subagent ${id} cannot be steered while ${run.status}.`);
+      throw new Error(`Hackler run ${id} cannot be steered while ${run.status}.`);
     run.task = message;
     run.taskHistory.push(message);
     recordActivity(run, "steer", message.slice(0, 160));
@@ -1483,10 +1490,10 @@ export class SubagentManager {
         `Isolated run ${run.id} already produced or disposed its integration candidate; dispatch a new task instead.`,
       );
     if (!run.sessionFile)
-      throw new Error(`Subagent ${run.id} has no persistent session to revive.`);
+      throw new Error(`Hackler run ${run.id} has no persistent session to revive.`);
     const config = await this.loadConfig();
     if (this.store.active().length >= config.runtime.maxActive)
-      throw new Error("No active subagent capacity is available.");
+      throw new Error("No active Hackler capacity is available.");
     run.status = "starting";
     run.finishedAt = undefined;
     run.task = message;
@@ -1586,10 +1593,10 @@ export class SubagentManager {
 
   async stop(id: string): Promise<RunRecord> {
     const run = this.store.get(id);
-    if (!run) throw new Error(`Unknown subagent: ${id}.`);
+    if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
     if (run.status === "stopped") return run;
     if (!ACTIVE_STATUSES.has(run.status))
-      throw new Error(`Subagent ${id} cannot be stopped while ${run.status}.`);
+      throw new Error(`Hackler run ${id} cannot be stopped while ${run.status}.`);
     for (const child of this.store.children(id))
       if (ACTIVE_STATUSES.has(child.status)) await this.stop(child.id);
     this.inbox.cancelByRun(id);
@@ -1623,11 +1630,11 @@ export class SubagentManager {
 
   async openInspector(id: string): Promise<void> {
     const run = this.store.get(id);
-    if (!run) throw new Error(`Unknown subagent: ${id}.`);
-    if (!run.sessionFile) throw new Error("This subagent has no persisted transcript yet.");
+    if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
+    if (!run.sessionFile) throw new Error("This Hackler run has no persisted transcript yet.");
     const config = await this.loadConfig();
     if (!config.herdr.enabled)
-      throw new Error("Herdr transcript inspection is disabled in Subagents v2 configuration.");
+      throw new Error("Herdr transcript inspection is disabled in Hackler v2 configuration.");
     const activeTheme = this.ctx?.ui?.theme;
     const themeName =
       activeTheme && typeof activeTheme.name === "string" && activeTheme.name.trim()

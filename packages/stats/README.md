@@ -5,7 +5,7 @@ session-root discovery and de-duplication. Reports cover every workspace found i
 sessions and include:
 
 - `SUMMARY` totals for cost, responses, sessions, total tokens, and input/output/cache breakdown;
-- `SUBAGENTS (included above)` as a subset of the overall totals;
+- `HACKLER (included above)` as a subset of the overall totals;
 - complete `DAILY` rows for the selected Monday-Friday workweek or Monday-Sunday calendar week;
 - monthly `WEEKLY` rows, with calendar-week buckets clipped to the selected month;
 - model and project rows sorted by cost, then tokens, with responses, sessions, money formatting,
@@ -39,9 +39,9 @@ summaries, and compatible historical `session-summary` custom entries. A `sessio
 `data.usageAttached: true` is skipped because its usage is already attached to a provider message.
 Other custom entries are ignored. Malformed, empty, missing, and unreadable files do not prevent a
 report from rendering. The normal session root follows `PI_CODING_AGENT_DIR` and
-`PI_CODING_AGENT_SESSION_DIR`; hidden Subagent roots and the legacy nested Subagent root are
-scanned once, so Subagent usage is included in the overall totals exactly once and shown separately
-as a subset. Parent Subagent control-tool results can contain a nested usage attachment for Pi's
+`PI_CODING_AGENT_SESSION_DIR`; hidden Hackler roots and the legacy nested Hackler root are
+scanned once, so Hackler usage is included in the overall totals exactly once and shown separately
+as a subset. Parent Hackler control-tool results can contain a nested usage attachment for Pi's
 live footer; Stats recognizes that marker and skips the attachment because the child session is the
 canonical usage source.
 

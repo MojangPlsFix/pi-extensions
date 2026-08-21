@@ -128,7 +128,7 @@ export function validateDispatchBatch(
       throw new Error(`Tasks ${duplicateKey} and ${task.key} describe the same normalized work.`);
     fingerprints.set(fingerprint, task.key);
     if (existing.some((claim) => claim.taskFingerprint === fingerprint))
-      throw new Error(`Task ${task.key} duplicates work already owned by an active subagent.`);
+      throw new Error(`Task ${task.key} duplicates work already owned by an active Hackler run.`);
     pendingClaims.push({
       runId: "pending",
       key: task.key,
@@ -201,7 +201,7 @@ export class TaskClaimRegistry {
   }
 }
 
-export const ORCHESTRATION_GUIDELINES = `Use subagents for substantial independent slices or specialist work, not for trivial or tightly sequential steps.
+export const ORCHESTRATION_GUIDELINES = `Use Hackler for substantial independent slices or specialist work, not for trivial or tightly sequential steps.
 Before dispatching, enumerate the ready work and assign one owner to each path, symbol, or research angle.
 Dispatch all independent ready tasks in one subagent_dispatch call. Give every task a self-contained brief, explicit ownership, and a concrete deliverable.
 Do not work on an active delegated scope in the parent. Continue only with unowned work while children run.

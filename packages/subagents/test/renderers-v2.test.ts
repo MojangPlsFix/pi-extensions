@@ -97,9 +97,9 @@ function snapshot(overrides: Partial<HubSnapshot> = {}): HubSnapshot {
 afterEach(() => vi.useRealTimers());
 
 describe("activityViewLines", () => {
-  it("renders compact subagent activity without any triangle glyph", () => {
+  it("renders compact Hackler activity without any triangle glyph", () => {
     const output = activityViewLines(activityStatus([activitySnapshot()]), theme(), 120).join("\n");
-    expect(output).toContain("Subagents · 1 active");
+    expect(output).toContain("Hackler · 1 active");
     expect(output).toContain("└─ Follow-up read-only inspection");
     expect(output).toContain("read · running · luna · 60:31 · grep finished");
     expect(output).not.toMatch(/[△▵▴▲]/u);

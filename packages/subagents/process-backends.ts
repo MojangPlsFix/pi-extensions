@@ -195,13 +195,13 @@ export class RpcProcessBackend {
   }
 
   async start(spec: RpcRunSpec, listener: NativeRunListener): Promise<void> {
-    if (this.runs.has(spec.id)) throw new Error(`RPC subagent ${spec.id} is already active.`);
-    throwIfAborted(spec.signal, "RPC subagent");
+    if (this.runs.has(spec.id)) throw new Error(`RPC Hackler ${spec.id} is already active.`);
+    throwIfAborted(spec.signal, "RPC Hackler");
     await fs.mkdir(spec.sessionDir, { recursive: true });
-    throwIfAborted(spec.signal, "RPC subagent");
+    throwIfAborted(spec.signal, "RPC Hackler");
     const systemPromptPath = join(spec.sessionDir, "system-prompt.md");
     await fs.writeFile(systemPromptPath, spec.systemPrompt, { mode: 0o600 });
-    throwIfAborted(spec.signal, "RPC subagent");
+    throwIfAborted(spec.signal, "RPC Hackler");
     const invocation = piInvocation();
     const args = [
       ...invocation.args,
@@ -347,7 +347,7 @@ export class RpcProcessBackend {
         if (!live.stopping)
           listener({
             type: "error",
-            error: new Error(`RPC subagent timed out after ${spec.timeoutMs} ms.`),
+            error: new Error(`RPC Hackler timed out after ${spec.timeoutMs} ms.`),
           });
         void this.park(spec.id).catch(() => {});
       }, spec.timeoutMs);
@@ -355,7 +355,7 @@ export class RpcProcessBackend {
     }
     if (spec.signal) {
       const onAbort = () => {
-        if (!live.accepted) reject?.(abortError(spec.signal, "RPC subagent"));
+        if (!live.accepted) reject?.(abortError(spec.signal, "RPC Hackler"));
         void this.park(spec.id).catch(() => {});
       };
       spec.signal.addEventListener("abort", onAbort, { once: true });
@@ -368,13 +368,13 @@ export class RpcProcessBackend {
 
   async steer(id: string, message: string): Promise<void> {
     const live = this.runs.get(id);
-    if (!live) throw new Error(`RPC subagent ${id} is not active.`);
+    if (!live) throw new Error(`RPC Hackler ${id} is not active.`);
     live.client.steer(`steer-${Date.now()}`, message);
   }
 
   async followUp(id: string, message: string): Promise<void> {
     const live = this.runs.get(id);
-    if (!live) throw new Error(`RPC subagent ${id} is not active.`);
+    if (!live) throw new Error(`RPC Hackler ${id} is not active.`);
     live.client.followUp(`followup-${Date.now()}`, message);
   }
 
@@ -393,7 +393,7 @@ export class RpcProcessBackend {
     const live = this.runs.get(id);
     if (!live) return;
     live.stopping = true;
-    live.rejectStartup?.(new Error(`RPC subagent ${id} was parked during startup.`));
+    live.rejectStartup?.(new Error(`RPC Hackler ${id} was parked during startup.`));
     live.rejectStartup = undefined;
     if (live.timer) clearTimeout(live.timer);
     live.removeAbortListener?.();
@@ -422,10 +422,10 @@ export class ExternalProcessBackend {
   }
 
   async start(spec: ExternalRunSpec, listener: NativeRunListener): Promise<void> {
-    if (this.runs.has(spec.id)) throw new Error(`External subagent ${spec.id} is already active.`);
-    throwIfAborted(spec.signal, "External subagent");
+    if (this.runs.has(spec.id)) throw new Error(`External Hackler ${spec.id} is already active.`);
+    throwIfAborted(spec.signal, "External Hackler");
     await fs.mkdir(spec.sessionDir, { recursive: true });
-    throwIfAborted(spec.signal, "External subagent");
+    throwIfAborted(spec.signal, "External Hackler");
     const child = spawn(spec.runner.command, spec.runner.args, {
       cwd: spec.cwd,
       env: isolatedProcessEnvironment(spec.runner.envAllowlist),
@@ -497,7 +497,7 @@ export class ExternalProcessBackend {
     live.timer.unref?.();
     if (spec.signal) {
       const onAbort = () => {
-        reject?.(abortError(spec.signal, "External subagent"));
+        reject?.(abortError(spec.signal, "External Hackler"));
         void this.park(spec.id).catch(() => {});
       };
       spec.signal.addEventListener("abort", onAbort, { once: true });
@@ -516,7 +516,7 @@ export class ExternalProcessBackend {
     const live = this.runs.get(id);
     if (!live) return;
     live.stopping = true;
-    live.rejectStartup?.(new Error(`External subagent ${id} was parked during startup.`));
+    live.rejectStartup?.(new Error(`External Hackler ${id} was parked during startup.`));
     live.rejectStartup = undefined;
     if (live.timer) clearTimeout(live.timer);
     live.removeAbortListener?.();

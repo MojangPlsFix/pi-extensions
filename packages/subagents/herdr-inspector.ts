@@ -52,7 +52,7 @@ export class HerdrInspectorManager {
     if (HerdrClient.environmentState() !== "complete")
       throw new Error("Herdr is unavailable; the native Agent Hub transcript remains available.");
     if (!existsSync(sessionFile))
-      throw new Error(`Subagent transcript does not exist: ${sessionFile}`);
+      throw new Error(`Hackler transcript does not exist: ${sessionFile}`);
     const parentPane = process.env.HERDR_PANE_ID;
     if (!parentPane) throw new Error("HERDR_PANE_ID is unavailable.");
     await this.client.verify(parentPane);

@@ -47,6 +47,8 @@ export function shortModel(value: string | undefined): string {
   return model;
 }
 
+const HACKLER_LABEL = "Hackler";
+
 function colorForStatus(status: RunStatus): "muted" | "success" | "warning" | "error" | "dim" {
   if (status === "running" || status === "starting" || status === "queued") return "muted";
   if (status === "parked") return "success";
@@ -74,9 +76,9 @@ export function activityViewLines(
     status.active > 0
       ? theme.fg(
           "muted",
-          `Subagents · ${status.active} active${status.blocked ? ` · ${status.blocked} blocked` : ""}`,
+          `${HACKLER_LABEL} · ${status.active} active${status.blocked ? ` · ${status.blocked} blocked` : ""}`,
         )
-      : theme.fg("muted", `Subagents · ${status.parked} parked`);
+      : theme.fg("muted", `${HACKLER_LABEL} · ${status.parked} parked`);
   const lines = [safe(header)];
   for (const [index, agent] of status.agents.slice(0, 4).entries()) {
     const last = index === Math.min(4, status.agents.length) - 1;
@@ -107,7 +109,7 @@ export function formatRun(run: RunSnapshot): string {
 
 export function agentViewLines(agents: Iterable<RunSnapshot>): string[] {
   const values = [...agents];
-  if (!values.length) return ["No subagents have been started."];
+  if (!values.length) return ["No Hackler runs have been started."];
   return values.flatMap((run) => [
     taskLabel(run.task),
     `  ${run.id} · ${formatRun(run)}`,
@@ -359,7 +361,10 @@ export class AgentsViewer {
   private renderRuns(body: string[]): void {
     if (!this.snapshot.runs.length) {
       body.push(
-        this.theme.fg("muted", " No subagents yet. Dispatch bounded work or start /orchestrate."),
+        this.theme.fg(
+          "muted",
+          " No Hackler runs yet. Dispatch bounded work or start /orchestrate.",
+        ),
       );
       return;
     }

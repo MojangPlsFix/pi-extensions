@@ -1,6 +1,8 @@
-# Subagents v2
+# Hackler v2
 
-Subagents v2 runs child Pi sessions through the Pi SDK. It does not type prompts into a shell or a terminal.
+Hackler v2 runs child Pi sessions through the Pi SDK. It does not type prompts into a shell or a terminal.
+
+Hackler is the product-facing name. Technical `subagent_*` tool names, configuration and session paths, and skill IDs remain unchanged for compatibility.
 
 The parent Pi session owns every child, decision, review, and integration. A child stops when its parent session stops.
 
@@ -212,7 +214,7 @@ If the file exists, it must use `schemaVersion: 2`.
 }
 ```
 
-If `herdr.enabled` is omitted, Subagents enables transcript inspection only when the complete Herdr environment (`HERDR_ENV`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`) is present. Set `herdr.enabled` to `false` to disable it explicitly. The Agent Hub hides the transcript action when Herdr is disabled or unavailable.
+If `herdr.enabled` is omitted, Hackler enables transcript inspection only when the complete Herdr environment (`HERDR_ENV`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`) is present. Set `herdr.enabled` to `false` to disable it explicitly. The Agent Hub hides the transcript action when Herdr is disabled or unavailable.
 
 A run captures its effective profile, model, thinking level, and capabilities when it starts. A later file change does not change that run.
 
@@ -353,7 +355,7 @@ Herdr is optional and disabled by default.
 
 When enabled, `t` opens a raw pane that follows the child JSONL transcript. The pane is display-only.
 
-Subagents v2 does not call `herdr agent start`, `herdr agent prompt`, or terminal key injection. Closing the parent session closes all inspector panes that it owns.
+Hackler v2 does not call `herdr agent start`, `herdr agent prompt`, or terminal key injection. Closing the parent session closes all inspector panes that it owns.
 
 The Agent Hub remains the lifecycle authority when Herdr is absent or a pane closes.
 

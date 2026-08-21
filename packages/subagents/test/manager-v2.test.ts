@@ -347,6 +347,47 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
   });
 
+  it("keeps streamed assistant text out of activity while retaining the full report", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          key: "safe-activity",
+          agent: "scout",
+          task: "Inspect streamed activity handling.",
+          owns: ["topic:activity-sanitization"],
+          deliverable: "Activity sanitization report.",
+        },
+      ],
+      subject.ctx,
+    );
+
+    subject.native.emit(run!.id, { type: "tool_start", toolName: "bash" });
+    subject.native.emit(run!.id, { type: "tool_end", toolName: "bash", isError: false });
+    expect(
+      subject.manager.snapshots().find((candidate) => candidate.id === run!.id)?.latestActivity,
+    ).toBe("bash finished");
+
+    const firstText = "I'm beginning to feel like a Rap God, Rap God.";
+    const fullReport = `${firstText} This complete answer stays in the report.`;
+    subject.native.emit(run!.id, { type: "text", delta: firstText, text: firstText });
+    subject.native.emit(run!.id, {
+      type: "text",
+      delta: " This complete answer stays in the report.",
+      text: fullReport,
+    });
+
+    const snapshot = subject.manager.snapshots().find((candidate) => candidate.id === run!.id);
+    expect(snapshot?.report).toBe(fullReport);
+    expect(snapshot?.latestActivity).toBe("writing response");
+    expect(snapshot?.activity.map((entry) => entry.text).join("\n")).not.toContain("Rap God");
+    expect(snapshot?.activity.filter((entry) => entry.text === "writing response")).toHaveLength(1);
+
+    await subject.manager.shutdown();
+  });
+
   it("passes explicitly requested filtered context from SessionManager entries", async () => {
     const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
     temporary.push(root);

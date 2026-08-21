@@ -5,7 +5,7 @@ import type { SubagentManager } from "./manager.js";
 import { type AgentsOverlayAction, AgentsViewer, formatRun } from "./renderers.js";
 
 const help = [
-  "Agent Hub is the authoritative view of active, blocked, parked, and failed subagents.",
+  "Agent Hub is the authoritative view of active, blocked, parked, and failed Hackler runs.",
   "Completed sessions park automatically and consume no active capacity.",
   "Herdr transcript panes are display-only and never execute or prompt child Pi sessions.",
   "",
@@ -57,7 +57,7 @@ async function openHub(
     if (!action.id) continue;
     try {
       if (action.kind === "steer") {
-        const guidance = await ctx.ui.editor("Steer or revive subagent", "");
+        const guidance = await ctx.ui.editor("Steer or revive a Hackler run", "");
         if (guidance?.trim()) {
           await manager.steer(action.id, guidance);
           ctx.ui.notify("Guidance accepted.", "info");
@@ -65,12 +65,12 @@ async function openHub(
       } else if (action.kind === "stop") {
         if (
           await ctx.ui.confirm(
-            "Stop subagent?",
+            "Stop this Hackler run?",
             "The active turn and descendants stop. Its transcript and current report remain parked.",
           )
         ) {
           await manager.stop(action.id);
-          ctx.ui.notify("Subagent stopped and parked.", "info");
+          ctx.ui.notify("Hackler run stopped and parked.", "info");
         }
       } else if (action.kind === "inspect") {
         await manager.openInspector(action.id);
@@ -119,7 +119,7 @@ async function openHub(
 
 export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager): void {
   pi.registerCommand("agents", {
-    description: "Open the event-driven Agent Hub or print subagent status",
+    description: "Open the event-driven Agent Hub or print Hackler status",
     handler: async (args, ctx) => {
       const words = args.trim().split(/\s+/u).filter(Boolean);
       const operation = words[0]?.toLowerCase();
@@ -228,7 +228,7 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
           json
             ? JSON.stringify(report, null, 2)
             : [
-                "Subagents v2 doctor",
+                "Hackler v2 doctor",
                 ...report.profiles.map(
                   (profile) =>
                     `- ${profile.name} (${profile.class}, ${profile.runner}, ${profile.enabled ? "enabled" : "disabled"}) · capabilities: ${profile.capabilities.join(", ") || "none"}`,
@@ -261,7 +261,7 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
         const hub = await manager.status(ctx);
         ctx.ui.notify(
           hub.runs.map((run) => `${run.id}: ${formatRun(run)}\n  ${run.task}`).join("\n") ||
-            "No subagents.",
+            "No Hackler runs.",
           "info",
         );
         return;

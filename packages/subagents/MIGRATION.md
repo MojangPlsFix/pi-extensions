@@ -1,6 +1,6 @@
-# Migrate to Subagents v2
+# Migrate to Hackler v2
 
-Subagents v2 does not read the version 1 schema. It does not register the version 1 tools.
+Hackler v2 does not read the version 1 schema. It does not register the version 1 tools.
 
 ## 1. Stop active children
 
@@ -108,7 +108,7 @@ Trusted project profiles use this directory:
 <project>/.pi/agents/
 ```
 
-Pi must mark the project as trusted before Subagents reads project profiles.
+Pi must mark the project as trusted before Hackler reads project profiles.
 
 ## 5. Replace tool names
 
@@ -128,9 +128,9 @@ Version 2 does not provide compatibility aliases.
 
 ## 6. Check Plan Mode configuration
 
-Remove old Subagent tool names from custom Plan Mode allowlists.
+Remove old tool names from custom Plan Mode allowlists.
 
-Version 2 permits its five control tools in Plan Mode. The Subagent manager blocks write profiles while Plan Mode is active.
+Version 2 permits its five control tools in Plan Mode. The Hackler manager blocks write profiles while Plan Mode is active.
 
 ## 7. Check Herdr settings
 

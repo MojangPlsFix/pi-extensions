@@ -86,10 +86,10 @@ describe("stats periods and historical records", () => {
     // The zero-usage tool result is not a model response.
     expect(report.totals.responses).toBe(3);
     expect(report.models.get("github-copilot/gpt-5.4-nano")?.input).toBe(7);
-    expect(buildReport(report)).toContain("SUBAGENTS (included above)");
+    expect(buildReport(report)).toContain("HACKLER (included above)");
   });
 
-  it("does not double-count usage attached to a parent Subagent tool result", async () => {
+  it("does not double-count usage attached to a parent Hackler tool result", async () => {
     const directory = await mkdtemp(join(tmpdir(), "pi-extensions-stats-attached-"));
     directories.push(directory);
     await mkdir(join(directory, "subagents"));
@@ -148,7 +148,7 @@ describe("stats periods and historical records", () => {
     expect(report.subagents.cost).toBeCloseTo(0.03);
   });
 
-  it("scans normal, hidden, and legacy Subagent roots without double-counting nested legacy files", async () => {
+  it("scans normal, hidden, and legacy Hackler roots without double-counting nested legacy files", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-extensions-stats-roots-"));
     directories.push(root);
     const normal = join(root, "sessions");
@@ -247,7 +247,7 @@ describe("Bitbucket report layout", () => {
     });
     const output = buildReport(report);
     expect(output).toContain("SUMMARY");
-    expect(output).toContain("SUBAGENTS (included above)");
+    expect(output).toContain("HACKLER (included above)");
     expect(output).toContain("DAILY");
     expect(output).toContain("Start Credits");
     expect(output).toContain("81,055");

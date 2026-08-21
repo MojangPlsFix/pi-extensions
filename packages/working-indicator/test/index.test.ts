@@ -123,7 +123,7 @@ describe("working indicator lifecycle", () => {
     expect(subject.widget()).toBeInstanceOf(SubagentActivityComponent);
   });
 
-  it("shows compact subagent activity without a triangle while native spinner stays active", async () => {
+  it("shows compact Hackler activity without a triangle while native spinner stays active", async () => {
     const subject = harness();
     await emit(subject, "session_start");
 
@@ -132,13 +132,13 @@ describe("working indicator lifecycle", () => {
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
     expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler hackeln...");
     const output = subject.widget()?.render(120).join("\n") ?? "";
-    expect(output).toContain("Subagents · 1 active");
+    expect(output).toContain("Hackler · 1 active");
     expect(output).toContain("└─ Follow-up read-only inspection");
     expect(output).toContain("read · running · luna · 60:31 · grep finished");
     expect(output).not.toMatch(/[△▵▴▲]/u);
   });
 
-  it("shows a waiting message for blocked Subagents and restores the idle message", async () => {
+  it("shows a waiting message for blocked Hackler runs and restores the idle message", async () => {
     const subject = harness();
     await emit(subject, "session_start");
 

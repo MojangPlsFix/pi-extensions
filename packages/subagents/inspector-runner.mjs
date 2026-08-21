@@ -448,7 +448,7 @@ async function main() {
   markdownTheme = getMarkdownTheme();
 
   process.stdout.write(
-    `\x1b[2J\x1b[H\x1b[1mSubagent transcript · ${safeLine(basename(sessionFile))}\x1b[0m\n`,
+    `\x1b[2J\x1b[H\x1b[1mHackler transcript · ${safeLine(basename(sessionFile))}\x1b[0m\n`,
   );
   process.stdout.write(
     `Display-only mirror · follow mode · requested theme ${safeLine(requestedTheme)} · cwd ${safeLine(inspectorCwd)}\n`,

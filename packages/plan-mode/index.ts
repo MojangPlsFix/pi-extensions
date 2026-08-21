@@ -326,7 +326,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       });
       // A Plan Mode-only installation has no reviewer service; fail clearly rather than hanging.
       setTimeout(() => {
-        if (!accepted) finish({ error: "Subagent reviewer service is unavailable." });
+        if (!accepted) finish({ error: "Hackler reviewer service is unavailable." });
       }, 100);
     });
   }
@@ -511,7 +511,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       }
       if (state.mode !== "plan" && activeWriters > 0) {
         ctx.ui.notify(
-          "Plan Mode cannot start while a write-capable subagent is running.",
+          "Plan Mode cannot start while a write-capable Hackler run is running.",
           "warning",
         );
         return;
@@ -558,7 +558,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         return;
       }
       if (activeWriters > 0) {
-        ctx.ui.notify(`${reviewFailedPrefix}: a write-capable subagent is active.`, "error");
+        ctx.ui.notify(`${reviewFailedPrefix}: a write-capable Hackler run is active.`, "error");
         return;
       }
       const selection = await selectReviewerModel(ctx);

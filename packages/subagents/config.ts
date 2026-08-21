@@ -273,10 +273,10 @@ export async function loadSubagentConfig(
     raw = JSON.parse(source);
   } catch (cause) {
     throw new Error(
-      `Invalid Subagent configuration at ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      `Invalid Hackler configuration at ${path}: ${cause instanceof Error ? cause.message : String(cause)}`,
     );
   }
-  const config = object(raw, `Invalid Subagent configuration at ${path}`);
+  const config = object(raw, `Invalid Hackler configuration at ${path}`);
   only(
     config,
     [
@@ -292,7 +292,7 @@ export async function loadSubagentConfig(
     path,
   );
   if (config.schemaVersion !== 2)
-    throw new Error(`Invalid Subagent configuration at ${path}: schemaVersion must be 2.`);
+    throw new Error(`Invalid Hackler configuration at ${path}: schemaVersion must be 2.`);
   return {
     schemaVersion: 2,
     runtime:

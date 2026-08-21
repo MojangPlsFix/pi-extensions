@@ -34,7 +34,7 @@ function resultRenderer(
 ) {
   const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
   if (options.isPartial) {
-    component.setText(theme.fg("muted", "Subagent operation in progress…"));
+    component.setText(theme.fg("muted", "Hackler operation in progress…"));
     return component;
   }
   const runs = runDetails(result.details);
@@ -47,8 +47,8 @@ function resultRenderer(
     const summary = runs.length
       ? runs.map(runLine).join("\n")
       : context.isError
-        ? "Subagent operation failed."
-        : "Subagent operation completed.";
+        ? "Hackler operation failed."
+        : "Hackler operation completed.";
     component.setText(
       `${theme.fg(context.isError ? "error" : "muted", summary)}\n${theme.fg("dim", expandHint())}`,
     );
@@ -136,12 +136,12 @@ const dispatchTaskSchema = Type.Object({
 export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager): void {
   pi.registerTool({
     name: "subagent_dispatch",
-    label: "Dispatch subagents",
+    label: "Dispatch Hackler",
     description:
-      "Dispatch one or more bounded subagent tasks. Batch every independent ready task in one call. Each task must declare disjoint ownership and a deliverable; the parent must not duplicate active delegated scope.",
+      "Dispatch one or more bounded Hackler tasks. Batch every independent ready task in one call. Each task must declare disjoint ownership and a deliverable; the parent must not duplicate active delegated scope.",
     promptSnippet: "Dispatch independent, explicitly owned specialist work in one batch.",
     promptGuidelines: [
-      "Use subagents for substantial independent or specialist work, not trivial or tightly sequential steps.",
+      "Use Hackler for substantial independent or specialist work, not trivial or tightly sequential steps.",
       "Enumerate ready work, assign one owner per path/symbol/angle, and batch it in one call.",
       "Use Scout/Researcher/Reviewer/Oracle for read-only work and Worker only for an owned implementation slice.",
       "Do not work on a delegated scope while its child is active; continue only unowned work.",
@@ -181,7 +181,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
 
   pi.registerTool({
     name: "subagent_status",
-    label: "Subagent status",
+    label: "Hackler status",
     description:
       "List enabled profiles, active ownership, capacity, blocked requests, parked reports, and configuration diagnostics.",
     promptSnippet: "Inspect profiles, ownership, lifecycle, and capacity before dispatching.",
@@ -241,9 +241,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
 
   pi.registerTool({
     name: "subagent_respond",
-    label: "Respond to subagent",
+    label: "Respond to Hackler",
     description:
-      "Resolve one pending supervisor request for a blocked subagent. Inspect the request with subagent_status first and use an exact choice value when choices are provided.",
+      "Resolve one pending supervisor request for a blocked Hackler run. Inspect the request with subagent_status first and use an exact choice value when choices are provided.",
     promptSnippet: "Resolve a pending supervisor request so a blocked child can continue.",
     parameters: Type.Object({
       id: Type.String({ description: "Pending supervisor request ID." }),
@@ -277,9 +277,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
 
   pi.registerTool({
     name: "subagent_collect",
-    label: "Collect subagents",
+    label: "Collect Hackler",
     description:
-      "Read selected subagent results, optionally waiting for the next or all selected runs to settle. Settled sessions are already parked and consume no active capacity.",
+      "Read selected Hackler results, optionally waiting for the next or all selected runs to settle. Settled sessions are already parked and consume no active capacity.",
     parameters: Type.Object({
       ids: Type.Optional(Type.Array(Type.String())),
       wait: Type.Optional(
@@ -301,7 +301,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
             (run) =>
               `## ${run.name} · ${run.status}\nOwned: ${run.ownership.owns.join(", ")}\n\n${run.report || run.error || "(no report yet)"}`,
           )
-          .join("\n\n") || "No matching subagents.";
+          .join("\n\n") || "No matching Hackler runs.";
       const requestText = requests.length
         ? `\n\nPending supervisor requests:\n${supervisorRequestLines(requests).join("\n")}`
         : "";
@@ -323,9 +323,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
 
   pi.registerTool({
     name: "subagent_steer",
-    label: "Steer subagent",
+    label: "Steer Hackler",
     description:
-      "Send guidance to an active subagent, or explicitly revive a parked persistent session with a follow-up.",
+      "Send guidance to an active Hackler run, or explicitly revive a parked persistent session with a follow-up.",
     parameters: Type.Object({ id: Type.String(), message: Type.String() }),
     async execute(_toolCallId, params) {
       try {
@@ -354,9 +354,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
 
   pi.registerTool({
     name: "subagent_stop",
-    label: "Stop subagents",
+    label: "Stop Hackler",
     description:
-      "Stop one or more active subagents and their owned descendants. Persistent transcripts and reports remain available.",
+      "Stop one or more active Hackler runs and their owned descendants. Persistent transcripts and reports remain available.",
     parameters: Type.Object({ ids: Type.Array(Type.String(), { minItems: 1 }) }),
     async execute(_toolCallId, params) {
       try {

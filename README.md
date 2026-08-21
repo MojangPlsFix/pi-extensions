@@ -29,10 +29,10 @@ pi update --extensions
 | [Codex Compaction](packages/codex-compaction/) | Uses OpenAI opaque checkpoints through Pi's compaction lifecycle at 90% context usage. | Automatic, `/compact` | Exact `openai-codex/openai-codex-responses` models |
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private cache and sends a file reference to the model. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
-| [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Subagent subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
-| [Subagents](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
+| [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Hackler subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
+| [Hackler](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
-| [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Subagents run. | Automatic | Running, blocked, and completed Subagents |
+| [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
@@ -40,7 +40,7 @@ The package installs all 15 extension entrypoints. Missing optional tools do not
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
-- **Herdr:** Subagents can open display-only transcript panes. Herdr does not run or prompt child agents.
+- **Herdr:** Hackler can open display-only transcript panes. Herdr does not run or prompt child agents.
 - **Capabilities:** User configuration can load reviewed extensions, skills, and executable rules for selected profiles.
 - **External runners:** The manager starts configured commands without a shell and sends tasks through stdin.
 
@@ -52,7 +52,7 @@ Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrie
 
 The TUI stats viewer supports `↑` and `↓`, PageUp, PageDown, Home, End, `←`, and `→` for navigation. Use `m` for month view, `w` for workweek view, and `Esc` or `q` to close the viewer.
 
-Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota.
+Stats reports `SUMMARY` totals, a `HACKLER (included above)` subset, daily rows for week views, monthly `WEEKLY` rows, and model and project tables. For an active `github-copilot` model, Stats may record one daily account checkpoint at `<agent-dir>/copilot-credit-snapshots.json`. The daily table labels this value `Start Credits`. Copilot credits never enter Pi totals. The `/usage-meter` extension remains responsible for live provider quota.
 
 ## Skills
 
@@ -60,13 +60,13 @@ Stats reports `SUMMARY` totals, a `SUBAGENTS (included above)` subset, daily row
 | --- | --- |
 | [Grilling](packages/grilling/) | Runs a design-tree interview before a plan or decision. | `/skill:grilling`, `/skill:grill-me` | Any provider. The structured dialog is optional. |
 | `bro` | Restates the last message in plain human language. |
-| `subagent-orchestration` | Coordinates profile-based Subagents with explicit ownership, batching, approvals, and integration. |
+| `subagent-orchestration` | Coordinates profile-based Hackler runs with explicit ownership, batching, approvals, and integration. |
 | `ste-writing` | Rewrites prose in ASD-STE100 Simplified Technical English. |
 | `web-search` | Guides bounded current web and documentation research. |
 
 ## Configuration
 
-Subagents v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`:
+Hackler v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`:
 
 ```json
 {
@@ -105,7 +105,7 @@ Subagents v2 uses a versioned configuration at `~/.pi/agent/subagents/config.jso
 
 Authenticate the selected provider before you start a child. Run `/agents doctor` after a configuration change. Existing runs keep their captured model and policy.
 
-See [Configuration](docs/configuration.md) for environment variables, Subagent capability policy, provider behavior, and optional integrations. Feature directories contain more notes for Plan Mode, Subagents, Usage Meter, Copilot features, Todos, Stats, Notify, and Ask User Question.
+See [Configuration](docs/configuration.md) for environment variables, Hackler capability policy, provider behavior, and optional integrations. Feature directories contain more notes for Plan Mode, Hackler, Usage Meter, Copilot features, Todos, Stats, Notify, and Ask User Question.
 
 ## Development
 
