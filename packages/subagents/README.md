@@ -218,6 +218,8 @@ If `herdr.enabled` is omitted, Hackler enables transcript inspection only when t
 
 A run captures its effective profile, model, thinking level, and capabilities when it starts. A later file change does not change that run.
 
+Use [MODEL_SELECTION.md](MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral evidence and local tests.
+
 ## Capability catalog
 
 Only the global configuration can define capability implementation paths. A trusted project profile can select a global capability, but it cannot define an executable or extension path.

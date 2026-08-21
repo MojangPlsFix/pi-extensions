@@ -107,6 +107,8 @@ Hackler v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`
 
 Authenticate the selected provider before you start a child. Run `/agents doctor` after a configuration change. Existing runs keep their captured model and policy.
 
+Use the [Hackler model-selection guide](packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral criteria.
+
 Session Summary uses `github-copilot/gpt-5.6-luna` for Copilot. Codex tries `gpt-5.3-codex-spark` before `gpt-5.6-luna`.
 
 Spark uses separate five-hour and weekly limits during its research preview. The Luna fallback uses standard Codex/Work allowance.

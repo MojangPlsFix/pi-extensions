@@ -58,6 +58,8 @@ Start with this file:
 
 Move each old role model setting into `models.overrides`.
 
+Use [MODEL_SELECTION.md](MODEL_SELECTION.md) to reassess each role with provider-neutral criteria and local tests.
+
 Omit `herdr.enabled` to auto-enable display-only transcript inspection when the complete Herdr environment is present. Set it to `false` to disable Herdr explicitly.
 
 Replace optional resource switches with named capabilities. Do not copy old extension paths into a project file.

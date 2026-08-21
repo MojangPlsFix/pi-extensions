@@ -9,6 +9,8 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 - The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
 - Hackler resolves model policy when it starts. Resolution checks an explicit review override, `models.overrides`, profile frontmatter, `models.default`, and the parent snapshot. `inherit` selects the parent value.
 
+Use the [Hackler model-selection guide](../packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral criteria and local tests.
+
 ### Hackler model providers
 
 Hackler model IDs include the provider name. Child sessions use the selected model through Pi's model runtime. They do not run the `copilot` executable.
