@@ -9,6 +9,7 @@ import modelCostBadges from "../packages/model-cost-badges/index.js";
 import notify from "../packages/notify/index.js";
 import planMode from "../packages/plan-mode/index.js";
 import repositoryReference from "../packages/repository-reference/index.js";
+import sessionSummary from "../packages/session-summary/index.js";
 import stats from "../packages/stats/index.js";
 import subagents from "../packages/subagents/index.js";
 import todos from "../packages/todos/index.js";
@@ -62,6 +63,7 @@ const entrypoints = [
   workingIndicator,
   webSearch,
   usageMeter,
+  sessionSummary,
 ];
 
 describe("package manifest", () => {

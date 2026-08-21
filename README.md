@@ -30,16 +30,18 @@ pi update --extensions
 | [Large Paste](packages/large-paste/) | Saves input over 20,000 characters to a private cache and sends a file reference to the model. | Automatic | All sessions |
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
 | [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Hackler subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
+| [Session Summary](packages/session-summary/) | Generates concise titles for unnamed sessions and shows them in `/resume`. | `/session-summary`, `/session-summary-cost`, `/session-summaries` | `github-copilot/gpt-5.6-luna` |
 | [Hackler](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
-The package installs all 15 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 17 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
+- **Session Summary:** Session Summary uses the authenticated GitHub Copilot Luna model. Set `PI_SESSION_SUMMARY=off` to disable it.
 - **Herdr:** Hackler can open display-only transcript panes. Herdr does not run or prompt child agents.
 - **Capabilities:** User configuration can load reviewed extensions, skills, and executable rules for selected profiles.
 - **External runners:** The manager starts configured commands without a shell and sends tasks through stdin.
@@ -105,7 +107,7 @@ Hackler v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`
 
 Authenticate the selected provider before you start a child. Run `/agents doctor` after a configuration change. Existing runs keep their captured model and policy.
 
-See [Configuration](docs/configuration.md) for environment variables, Hackler capability policy, provider behavior, and optional integrations. Feature directories contain more notes for Plan Mode, Hackler, Usage Meter, Copilot features, Todos, Stats, Notify, and Ask User Question.
+See [Configuration](docs/configuration.md) for environment variables, Hackler capability policy, provider behavior, and optional integrations. Feature directories contain more notes for Plan Mode, Session Summary, Hackler, Usage Meter, Copilot features, Todos, Stats, Notify, and Ask User Question.
 
 ## Development
 

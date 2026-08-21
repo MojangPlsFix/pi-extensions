@@ -31,4 +31,4 @@ PI_CONFIG_DIR="$(mktemp -d)" pi install "$(pwd)"
 PI_CONFIG_DIR="$PI_CONFIG_DIR" pi
 ```
 
-Test `/reload`, a non-Copilot model, provider switching when configured, `/plan`, `/plan off`, plan implementation, and `/agents` without optional tools.
+Test `/reload`, a non-Copilot model, provider switching when configured, `/plan`, `/plan off`, plan implementation, `/agents`, `/session-summary`, and `/session-summary-cost` without optional tools.

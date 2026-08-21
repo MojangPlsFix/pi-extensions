@@ -24,6 +24,7 @@ The local `copilot` CLI and `copilot login` are required only when the Search in
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
 - `PI_COPILOT_SEARCH_TIMEOUT_MS`: Copilot CLI inactivity limit in milliseconds. Copilot output resets the timer. The default is 600,000 (10 minutes).
+- `PI_SESSION_SUMMARY=off`: disables automatic and manual Session Summary title generation.
 - `PI_CODING_AGENT_DIR`: Pi's agent directory. User Hackler profiles and configuration live below this directory. New Hackler transcripts use `<agent-dir>/subagents/sessions`.
 - `PI_CODING_AGENT_SESSION_DIR`: the normal Pi session location used by Stats. Stats also scans legacy session trees.
 - `HERDR_ENV=1`, `HERDR_PANE_ID`, and `HERDR_SOCKET_PATH`: permit optional display-only Hackler transcript panes. Herdr does not run child agents.
@@ -90,4 +91,4 @@ Run `/agents doctor --json` to inspect effective profile and capability policy. 
 
 The activity widget shows active task status. `/agents` contains lineage, reports, requests, profile controls, and diagnostics. New transcripts stay at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the legacy `<agent-dir>/sessions/subagents` location.
 
-See feature-level READMEs for command details, lifecycle rules, and security limits. Pi Memory and Session Summary are not part of this package.
+See [Session Summary](../packages/session-summary/README.md) for title generation, provider requirements, usage accounting, and failure behavior. See feature-level READMEs for other command details, lifecycle rules, and security limits. Pi Memory is not part of this package.
