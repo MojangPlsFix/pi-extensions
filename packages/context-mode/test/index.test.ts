@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import contextMode, {
+  BRIDGE_TOOL_DESCRIPTIONS,
   BRIDGED_TOOLS,
   ContextAbortError,
   compactBridgeSchema,
@@ -22,8 +23,10 @@ import contextMode, {
   shellScriptExtension,
 } from "../index.js";
 import {
+  contextRoutingAnchor,
   normalizeLifecycleToolResult,
   ROUTING_ANCHOR,
+  runContextHandlerWithRouting,
   sanitizeInjectedRouting,
 } from "../lifecycle.js";
 import { enforceExecutionPolicy, resetSecurityModuleForTests } from "../security.js";
@@ -165,7 +168,18 @@ describe("Context Mode Pi ownership", () => {
       "ctx_batch_execute",
     ]);
     expect(BRIDGED_TOOLS).toContain("ctx_doctor");
+    expect(BRIDGED_TOOLS as readonly string[]).not.toContain("ctx_read");
+    expect(subject.tools.map((tool) => tool.name)).not.toContain("ctx_read");
     expect(subject.tools.every((tool) => tool.renderCall && tool.renderResult)).toBe(true);
+    const fileTool = subject.tools.find((tool) => tool.name === "ctx_execute_file");
+    expect(fileTool?.description).toMatch(/code-driven analysis, not a read-only replacement/iu);
+    expect(fileTool?.description).toMatch(/built-in read/iu);
+    for (const tool of subject.tools.filter((candidate) =>
+      ["ctx_execute", "ctx_execute_file", "ctx_batch_execute"].includes(String(candidate.name)),
+    ))
+      expect(tool.description, String(tool.name)).toMatch(/unavailable in Plan Mode/iu);
+    expect(BRIDGE_TOOL_DESCRIPTIONS.ctx_index).toMatch(/external Context Mode knowledge base/iu);
+    expect(BRIDGE_TOOL_DESCRIPTIONS.ctx_fetch_and_index).toMatch(/network fetch/iu);
   });
 
   it("registers the pinned upstream session-memory and compaction lifecycle without its tools", () => {
@@ -206,6 +220,172 @@ describe("Context Mode Pi ownership", () => {
     expect(subject.tools).toHaveLength(0);
     expect(subject.events.size).toBe(0);
     expect(subject.warnings.join("\n")).toContain("another extension already registered");
+  });
+});
+
+describe("Context Mode active-tool routing", () => {
+  const message = (suffix = "") => ({
+    role: "user",
+    content: `context-mode active. stale routing${suffix}`,
+  });
+
+  it("builds full routing with exact reads separated from code-driven file analysis", () => {
+    const anchor = contextRoutingAnchor([
+      "read",
+      "ctx_execute",
+      "ctx_execute_file",
+      "ctx_batch_execute",
+      "ctx_search",
+      "ctx_fetch_and_index",
+      "ctx_index",
+      "ctx_stats",
+      "ctx_doctor",
+    ]);
+    expect(anchor).toContain("Exact file reads → read.");
+    expect(anchor).toContain("Code-driven analysis of one file → ctx_execute_file");
+    expect(anchor).toContain("not for exact file retrieval");
+    expect(anchor).toContain("Web pages → ctx_fetch_and_index then ctx_search.");
+    expect(anchor).toContain("Index documents → ctx_index.");
+    expect(anchor).toContain("Index and search statistics → ctx_stats.");
+    expect(anchor).toContain("Runtime diagnostics → ctx_doctor.");
+    expect(anchor).not.toContain("ctx_read");
+  });
+
+  it("mentions only active tools and makes fetch/search guidance conditional", () => {
+    const partial = contextRoutingAnchor(["read", "ctx_fetch_and_index", "ctx_stats"]);
+    expect(partial).toBe(
+      "context-mode active. Exact file reads → read. Index and search statistics → ctx_stats.",
+    );
+    expect(partial).not.toContain("ctx_fetch_and_index");
+    for (const inactive of [
+      "ctx_execute",
+      "ctx_execute_file",
+      "ctx_batch_execute",
+      "ctx_search",
+      "ctx_index",
+      "ctx_doctor",
+    ])
+      expect(partial).not.toContain(`${inactive}.`);
+    expect(contextRoutingAnchor([])).toBe("context-mode active.");
+  });
+
+  it("preserves active_memory and all bytes after the first routing paragraph", () => {
+    for (const suffix of [
+      "\n\n<active_memory>remember me</active_memory>\r\n  \nnext byte",
+      "\r\n\r\n<active_memory>CRLF bytes</active_memory>\r\n",
+    ]) {
+      const messages = [message(suffix)];
+      sanitizeInjectedRouting(messages, contextRoutingAnchor(["read"]));
+      expect(messages[0]?.content).toBe(`context-mode active. Exact file reads → read.${suffix}`);
+    }
+  });
+
+  it("uses one post-handler snapshot for event mutation and returned arrays", () => {
+    let active = ["read"];
+    let lookups = 0;
+    const pi = {
+      getActiveTools() {
+        lookups++;
+        return [...active];
+      },
+    };
+    const event = { messages: [message()] };
+    const returned = [message("\n\n<active_memory>returned</active_memory>")];
+    const result = runContextHandlerWithRouting(pi as never, () => {
+      active = ["ctx_execute_file"];
+      return returned;
+    }, [event]);
+    expect(result).toBe(returned);
+    expect(lookups).toBe(1);
+    expect(event.messages[0]?.content).toContain("ctx_execute_file");
+    expect(event.messages[0]?.content).not.toContain("Exact file reads → read.");
+    expect(returned[0]?.content).toBe(
+      "context-mode active. Code-driven analysis of one file → ctx_execute_file (not for exact file retrieval).\n\n<active_memory>returned</active_memory>",
+    );
+  });
+
+  it("waits for async handlers before snapshotting active tools", async () => {
+    let active = ["ctx_search"];
+    let settled = false;
+    const event = { messages: [message()] };
+    const returned = { messages: [message()] };
+    const pi = {
+      getActiveTools() {
+        expect(settled).toBe(true);
+        return [...active];
+      },
+    };
+    const result = await runContextHandlerWithRouting(pi as never, async () => {
+      await Promise.resolve();
+      active = ["read", "ctx_index"];
+      settled = true;
+      return returned;
+    }, [event]);
+    expect(result).toBe(returned);
+    expect(event.messages[0]?.content).toBe(
+      "context-mode active. Exact file reads → read. Index documents → ctx_index.",
+    );
+    expect(returned.messages[0]?.content).toBe(event.messages[0]?.content);
+  });
+
+  it("sanitizes routing after synchronous throws and asynchronous rejections", async () => {
+    const failure = new Error("upstream context failure");
+    const pi = { getActiveTools: () => ["read"] };
+    const synchronous = {
+      messages: [message("\n\n<active_memory>sync</active_memory>")],
+    };
+    expect(() =>
+      runContextHandlerWithRouting(pi as never, () => {
+        throw failure;
+      }, [synchronous]),
+    ).toThrow(failure);
+    expect(synchronous.messages[0]?.content).toBe(
+      "context-mode active. Exact file reads → read.\n\n<active_memory>sync</active_memory>",
+    );
+
+    const asynchronous = {
+      messages: [message("\r\n\r\n<active_memory>async</active_memory>")],
+    };
+    await expect(
+      runContextHandlerWithRouting(pi as never, async () => {
+        await Promise.resolve();
+        throw failure;
+      }, [asynchronous]),
+    ).rejects.toBe(failure);
+    expect(asynchronous.messages[0]?.content).toBe(
+      "context-mode active. Exact file reads → read.\r\n\r\n<active_memory>async</active_memory>",
+    );
+  });
+
+  it("reasserts routing as active tools change between context events", () => {
+    let active = ["read", "ctx_search"];
+    const pi = { getActiveTools: () => [...active] };
+    const first = { messages: [message()] };
+    runContextHandlerWithRouting(pi as never, () => undefined, [first]);
+    expect(first.messages[0]?.content).toContain("ctx_search");
+
+    active = ["read"];
+    const second = { messages: [message()] };
+    runContextHandlerWithRouting(pi as never, () => undefined, [second]);
+    expect(second.messages[0]?.content).toBe("context-mode active. Exact file reads → read.");
+  });
+
+  it("fails active-tool lookup closed with only the activation marker", () => {
+    const event = {
+      messages: [message("\n\n<active_memory>kept</active_memory>")],
+    };
+    runContextHandlerWithRouting(
+      {
+        getActiveTools() {
+          throw new Error("stale Plan Mode runtime");
+        },
+      } as never,
+      () => undefined,
+      [event],
+    );
+    expect(event.messages[0]?.content).toBe(
+      "context-mode active.\n\n<active_memory>kept</active_memory>",
+    );
   });
 });
 

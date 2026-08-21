@@ -44,8 +44,9 @@ type BridgeModule = {
 export type BridgeProgress = (text: string, details?: Record<string, unknown>) => void;
 
 /**
- * Adapter boundary for the external ELv2 Context Mode runtime. Only read/index tools cross this
- * boundary; Pi-owned execution never uses the external protocol. MCP has no cancellation field,
+ * Adapter boundary for the external ELv2 Context Mode runtime. Only bounded indexing, search,
+ * fetch, and diagnostic tools cross this boundary; Pi-owned execution never uses the external
+ * protocol. MCP has no cancellation field,
  * so an aborted caller stops waiting but cannot claim that the server-side operation was killed.
  */
 export class ExternalContextBridge {

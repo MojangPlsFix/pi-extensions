@@ -21,6 +21,13 @@ describe("Plan Mode editor and prompt", () => {
     expect(prompt).toContain("run a grilling interview first");
     expect(prompt).toContain("current decision frontier");
     expect(prompt).toContain("ordinary English");
+    expect(prompt).toContain("Context execution is unavailable in Plan Mode");
+    expect(prompt).toContain("built-in read tool for exact file contents");
+    expect(prompt).toContain("Use grep, find, and ls for direct inspection");
+    expect(prompt).toContain("ctx_search for material that is already indexed");
+    expect(prompt).toContain("ctx_execute_file runs supplied code");
+    expect(prompt).toContain("ctx_index writes to the external Context knowledge base");
+    expect(prompt).toContain("ctx_fetch_and_index performs network access");
     expect(prompt).toContain("Do not emit the final plan during the grilling interview.");
     expect(prompt).toContain("<proposed_plan>");
   });

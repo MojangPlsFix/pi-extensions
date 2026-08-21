@@ -19,7 +19,7 @@ import {
   type SubagentsStatusEvent,
   withBlockingUserInteraction,
 } from "../../shared/events.js";
-import { configureBashPolicy } from "./bash-policy.js";
+import { bashBlockReason, configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
 import { PlanModeEditor } from "./editor.js";
 import { extractProposedPlan } from "./plan-parser.js";
@@ -43,6 +43,11 @@ const implementationMessage = "Implement the approved plan.";
 const freshImplementationPrefix =
   "A previous agent produced the plan below for the user's task. Implement it in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and complete implementation and verification.";
 const reviewFailedPrefix = "Plan review failed";
+const rtkProbeTimeoutMs = 2_000;
+
+export class PlanModeBashPolicyError extends Error {
+  override readonly name = "PlanModeBashPolicyError";
+}
 
 type ReviewResult = {
   reviewerId?: string;
@@ -178,12 +183,21 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   };
 
   async function reloadPolicy(ctx: ExtensionContext): Promise<void> {
-    loadedConfig = await loadPlanModeConfig({
-      cwd: ctx.cwd,
-      trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
-    });
+    const [config, rtkVersion] = await Promise.all([
+      loadPlanModeConfig({
+        cwd: ctx.cwd,
+        trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+      }),
+      pi
+        .exec("rtk", ["--version"], { timeout: rtkProbeTimeoutMs })
+        .then((result) =>
+          result.code === 0 && !result.killed && !result.stderr.trim() ? result.stdout : undefined,
+        )
+        .catch(() => undefined),
+    ]);
+    loadedConfig = config;
     configurePlanModePolicy(loadedConfig);
-    configureBashPolicy(loadedConfig);
+    configureBashPolicy({ ...loadedConfig, ...(rtkVersion ? { rtkVersion } : {}) });
     for (const warning of loadedConfig.warnings) {
       if (ctx.hasUI) ctx.ui.notify(warning, "warning");
       else console.error(`[plan-mode] ${warning}`);
@@ -718,10 +732,52 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     },
   });
 
+  const guardedBashInputs = new WeakSet<object>();
+
+  function guardApprovedBashCommand(input: Record<string, unknown>): string | undefined {
+    if (guardedBashInputs.has(input)) return undefined;
+    const initialCommand = input.command;
+    if (typeof initialCommand !== "string") return "Invalid Bash command in Plan Mode.";
+    const descriptor = Object.getOwnPropertyDescriptor(input, "command");
+    if (descriptor && descriptor.configurable === false) {
+      return "Plan Mode could not secure the approved Bash command against later rewrites.";
+    }
+    let approvedCommand = initialCommand;
+    try {
+      Object.defineProperty(input, "command", {
+        enumerable: true,
+        configurable: false,
+        get: () => approvedCommand,
+        set: (candidate: unknown) => {
+          if (typeof candidate !== "string") {
+            throw new PlanModeBashPolicyError(
+              "Plan Mode rejected a non-string Bash command rewrite.",
+            );
+          }
+          const reason = bashBlockReason(candidate);
+          if (reason) {
+            throw new PlanModeBashPolicyError(
+              `Plan Mode rejected a Bash command rewrite: ${reason}`,
+            );
+          }
+          approvedCommand = candidate;
+        },
+      });
+      guardedBashInputs.add(input);
+      return undefined;
+    } catch (error) {
+      if (error instanceof PlanModeBashPolicyError) throw error;
+      return "Plan Mode could not secure the approved Bash command against later rewrites.";
+    }
+  }
+
   pi.on("tool_call", (event) => {
     if (state.mode !== "plan") return;
     const reason = planModeToolBlockReason(event.toolName, event.input);
-    return reason ? { block: true, reason } : undefined;
+    if (reason) return { block: true, reason };
+    if ((event.toolName.split(".").pop() ?? event.toolName) !== "bash") return;
+    const guardReason = guardApprovedBashCommand(event.input as Record<string, unknown>);
+    return guardReason ? { block: true, reason: guardReason } : undefined;
   });
 
   pi.on("before_agent_start", (event) => {

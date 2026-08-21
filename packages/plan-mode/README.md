@@ -23,12 +23,34 @@ Use `/plan-tools` to add an approval. The command lists registered Pi tools and 
 
 ## Validation and security
 
-Pi ignores invalid JSON, malformed entries, empty names, and unavailable executables. It shows warnings for these entries. It removes duplicate entries. Pi writes configuration through a temporary file and an atomic rename.
+Pi ignores invalid JSON, malformed entries, empty names, and unavailable executables. It shows warnings for these entries and removes duplicates. Pi writes configuration through a temporary file and an atomic rename.
 
-Direct project mutators remain blocked even when a configuration lists them. These mutators include `edit`, `write`, `apply_patch`, long-term memory overwrite/update/delete/forget operations, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`, `ctx_purge`, and `ctx_upgrade`. Plan Mode permits the Hackler v2 control tools. The Hackler manager rejects write dispatch and write-session revival while Plan Mode is active. Plan Mode permits `memory_read`/`memory_search` and only `memory_write` calls targeting `daily` or `long_term` with append semantics.
+Plan Mode parses each Bash request as one literal command. Spaces and tabs separate arguments. Quotes, escapes, and adjacent fragments follow the documented Bash word rules. Quoted or escaped shell metacharacters are allowed as literal argument text. Thus, a quoted regular expression can contain `|`. Active pipelines, chains, redirects, comments, grouping, expansion, substitutions, globs, braces, and leading tildes remain blocked. Malformed quotes, line breaks, and trailing escapes also fail closed.
 
-Safe Context Mode references (`ctx_search`, `ctx_stats`, `ctx_doctor`, `ctx_index`, and `ctx_fetch_and_index`) remain available. The reviewed `repository_reference` tool can also clone validated remotes into managed temporary paths and list, remove, or clean up only its own references; it has no Context Mode dependency. Context execution is never an approved Plan Mode operation, even if configured. The configuration does not change restrictions on Git mutations, package installation, todos, scratchpad writes, containers, shell composition, redirection, command substitution, or arbitrary interpreter execution.
+The policy checks decoded arguments without joining them again. It rejects known write, execution, helper, pager, and delegation options for reviewed native utilities. It parses Git and package-manager subcommands separately. Exact third-party CLI approvals still represent explicit user trust. They use the same literal-command grammar, so an approval cannot enable shell composition or expansion.
 
-A proposal is recognized only when `<proposed_plan>` and `</proposed_plan>` occupy standalone lines outside fenced code. Inline and fenced examples are ignored. While active, `/plan` autocompletes `off`; `/plan-implement` autocompletes `fresh` for a new session. `/plan-review` requires active Plan Mode, an idle parent, a latest unconsumed plan, and no running Worker, then lets the user select an available/scoped model for a temporary read-only Explorer review. Cancellation, unavailable models, and authentication failures leave plan state unchanged. The reviewer report is displayed and injected for plan revision; it never approves or implements a plan. `/plan-implement` consumes the reviewed plan source once in the active session, so a newer proposal is required for another implementation attempt there. Fresh implementation records consumption in the replacement session. If you resume the parent session, its plan state remains independent. Pi checks shell composition before configured commands. An approval cannot chain commands or write output.
+RTK delegated commands use the same validator as each native command. Delegation requires an exact `rtk 0.27.x` version from the session policy probe. A missing, malformed, or different version fails closed. Root RTK help and version output remain available. Model-issued `rtk rewrite`, `smart`, `session`, `run`, `proxy`, unknown RTK commands, `gh`, and `rtk gh` remain blocked. The local RTK extension can call `rtk rewrite` through `pi.exec` without exposing that command to model-issued Bash.
 
-Plan Mode is a Pi policy guardrail, not an operating-system sandbox. A configured CLI represents an explicit trust decision. Add only read-only subcommands. The upstream repository contains no environment-specific tool or server configuration. Keep personal integrations in local configuration.
+Plan Mode validates an approved Bash command again when a later extension rewrites its `command` property. A safe rewrite replaces the approved command. An unsafe or non-string rewrite raises a policy error and leaves the last approved command in place. This covers the mutable tool-call input path supported by Pi.
+
+Direct project mutators remain blocked even when configuration lists them. These include `edit`, `write`, `apply_patch`, memory overwrite or deletion, `ctx_execute`, `ctx_execute_file`, `ctx_batch_execute`, `ctx_purge`, and `ctx_upgrade`. Plan Mode permits the Hackler control tools, but the manager rejects write runs and write-session revival. Plan Mode permits memory reads and append-only writes to daily or long-term memory.
+
+Context routing follows the tools active for each turn. Exact file inspection uses Pi's built-in `read` when active because Context Mode has no `ctx_read` tool. Context execution remains unavailable in Plan Mode, even for apparent read tasks. `ctx_execute_file` runs supplied code and is not an exact reader. `ctx_index` and `ctx_fetch_and_index` remain allowed for compatibility. They can change the external Context index, and fetch can use the network. Search, statistics, and diagnostics remain available when active.
+
+The reviewed `repository_reference` tool can clone validated remotes into managed temporary paths. It can change only references that it created. It has no Context Mode dependency.
+
+## Plan workflow
+
+A proposal is recognized only when `<proposed_plan>` and `</proposed_plan>` occupy standalone lines outside fenced code. Inline and fenced examples are ignored. While active, `/plan` autocompletes `off`. `/plan-implement` autocompletes `fresh` for a new session.
+
+`/plan-review` requires active Plan Mode, an idle parent, a latest unconsumed plan, and no running Worker. It uses an available, scoped model for a temporary read-only review. Cancellation, unavailable models, and authentication failures leave plan state unchanged. The report supports plan revision. It never approves or implements a plan.
+
+`/plan-implement` consumes a plan source once in the active session. Another attempt requires a newer proposal. A fresh implementation records consumption in the replacement session. The parent session keeps independent state if you resume it.
+
+## Trust boundary
+
+Plan Mode is a guardrail over the model-supplied command and reviewed in-event rewrites. It is not an operating-system filesystem or network sandbox. Pi applies `shellCommandPrefix` after Plan Mode validation. Treat that prefix as trusted host configuration.
+
+The argument guarantee does not cover executable resolution, aliases, shell functions, or the shell startup environment. It also does not cover project or user tool configuration, pagers, helper programs, utility versions, caches, or temporary files. Package-manager metadata and RTK history, tee, and other bookkeeping state are managed-state exceptions. Ambient programs can still use their normal network access.
+
+A configured CLI is an explicit trust decision. Add only read-only subcommands. Keep personal integrations in local configuration. Absolute read-only execution requires a separate operating-system sandbox or a shell-free runner. This change does not provide either mechanism.
