@@ -43,7 +43,12 @@ async function fakeCopilot(): Promise<string> {
   const executable = join(directory, "copilot");
   await writeFile(
     executable,
-    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(97);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nconst request = prompt.split('Request:\\n').at(-1) || '';\nconst emitAnswer = () => console.log(JSON.stringify({type:'assistant.message',data:{content: request.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\nif (request.includes('web-fail')) {\n  console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n  console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',result:{isError:true}}}));\n  emitAnswer();\n} else if (request.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nelse if (request.includes('progress-wait')) {\n  let ticks = 0;\n  const interval = setInterval(() => {\n    console.log(JSON.stringify({type:'assistant.message',data:{content:'progress'}}));\n    if (++ticks === 4) { clearInterval(interval); emitAnswer(); }\n  }, 50);\n} else if (request.includes('wait')) setTimeout(() => emitAnswer(), 5000);\nelse {\n  const web = prompt.includes('github-mcp-server/web_search') && !request.includes('skip-web');\n  if (web) {\n    console.log(JSON.stringify({type:'assistant.turn_start',data:{}}));\n    console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n    console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));\n  }\n  emitAnswer();\n}\n`,
+    `#!${process.execPath}\nconst args = process.argv.slice(2);\nif (args.includes('--version')) process.exit(97);\nconst prompt = args[args.indexOf('-p') + 1] || '';\nconst request = prompt.split('Request:\\n').at(-1) || '';\nconst emitAnswer = () => console.log(JSON.stringify({type:'assistant.message',data:{content: request.includes('large') ? 'x'.repeat(13000) : 'done https://example.com/docs'}}));\nif (request.includes('web-fail')) {\n  console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n  console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',result:{isError:true}}}));\n  emitAnswer();\n} else if (request.includes('fail')) { console.error('Bearer should-not-leak'); process.exit(2); }\nelse if (request.includes('progress-wait')) {\n  let ticks = 0;\n  const interval = setInterval(() => {\n    console.log(JSON.stringify({type:'assistant.message',data:{content:'progress'}}));\n    if (++ticks === 4) {
+      clearInterval(interval);
+      console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));
+      console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));
+      emitAnswer();
+    }\n  }, 50);\n} else if (request.includes('wait')) setTimeout(() => emitAnswer(), 5000);\nelse {\n  const web = prompt.includes('web_search') && !request.includes('skip-web');\n  if (web) {\n    console.log(JSON.stringify({type:'assistant.turn_start',data:{}}));\n    console.log(JSON.stringify({type:'tool.execution_start',data:{toolCallId:'web-1',mcpToolName:'github-mcp-server/web_search'}}));\n    console.log(JSON.stringify({type:'tool.execution_complete',data:{toolCallId:'web-1',success:true}}));\n  }\n  emitAnswer();\n}\n`,
   );
   await chmod(executable, 0o755);
   return executable;
@@ -101,7 +106,10 @@ type RegisteredTool = {
 
 function registeredSearchTool(): RegisteredTool {
   const tools: RegisteredTool[] = [];
-  searchExtension({ registerTool: (tool: RegisteredTool) => tools.push(tool) } as never);
+  searchExtension({
+    on: () => undefined,
+    registerTool: (tool: RegisteredTool) => tools.push(tool),
+  } as never);
   expect(tools.map((tool) => tool.name)).toEqual(["search"]);
   return tools[0] as RegisteredTool;
 }
@@ -142,21 +150,29 @@ describe("unified search interface", () => {
 
   it("includes native web-search guidance without changing code-search prompts", () => {
     const webPrompt = promptFor(normalizeSearchParams({ query: "latest release" }));
-    expect(webPrompt).toContain("native github-mcp-server/web_search tool");
+    expect(webPrompt).toContain("Use the web_search tool before answering");
     expect(webPrompt).toContain("Use no extended reasoning");
-    expect(webPrompt).toContain("Search at least one relevant current source");
-    expect(webPrompt).toContain("no more than 8 web tool calls");
-    expect(webPrompt).toContain("do not provide an unverified fallback answer from memory");
-    expect(promptFor(normalizeSearchParams({ query: "API docs", kind: "code" }))).not.toContain(
-      "github-mcp-server/web_search",
+    expect(webPrompt).toContain("no more than 8 web_search calls");
+    expect(webPrompt).toContain("no unverified fallback answer");
+    expect(promptFor(normalizeSearchParams({ query: "API docs", kind: "code" }))).toContain(
+      "Use the web_search tool before answering",
     );
   });
 
-  it("routes only the two supported providers", () => {
-    expect(backendForProvider("github-copilot")).toBe("copilot-cli");
-    expect(backendForProvider("openai-codex")).toBe("codex-native");
-    expect(() => backendForProvider("anthropic")).toThrow("Select a supported model");
-    expect(() => backendForProvider(undefined)).toThrow("no active provider");
+  it("routes only the two supported providers and validates the Copilot transport", () => {
+    expect(backendForProvider("github-copilot", {})).toBe("copilot-cli");
+    expect(backendForProvider("github-copilot", { PI_COPILOT_SEARCH_TRANSPORT: "cli" })).toBe(
+      "copilot-cli",
+    );
+    expect(backendForProvider("github-copilot", { PI_COPILOT_SEARCH_TRANSPORT: "SDK" })).toBe(
+      "copilot-sdk",
+    );
+    expect(() =>
+      backendForProvider("github-copilot", { PI_COPILOT_SEARCH_TRANSPORT: "automatic" }),
+    ).toThrow("PI_COPILOT_SEARCH_TRANSPORT");
+    expect(backendForProvider("openai-codex", {})).toBe("codex-native");
+    expect(() => backendForProvider("anthropic", {})).toThrow("Select a supported model");
+    expect(() => backendForProvider(undefined, {})).toThrow("no active provider");
   });
 
   it("returns actionable unsupported-provider progress without running a backend", async () => {
@@ -200,8 +216,8 @@ describe("Copilot CLI backend", () => {
     expect(buildCopilotArguments("web", { query: "docs", includeContent: true })).toEqual(
       expect.arrayContaining(["--available-tools=web_search,web_fetch"]),
     );
-    expect(buildCopilotArguments("code", { query: "docs" })).not.toContain(
-      "--available-tools=web_search",
+    expect(buildCopilotArguments("code", { query: "docs" })).toEqual(
+      expect.arrayContaining(["--available-tools=web_search"]),
     );
     expect(
       buildCopilotArguments("code", {
@@ -230,7 +246,12 @@ describe("Copilot CLI backend", () => {
     await expect(
       runCopilotSearch("code", { query: "large" }, undefined, executable),
     ).resolves.toMatch(/\[truncated\]$/);
-    expect(boundedCopilotOutput("x".repeat(13_000))).toMatch(/\[truncated\]$/);
+    const bounded = boundedCopilotOutput("x".repeat(13_000));
+    expect(bounded).toMatch(/\[truncated\]$/);
+    expect(bounded.length).toBeLessThanOrEqual(12_000);
+    expect(
+      boundedCopilotOutput(Array.from({ length: 500 }, () => "line").join("\n")).split("\n"),
+    ).toHaveLength(400);
   });
 
   it("forwards cancellation to the spawned child", async () => {
@@ -265,14 +286,15 @@ describe("Copilot CLI backend", () => {
     ).resolves.toContain("done");
   });
 
-  it("requires a successful native web_search invocation for web mode", async () => {
+  it("requires a successful native web_search invocation for both search kinds", async () => {
     const executable = await fakeCopilot();
-    await expect(
-      runCopilotSearch("web", { query: "skip-web" }, undefined, executable),
-    ).rejects.toThrow("without invoking github-mcp-server/web_search");
+    for (const kind of ["web", "code"] as const)
+      await expect(
+        runCopilotSearch(kind, { query: "skip-web" }, undefined, executable),
+      ).rejects.toThrow("without invoking web_search");
     await expect(
       runCopilotSearch("web", { query: "web-fail" }, undefined, executable),
-    ).rejects.toThrow("github-mcp-server/web_search failed");
+    ).rejects.toThrow("web_search failed");
   });
 
   it("marks Copilot source extraction as truncated after its bounded URL limit", () => {
@@ -287,6 +309,7 @@ describe("Copilot CLI backend", () => {
     const executable = await fakeCopilot();
     const originalPath = process.env.PATH;
     process.env.PATH = `${dirname(executable)}:${originalPath ?? ""}`;
+    vi.stubEnv("PI_COPILOT_SEARCH_TRANSPORT", "cli");
     try {
       const updates: Array<{ content?: Array<{ text?: string }> }> = [];
       const result = await registeredSearchTool().execute(
@@ -302,8 +325,8 @@ describe("Copilot CLI backend", () => {
       expect(updates.map((update) => update.content?.[0]?.text)).toEqual([
         "Searching with Copilot CLI…",
         `Copilot started · ${DEFAULT_COPILOT_SEARCH_MODEL}`,
-        "Copilot is using github-mcp-server/web_search…",
-        "Copilot finished github-mcp-server/web_search",
+        "Copilot is using web_search…",
+        "Copilot finished web_search",
       ]);
       expect(result.content[0]?.text).toContain("Untrusted external search results");
       expect(result.details).toMatchObject({

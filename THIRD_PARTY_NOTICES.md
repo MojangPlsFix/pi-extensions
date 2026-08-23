@@ -2,6 +2,15 @@
 
 The projects below were used as references or inspiration. Their inclusion does not imply endorsement, and no source is claimed as copied or substantially adapted unless explicitly stated.
 
+## GitHub Copilot SDK and bundled runtime
+
+- SDK: [`@github/copilot-sdk` 1.0.9](https://github.com/github/copilot-sdk/tree/v1.0.9)
+- SDK license: [MIT](https://github.com/github/copilot-sdk/blob/v1.0.9/LICENSE)
+- Bundled runtime: [`@github/copilot` 1.0.80](https://github.com/github/copilot-cli/tree/v1.0.80), with platform packages at the same version
+- Bundled runtime license: [GitHub Copilot CLI License](https://github.com/github/copilot-cli/blob/v1.0.80/LICENSE.md)
+- Author: GitHub
+- Relationship: Web Search uses the official SDK and its platform-specific bundled Copilot runtime. The package lock records the SDK, runtime, and platform packages.
+
 ## OpenAI Codex Plan Mode
 
 - Reference: <https://github.com/openai/codex/commit/578c1b2230288104041e880a86d0f7f3a5ca6e47>

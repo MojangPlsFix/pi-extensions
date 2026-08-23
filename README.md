@@ -35,19 +35,25 @@ pi update --extensions
 | [Hackler](packages/subagents/) | Runs child sessions with ownership, leases, parked reports, approvals, and reviewed integration. | `/agents`, `/agents trace`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_respond`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
-| [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
+| [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI by default or the opt-in bundled SDK runtime, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
 The package installs all 18 extension entrypoints. Missing optional tools do not block Pi startup:
 
-- **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
+- **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search uses the installed Copilot CLI by default. The opt-in SDK transport can use GitHub CLI credentials or supported token environment variables. Its isolated empty mode does not import the CLI's stored login.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
 - **Session Summary:** Session Summary uses the active provider. Copilot and Codex work without configuration. Automatic generation runs once after the first meaningful completed turn. It uses Pi's current working row and creates no persistent status. Set `PI_SESSION_SUMMARY=off` to disable it.
 - **Herdr:** Hackler can open display-only transcript panes. Herdr does not run or prompt child agents.
 - **Capabilities:** User configuration can load reviewed extensions, skills, and executable rules for selected profiles.
 - **External runners:** The manager starts configured commands without a shell and sends tasks through stdin.
 
-Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrieval. Codex uses native `/codex/alpha/search`. Both backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because neither backend exposes usage or cost for local Pi totals.
+The SDK transport starts one lazy bundled runtime per Pi session. The extension reuses this runtime and creates a fresh SDK search session for each tool invocation. It closes each search session after success, failure, timeout, or cancellation. Pi session shutdown stops the shared runtime.
+
+Set `PI_COPILOT_SEARCH_TRANSPORT=sdk|cli` to select the GitHub transport. `cli` remains the default until the authenticated SDK capability and reliability gates pass. `sdk` selects the opt-in bundled runtime preview. Search never retries a request on another transport automatically.
+
+`gpt-5.6-luna` is the default Copilot Search model unless the request overrides the model. The SDK transport omits reasoning effort. The legacy CLI transport uses effort `none`. Codex uses native `/codex/alpha/search`. All backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because the backends do not expose usage or cost for local Pi totals.
+
+The Copilot inactivity timeout resets on meaningful SDK events or legacy CLI output. Cancellation stops only the current SDK search session. It does not stop other searches that share the runtime. GitHub does not publish a supported standalone REST API or direct GitHub MCP contract for `web_search`. This package does not use private Copilot endpoints.
 
 Workflow Finalization keeps extension-generated continuations in one application queue. It sends only one continuation after Pi becomes idle. Requests remain on their origin branch and wait when that branch is inactive. Repository changes also arm a five-section implementation summary. The extension asks for one correction after an invalid summary, then shows one warning.
 
@@ -125,7 +131,7 @@ See [Configuration](docs/configuration.md) for environment variables, Hackler ca
 
 ## Development
 
-Use Node.js 22 or newer and a current Pi installation.
+Use Node.js 22.12.0 or newer and a current Pi installation.
 
 ```bash
 npm install

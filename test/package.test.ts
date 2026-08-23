@@ -118,6 +118,10 @@ describe("package manifest", () => {
   it("links referenced third-party projects and their licenses", async () => {
     const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
     for (const url of [
+      "https://github.com/github/copilot-sdk/tree/v1.0.9",
+      "https://github.com/github/copilot-sdk/blob/v1.0.9/LICENSE",
+      "https://github.com/github/copilot-cli/tree/v1.0.80",
+      "https://github.com/github/copilot-cli/blob/v1.0.80/LICENSE.md",
       "https://github.com/openai/codex/commit/578c1b2230288104041e880a86d0f7f3a5ca6e47",
       "https://github.com/openai/codex/commit/1e85ca099e4265bf89f4016772d299816e231bb3",
       "https://github.com/openai/codex/commit/2b5bdcf67547860f2e5c5a605009a70026796b2b",
@@ -168,12 +172,16 @@ describe("package manifest", () => {
     expect(command).toContain("effectivePolicy");
   });
 
-  it("has no lifecycle install scripts or production dependencies", async () => {
+  it("has no lifecycle install scripts and only reviewed production dependencies", async () => {
     const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
       dependencies?: object;
+      engines?: { node?: string };
       scripts?: Record<string, string>;
     };
-    expect(manifest.dependencies ?? {}).toEqual({});
+    expect(manifest.engines?.node).toBe(">=22.12.0");
+    expect(manifest.dependencies).toEqual({
+      "@github/copilot-sdk": "1.0.9",
+    });
     for (const name of ["preinstall", "install", "postinstall", "prepare"])
       expect(manifest.scripts?.[name]).toBeUndefined();
   });

@@ -12,6 +12,7 @@ import {
 } from "./search.js";
 
 function backendLabel(backend: SearchBackend): string {
+  if (backend === "copilot-sdk") return "Copilot SDK";
   return backend === "copilot-cli" ? "Copilot CLI" : "Codex native";
 }
 

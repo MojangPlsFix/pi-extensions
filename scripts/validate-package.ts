@@ -22,6 +22,10 @@ const expectedEntrypoints = [
   "packages/session-summary/index.ts",
 ];
 
+const expectedProductionDependencies = {
+  "@github/copilot-sdk": "1.0.9",
+};
+
 const expectedSkills = [
   "./packages/web-search/skills",
   "./packages/subagents/skills",
@@ -61,14 +65,14 @@ function expect(condition: unknown, message: string): void {
 
 expect(packageJson.private === true, "package must be private");
 expect(packageJson.type === "module", "package must be an ES module");
-expect(packageJson.engines?.node === ">=22", "package must require Node.js >=22");
+expect(packageJson.engines?.node === ">=22.12.0", "package must require Node.js >=22.12.0");
 expect(
   Array.isArray(packageJson.keywords) && packageJson.keywords.includes("pi-package"),
   "package must advertise the pi-package keyword",
 );
 expect(
-  !packageJson.dependencies || Object.keys(packageJson.dependencies).length === 0,
-  "no runtime dependencies are allowed",
+  JSON.stringify(packageJson.dependencies) === JSON.stringify(expectedProductionDependencies),
+  "production dependencies differ from the reviewed allowlist",
 );
 
 const declared = packageJson.pi?.extensions;
