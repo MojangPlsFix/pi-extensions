@@ -1104,55 +1104,192 @@ function packageBlockReason(
   return undefined;
 }
 
-const rtkGlobalOptions = new Set([
-  "--skip-env",
-  "--ultra-compact",
-  "--verbose",
-  "-v",
-  "-vv",
-  "-vvv",
+const rtkGlobalOptions = new Set(["--ultra-compact", "--verbose", "-v", "-vv", "-vvv"]);
+
+/** RTK-owned commands which are not transparent wrappers around another program. */
+const rtkHardDeniedCommands = new Set([
+  "rewrite",
+  "run",
+  "proxy",
+  "session",
+  "smart",
+  "gain",
+  "discover",
+  "learn",
+  "init",
+  "config",
+  "hook",
+  "hook-audit",
+  "pipe",
+  "cc-economics",
+  "verify",
+  "trust",
+  "untrust",
+  "telemetry",
+  "test",
+  "err",
+  "summary",
+  "deps",
+  "log",
 ]);
 
-type RtkDelegate =
-  | { kind: "simple" }
-  | { kind: "native"; command: string }
-  | { kind: "git" }
-  | { kind: "package"; program: "npm" | "pnpm" };
-
-const rtkDelegates: Readonly<Record<string, RtkDelegate>> = {
-  read: { kind: "simple" },
-  grep: { kind: "native", command: "grep" },
-  rg: { kind: "native", command: "rg" },
-  find: { kind: "native", command: "find" },
-  ls: { kind: "native", command: "ls" },
-  tree: { kind: "native", command: "tree" },
-  wc: { kind: "native", command: "wc" },
-  diff: { kind: "native", command: "diff" },
-  json: { kind: "simple" },
-  env: { kind: "simple" },
-  git: { kind: "git" },
-  npm: { kind: "package", program: "npm" },
-  pnpm: { kind: "package", program: "pnpm" },
-};
-
 let configuredCommands: Record<string, ReadonlySet<string>> = {};
-let rtkDelegationApproved = false;
 
-export function isSupportedRtkVersion(output: string | undefined): boolean {
-  return typeof output === "string" && /^rtk 0\.27\.\d+(?:\r\n|\n)?(?![\s\S])/.test(output);
-}
-
-export function configureBashPolicy(config: {
-  readOnlyCommands?: Record<string, string[]>;
-  rtkVersion?: string;
-}): void {
+export function configureBashPolicy(config: { readOnlyCommands?: Record<string, string[]> }): void {
   configuredCommands = Object.fromEntries(
     Object.entries(config.readOnlyCommands ?? {}).map(([program, commands]) => [
       program,
       new Set(commands),
     ]),
   );
-  rtkDelegationApproved = isSupportedRtkVersion(config.rtkVersion);
+}
+
+function unsignedInteger(value: string | undefined): boolean {
+  return value !== undefined && /^\d+$/.test(value);
+}
+
+function rtkReadBlockReason(args: readonly string[]): string | undefined {
+  if (args.length === 1 && (args[0] === "-h" || args[0] === "--help")) return undefined;
+
+  let files = 0;
+  let maxLines = false;
+  let tailLines = false;
+  let separatorIndex: number | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    if (token === "--") {
+      if (separatorIndex !== undefined) {
+        return "Only one RTK read -- separator is allowed in Plan Mode.";
+      }
+      separatorIndex = index;
+      continue;
+    }
+    if (separatorIndex !== undefined) {
+      files += 1;
+      continue;
+    }
+    if (token === "-n" || token === "--line-numbers") continue;
+
+    let option: "level" | "max" | "tail" | undefined;
+    let value: string | undefined;
+    if (
+      token === "-l" ||
+      token === "-m" ||
+      token === "--level" ||
+      token === "--max-lines" ||
+      token === "--tail-lines"
+    ) {
+      option =
+        token === "-l" || token === "--level"
+          ? "level"
+          : token === "-m" || token === "--max-lines"
+            ? "max"
+            : "tail";
+      value = args[index + 1];
+      index += 1;
+    } else if (token.startsWith("-l") && token.length > 2) {
+      option = "level";
+      value = token.slice(2);
+    } else if (token.startsWith("-m") && token.length > 2) {
+      option = "max";
+      value = token.slice(2);
+    } else if (token.startsWith("--level=")) {
+      option = "level";
+      value = token.slice("--level=".length);
+    } else if (token.startsWith("--max-lines=")) {
+      option = "max";
+      value = token.slice("--max-lines=".length);
+    } else if (token.startsWith("--tail-lines=")) {
+      option = "tail";
+      value = token.slice("--tail-lines=".length);
+    } else if (token.startsWith("-")) {
+      return "Unknown RTK read options are blocked in Plan Mode.";
+    } else {
+      files += 1;
+      continue;
+    }
+
+    if (option === "level") {
+      if (!value || !["none", "minimal", "aggressive"].includes(value)) {
+        return "RTK read level must be none, minimal, or aggressive in Plan Mode.";
+      }
+    } else {
+      if (!unsignedInteger(value)) {
+        return "RTK read line limits must be unsigned integers in Plan Mode.";
+      }
+      if (option === "max") maxLines = true;
+      else tailLines = true;
+    }
+  }
+  if (separatorIndex !== undefined && separatorIndex === args.length - 1) {
+    return "RTK read -- must be followed by a file in Plan Mode.";
+  }
+  if (maxLines && tailLines) {
+    return "RTK read max-lines and tail-lines cannot be combined in Plan Mode.";
+  }
+  return files > 0 ? undefined : "RTK read requires at least one file in Plan Mode.";
+}
+
+function rtkJsonBlockReason(args: readonly string[]): string | undefined {
+  if (args.length === 1 && (args[0] === "-h" || args[0] === "--help")) return undefined;
+
+  let files = 0;
+  let separatorIndex: number | undefined;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index]!;
+    if (token === "--") {
+      if (separatorIndex !== undefined) {
+        return "Only one RTK json -- separator is allowed in Plan Mode.";
+      }
+      separatorIndex = index;
+      continue;
+    }
+    if (separatorIndex !== undefined) {
+      files += 1;
+      continue;
+    }
+    if (token === "--keys-only") continue;
+
+    let depth: string | undefined;
+    if (token === "-d" || token === "--depth") {
+      depth = args[index + 1];
+      index += 1;
+    } else if (token.startsWith("-d") && token.length > 2) {
+      depth = token.slice(2);
+    } else if (token.startsWith("--depth=")) {
+      depth = token.slice("--depth=".length);
+    } else if (token.startsWith("-")) {
+      return "Unknown RTK json options are blocked in Plan Mode.";
+    } else {
+      files += 1;
+      continue;
+    }
+    if (!unsignedInteger(depth)) {
+      return "RTK json depth must be an unsigned integer in Plan Mode.";
+    }
+  }
+  if (separatorIndex !== undefined && separatorIndex === args.length - 1) {
+    return "RTK json -- must be followed by a file in Plan Mode.";
+  }
+  return files === 1 ? undefined : "RTK json requires exactly one file in Plan Mode.";
+}
+
+function rtkEnvBlockReason(args: readonly string[]): string | undefined {
+  if (args.length === 0) return undefined;
+  if (args.length !== 2 && args.length !== 1) {
+    return "RTK env accepts only one filter and cannot execute commands in Plan Mode.";
+  }
+  if (args.length === 2 && (args[0] === "-f" || args[0] === "--filter") && args[1]) {
+    return undefined;
+  }
+  if (
+    args.length === 1 &&
+    args[0]!.startsWith("--filter=") &&
+    args[0]!.length > "--filter=".length
+  ) {
+    return undefined;
+  }
+  return "Only a nonempty RTK env filter is allowed in Plan Mode.";
 }
 
 function rtkBlockReason(args: readonly string[]): string | undefined {
@@ -1160,37 +1297,36 @@ function rtkBlockReason(args: readonly string[]): string | undefined {
   if (args.length === 1 && ["-h", "--help", "-V", "--version", "help"].includes(args[0]!)) {
     return undefined;
   }
+
   let index = 0;
   while (rtkGlobalOptions.has(args[index] ?? "")) index += 1;
-  const subcommand = args[index];
-  if (!subcommand || subcommand === "--" || subcommand.startsWith("-")) {
+  const program = args[index];
+  if (!program || program === "--" || program.startsWith("-")) {
     return "Unknown RTK global options and unsupported -- placement are blocked in Plan Mode.";
   }
-  if (!rtkDelegationApproved) {
-    return "Delegated RTK commands require an audited RTK 0.27.x version in Plan Mode.";
-  }
-  const delegate = rtkDelegates[subcommand];
-  if (!delegate) {
-    return `This rtk ${subcommand} command is not approved for Plan Mode.`;
-  }
   const delegatedArgs = args.slice(index + 1);
-  if (delegate.kind === "simple") return undefined;
-  if (delegate.kind === "git") return gitBlockReason(delegatedArgs);
-  if (delegate.kind === "package") {
-    return packageBlockReason(delegate.program, delegatedArgs);
+  if (delegatedArgs.includes("--skip-env")) {
+    return "RTK --skip-env is blocked in Plan Mode.";
   }
-  return nativeBlockReason(delegate.command, delegatedArgs);
+  if (delegatedArgs.some((argument) => rtkGlobalOptions.has(argument))) {
+    return "RTK global options must precede the wrapped command in Plan Mode.";
+  }
+  if (program === "rtk") return "Nested RTK invocation is blocked in Plan Mode.";
+  if (program === "gh" || rtkHardDeniedCommands.has(program)) {
+    return `The RTK ${program} command is not an authorized transparent wrapper in Plan Mode.`;
+  }
+  if (program === "read") return rtkReadBlockReason(delegatedArgs);
+  if (program === "json") return rtkJsonBlockReason(delegatedArgs);
+  if (program === "env") return rtkEnvBlockReason(delegatedArgs);
+  return argvBlockReason(program, delegatedArgs);
 }
 
-/** A conservative literal-command allowlist with version-gated RTK equivalents. */
-export function bashBlockReason(command: string): string | undefined {
-  const lexed = lexShellCommand(command);
-  if (!lexed.ok) return lexed.rejection.message;
-  const [program, ...args] = lexed.argv;
-  if (!program) return "Empty Bash commands are not useful in Plan Mode.";
+/** Apply the native/configured policy directly to already-decoded argv boundaries. */
+function argvBlockReason(program: string, args: readonly string[]): string | undefined {
   if (program.includes("/")) {
     return "Only explicitly allowlisted inspection commands are available in Plan Mode.";
   }
+  if (program === "gh") return "GitHub CLI access is blocked in Plan Mode.";
   if (program === "rtk") return rtkBlockReason(args);
   if (simpleReadOnlyCommands.has(program) || nativeValidators[program]) {
     return nativeBlockReason(program, args);
@@ -1207,4 +1343,13 @@ export function bashBlockReason(command: string): string | undefined {
   const configuredSubcommands = configuredCommands[program];
   if (configuredSubcommands?.has(args[0] ?? "")) return undefined;
   return `Command '${program}' is not on the Plan Mode inspection allowlist.`;
+}
+
+/** A conservative literal-command allowlist with transparent RTK equivalents. */
+export function bashBlockReason(command: string): string | undefined {
+  const lexed = lexShellCommand(command);
+  if (!lexed.ok) return lexed.rejection.message;
+  const [program, ...args] = lexed.argv;
+  if (!program) return "Empty Bash commands are not useful in Plan Mode.";
+  return argvBlockReason(program, args);
 }

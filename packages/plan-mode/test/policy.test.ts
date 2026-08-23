@@ -1,13 +1,11 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { configureBashPolicy, isSupportedRtkVersion } from "../bash-policy.js";
+import { configureBashPolicy } from "../bash-policy.js";
 import {
   bashBlockReason,
   configurePlanModePolicy,
   isDirectlyDisabledInPlanMode,
   planModeToolBlockReason,
 } from "../policy.js";
-
-const approvedRtkVersion = "rtk 0.27.9\n";
 
 function expectAllowed(commands: readonly string[]): void {
   for (const command of commands) expect(bashBlockReason(command), command).toBeUndefined();
@@ -19,7 +17,7 @@ function expectBlocked(commands: readonly string[]): void {
 
 beforeEach(() => {
   configurePlanModePolicy({ readOnlyTools: [] });
-  configureBashPolicy({ readOnlyCommands: {}, rtkVersion: approvedRtkVersion });
+  configureBashPolicy({ readOnlyCommands: {} });
 });
 
 describe("Plan Mode tool policy", () => {
@@ -336,7 +334,6 @@ describe("Plan Mode literal Bash policy", () => {
     configurePlanModePolicy({ readOnlyTools: ["functions.example_external_tool"] });
     configureBashPolicy({
       readOnlyCommands: { "example-cli": ["help", "inspect", "list"] },
-      rtkVersion: approvedRtkVersion,
     });
     expect(planModeToolBlockReason("functions.example_external_tool", {})).toBeUndefined();
     expect(planModeToolBlockReason("example_external_tool_extra", {})).toContain("Unreviewed");
@@ -356,7 +353,7 @@ describe("Plan Mode literal Bash policy", () => {
 });
 
 describe("Plan Mode RTK policy", () => {
-  it("uses the same native validator for each delegated command", () => {
+  it("dispatches decoded argv through the native policy with authorization parity", () => {
     const pairs = [
       ["rg pattern README.md", "rtk rg pattern README.md"],
       ["find . -print", "rtk find . -print"],
@@ -366,71 +363,207 @@ describe("Plan Mode RTK policy", () => {
       ["ls packages", "rtk ls packages"],
       ["git diff --output-indicator-new=X", "rtk git diff --output-indicator-new=X"],
       ["npm audit --json", "rtk npm audit --json"],
+      ["yarn info package", "rtk yarn info package"],
       ["pnpm outdated", "rtk pnpm outdated"],
-    ] as const;
-    for (const [native, delegated] of pairs) {
-      expect(bashBlockReason(delegated), delegated).toBe(bashBlockReason(native));
-    }
-
-    const blockedPairs = [
+      ["node --version", "rtk node --version"],
       ["rg --pre cat pattern", "rtk rg --pre cat pattern"],
       ["find . -delete", "rtk find . -delete"],
       ["tree -o out .", "rtk tree -o out ."],
       ["git diff --output=out", "rtk git diff --output=out"],
       ["npm audit fix", "rtk npm audit fix"],
       ["pnpm audit --fix", "rtk pnpm audit --fix"],
+      ["node script.js", "rtk node script.js"],
+      ["unknown inspect", "rtk unknown inspect"],
     ] as const;
-    for (const [native, delegated] of blockedPairs) {
-      expect(bashBlockReason(native), native).toBeTruthy();
-      expect(bashBlockReason(delegated), delegated).toBeTruthy();
+    for (const [native, delegated] of pairs) {
+      expect(Boolean(bashBlockReason(delegated)), delegated).toBe(Boolean(bashBlockReason(native)));
     }
   });
 
-  it("allows only root help without a supported RTK version", () => {
-    for (const version of [
-      undefined,
-      "",
-      "rtk 0.26.9",
-      "rtk 0.28.0",
-      "rtk 1.27.0",
-      "0.27.1",
-      "rtk 0.27.x",
-    ]) {
-      configureBashPolicy({ readOnlyCommands: {}, ...(version ? { rtkVersion: version } : {}) });
-      expectAllowed(["rtk", "rtk --help", "rtk --version", "rtk help"]);
-      expectBlocked(["rtk rg pattern", "rtk git status"]);
-    }
-    expect(isSupportedRtkVersion("rtk 0.27.0\n")).toBe(true);
-    expect(isSupportedRtkVersion("rtk 0.27.0\r\n")).toBe(true);
-    expect(isSupportedRtkVersion("rtk 0.27.0 extra")).toBe(false);
-    expect(isSupportedRtkVersion("rtk 0.27.0 \n")).toBe(false);
-    expect(isSupportedRtkVersion("rtk 0.27.0\n\n")).toBe(false);
+  it("preserves quoted argv boundaries and literal pipes without reconstruction", () => {
+    expectAllowed([
+      "rtk rg 'two words' 'file name.md'",
+      "rtk rg 'left|right' README.md",
+      "rtk rg '|' README.md",
+      "rtk --verbose rg 'working indicator|working status' 'README file.md'",
+    ]);
+    expectBlocked(["rtk rg two words | cat", "rtk rg pattern README.md | cat", "rtk rg $(pwd)"]);
   });
 
-  it("blocks unknown globals, unsupported placement, and unreviewed RTK commands", () => {
+  it("accepts only the exact RTK root grammar and leading globals", () => {
+    expectAllowed([
+      "rtk",
+      "rtk help",
+      "rtk -h",
+      "rtk --help",
+      "rtk -V",
+      "rtk --version",
+      "rtk --ultra-compact --verbose -v -vv -vvv rg pattern README.md",
+    ]);
     expectBlocked([
+      "rtk help rg",
+      "rtk --help rg",
+      "rtk --version rg",
+      "rtk --verbose",
+      "rtk --verbose help",
+      "rtk --skip-env rg pattern",
       "rtk --unknown rg pattern",
       "rtk -- rg pattern",
-      "rtk --help rg",
-      "rtk smart pattern",
-      "rtk session",
-      "rtk run echo hello",
-      "rtk proxy echo hello",
-      "rtk npm --user-agent audit install left-pad",
-      "rtk gain --reset",
-      "rtk gain --history",
-      "rtk discover",
-      "rtk hook-audit",
-      "rtk rewrite 'rg pattern'",
-      "rtk gh repo view",
-      "gh repo view",
+      "rtk rg --verbose pattern",
+      "rtk rg pattern -vv",
+      "rtk rg --skip-env pattern",
+      "rtk rtk rg pattern",
+      "rtk /usr/bin/rg pattern",
     ]);
   });
 
-  it("allows a safe reported command directly and through RTK", () => {
+  it("hard-denies RTK-owned non-wrappers and gh before configured routing", () => {
+    const hardDenied = [
+      "rewrite",
+      "run",
+      "proxy",
+      "session",
+      "smart",
+      "gain",
+      "discover",
+      "learn",
+      "init",
+      "config",
+      "hook",
+      "hook-audit",
+      "pipe",
+      "cc-economics",
+      "verify",
+      "trust",
+      "untrust",
+      "telemetry",
+      "test",
+      "err",
+      "summary",
+      "deps",
+      "log",
+    ];
+    configureBashPolicy({
+      readOnlyCommands: Object.fromEntries(
+        hardDenied.concat("gh").map((name) => [name, ["inspect"]]),
+      ),
+    });
+    expectBlocked([
+      ...hardDenied.map((name) => `rtk ${name} inspect`),
+      "gh inspect",
+      "rtk gh inspect",
+    ]);
+  });
+
+  it("routes configured commands while preserving built-in and hard-deny collisions", () => {
+    configureBashPolicy({
+      readOnlyCommands: {
+        "example-cli": ["inspect"],
+        rg: ["unsafe"],
+        gh: ["inspect"],
+        run: ["inspect"],
+      },
+    });
     expectAllowed([
-      "rg -n -i -S 'working indicator|working status|session summary' README.md docs packages",
-      "rtk rg -n -i -S 'working indicator|working status|session summary' README.md docs packages",
+      "example-cli inspect 'item 123'",
+      "rtk example-cli inspect 'item 123'",
+      "run inspect",
+    ]);
+    expectBlocked([
+      "example-cli delete item",
+      "rtk example-cli delete item",
+      "rg --pre cat unsafe",
+      "rtk rg --pre cat unsafe",
+      "gh inspect",
+      "rtk gh inspect",
+      "rtk run inspect",
+    ]);
+  });
+
+  it("enforces the strict RTK read grammar", () => {
+    expectAllowed([
+      "rtk read README.md",
+      "rtk read 'file one.md' file-two.md",
+      "rtk read -n README.md",
+      "rtk read --line-numbers README.md",
+      "rtk read -l none README.md",
+      "rtk read -lminimal README.md",
+      "rtk read --level=aggressive README.md",
+      "rtk read -m 0 README.md",
+      "rtk read -m42 README.md",
+      "rtk read --max-lines=12 README.md",
+      "rtk read --tail-lines 7 README.md",
+      "rtk read -- -leading-file",
+      "rtk read README.md -- '|'",
+      "rtk read -h",
+      "rtk read --help",
+    ]);
+    expectBlocked([
+      "rtk read",
+      "rtk read -h README.md",
+      "rtk read --help README.md",
+      "rtk read --unknown README.md",
+      "rtk read -l README.md",
+      "rtk read -l detailed README.md",
+      "rtk read --level= README.md",
+      "rtk read -m README.md",
+      "rtk read -m-1 README.md",
+      "rtk read --max-lines=1.5 README.md",
+      "rtk read --tail-lines nope README.md",
+      "rtk read --max-lines 1 --tail-lines 1 README.md",
+      "rtk read --",
+      "rtk read -- -- README.md",
+    ]);
+  });
+
+  it("enforces the strict RTK json grammar", () => {
+    expectAllowed([
+      "rtk json package.json",
+      "rtk json 'file name.json'",
+      "rtk json --keys-only package.json",
+      "rtk json -d 0 package.json",
+      "rtk json -d3 package.json",
+      "rtk json --depth=12 package.json",
+      "rtk json -- -leading.json",
+      "rtk json -h",
+      "rtk json --help",
+    ]);
+    expectBlocked([
+      "rtk json",
+      "rtk json one.json two.json",
+      "rtk json -h package.json",
+      "rtk json --help package.json",
+      "rtk json --unknown package.json",
+      "rtk json -d package.json",
+      "rtk json -d-1 package.json",
+      "rtk json --depth= package.json",
+      "rtk json --depth nope package.json",
+      "rtk json --",
+      "rtk json -- -- package.json",
+    ]);
+  });
+
+  it("enforces the strict non-executing RTK env grammar", () => {
+    expectAllowed([
+      "rtk env",
+      "rtk env -f HOME",
+      "rtk env --filter HOME",
+      "rtk env --filter=HOME",
+      "rtk env -f 'TWO WORDS'",
+    ]);
+    expectBlocked([
+      "rtk env -h",
+      "rtk env --help",
+      "rtk env --",
+      "rtk env HOME",
+      "rtk env -f",
+      "rtk env -f ''",
+      "rtk env --filter ''",
+      "rtk env --filter=",
+      "rtk env -fHOME",
+      "rtk env -f HOME command",
+      "rtk env --filter HOME command",
+      "rtk env command arg",
     ]);
   });
 });
