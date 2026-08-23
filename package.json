@@ -5,7 +5,7 @@
   "description": "A collection of modular extensions for Pi",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12.0"
   },
   "keywords": [
     "pi-package",
@@ -48,6 +48,9 @@
     "validate:package": "tsx scripts/validate-package.ts",
     "lint:docs": "uv run --no-project python scripts/ste-lint.py README.md docs/*.md packages/*/README.md",
     "check": "npm run typecheck && npm run lint && npm run test && npm run validate:package"
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "1.0.9"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
