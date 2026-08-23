@@ -6,6 +6,15 @@ export const events = {
   subagentsHub: "pi-extensions:subagents-hub",
   userInteraction: "pi-extensions:user-interaction",
   herdrBlocked: "herdr:blocked",
+  continuationEnqueue: "pi-extensions:continuation-enqueue",
+  continuationReceipt: "pi-extensions:continuation-receipt",
+  continuationCancel: "pi-extensions:continuation-cancel",
+  continuationGate: "pi-extensions:continuation-gate",
+  continuationActivity: "pi-extensions:continuation-activity",
+  compactionGate: "pi-extensions:compaction-gate",
+  hacklerBatchGate: "pi-extensions:hackler-batch-gate",
+  hacklerActivity: "pi-extensions:hackler-activity",
+  implementationWaveAdvance: "pi-extensions:implementation-wave-advance",
 } as const;
 
 export type PlanModeEvent = {
@@ -22,6 +31,85 @@ export type UserInteractionEvent = {
 export type HerdrBlockedEvent = {
   active: boolean;
   label?: string;
+};
+
+export type ContinuationMessage = {
+  content: string;
+  customType?: string;
+  display?: boolean;
+  /** Producer-owned renderer data. The coordinator adds its receipt envelope without replacing it. */
+  details?: unknown;
+};
+
+/** Enqueue one durable automatic turn. producerId and any explicit requestId must be reload-stable. */
+export type ContinuationEnqueueEvent = {
+  producerId: string;
+  message: ContinuationMessage;
+  /** Optional canonical ID, for producers that already persist their own request identity. */
+  requestId?: string;
+  dedupeKey?: string;
+  /** Defaults to the coordinator's current session. A mismatch is rejected. */
+  sessionId?: string;
+  /** Defaults to the active leaf. The entry must be on the active branch. */
+  originEntryId?: string | null;
+  /** Filled synchronously when the coordinator accepts or reconciles the request. */
+  respond?: (result: { accepted: boolean; requestId?: string; reason?: string }) => void;
+};
+
+export type ContinuationReceiptEvent = {
+  producerId: string;
+  requestId: string;
+  status: "settled" | "cancelled";
+  sessionId?: string;
+  originEntryId?: string | null;
+  deliveryEntryId?: string;
+  settledEntryId?: string;
+};
+
+export type ContinuationCancelEvent = {
+  producerId: string;
+  requestId?: string;
+  reason?: string;
+};
+
+/** A named application-side dispatch gate. Re-emitting the same state is idempotent. */
+export type ContinuationGateEvent = {
+  gateId: string;
+  active: boolean;
+  reason?: string;
+};
+
+export type ContinuationActivityEvent = {
+  sessionId?: string;
+  /** Open requests whose origin is on the active branch. */
+  open: number;
+  queued: number;
+  inFlight?: string;
+  gated: boolean;
+};
+
+export type CompactionGateEvent = { active: boolean; operationId?: string };
+
+/** Relevant means the batch can still change or review the current implementation. */
+export type HacklerBatchGateEvent = {
+  batchId: string;
+  active: boolean;
+  relevant?: boolean;
+  phase?: "dispatch" | "running" | "review" | "integration";
+};
+
+export type HacklerActivityEvent = {
+  active: number;
+  writers: number;
+  integrating?: number;
+  relevantBatchIds?: string[];
+};
+
+/** Explicitly arms a new implementation wave after an out-of-process mutation. */
+export type ImplementationWaveAdvanceEvent = {
+  producerId: string;
+  reason: string;
+  branchEntryId?: string;
 };
 
 type EventEmitter = {

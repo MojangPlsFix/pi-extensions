@@ -16,6 +16,7 @@ import todos from "../packages/todos/index.js";
 import usageMeter from "../packages/usage-meter/index.js";
 import uv from "../packages/uv/index.js";
 import webSearch from "../packages/web-search/index.js";
+import workflowFinalization from "../packages/workflow-finalization/index.js";
 import workingIndicator from "../packages/working-indicator/index.js";
 
 type Registered = { name: string };
@@ -48,6 +49,7 @@ function registry() {
 
 const entrypoints = [
   askUserQuestion,
+  workflowFinalization,
   planMode,
   repositoryReference,
   notify,

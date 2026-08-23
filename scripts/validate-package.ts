@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 const expectedEntrypoints = [
   "packages/ask-user-question/index.ts",
+  "packages/workflow-finalization/index.ts",
   "packages/plan-mode/index.ts",
   "packages/repository-reference/index.ts",
   "packages/notify/index.ts",
