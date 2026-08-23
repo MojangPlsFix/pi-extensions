@@ -1,8 +1,42 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { capabilityCeilingDiagnostics } from "./capabilities.js";
 import { loadSubagentConfig, resolveAgentCapabilities } from "./config.js";
+import { buildEvaluationTraceV1, type EvaluationTraceV1, evaluateTraceV1 } from "./evaluation.js";
 import type { SubagentManager } from "./manager.js";
-import { type AgentsOverlayAction, AgentsViewer, formatRun } from "./renderers.js";
+import { type AgentsOverlayAction, AgentsViewer, formatRun, safeDisplayText } from "./renderers.js";
+import { runOperationalLines, runReport, runState } from "./tools.js";
+
+function durationText(value: number): string {
+  if (value < 1_000) return `${Math.round(value)}ms`;
+  return `${(value / 1_000).toFixed(1)}s`;
+}
+
+function traceSummary(trace: EvaluationTraceV1): string {
+  const metrics = evaluateTraceV1(trace);
+  const metric = <T>(
+    value: { available: true; value: T } | { available: false; reason: string },
+    format: (available: T) => string,
+  ): string => (value.available ? format(value.value) : `unavailable (${value.reason})`);
+  const aggregate = (value: { count: number; totalMs: number; meanMs: number; maxMs: number }) =>
+    `${durationText(value.totalMs)} total across ${value.count} · ${durationText(value.meanMs)} mean · ${durationText(value.maxMs)} max`;
+  return [
+    "Hackler evaluation trace v1 (redacted)",
+    `Runs ${trace.runs.length} · leases ${trace.runs.reduce((total, run) => total + run.leases.length, 0)} · capacity points ${trace.capacityTimeline.length}`,
+    `Requests ${trace.requests.length} · activity events ${trace.activities.length}`,
+    `Makespan: ${metric(metrics.makespanMs, durationText)}`,
+    `Slot utilization: ${metric(metrics.slotUtilization, (value) => `${(value * 100).toFixed(1)}%`)}`,
+    `Blocked dwell: ${metric(metrics.blockedDwell, aggregate)}`,
+    `Answered response latency: ${metric(metrics.answeredSupervisorResponseLatency, aggregate)}`,
+    `Wrap-up lead time: ${metric(metrics.wrapUpLeadTime, aggregate)}`,
+    `Limit-hit rate: ${metric(metrics.limitHitRate, (value) => `${(value * 100).toFixed(1)}%`)}`,
+    `Child resources: ${metric(metrics.childResourceTotals, (value) => `${value.turns} turns · ${value.total} tokens · $${value.cost.toFixed(4)}`)}`,
+    `Eligible capacity: ${metric(metrics.eligibleCapacityMs, durationText)}`,
+    `Schedulable idle: ${metric(metrics.schedulableIdleMs, durationText)}`,
+    `Critical path: ${metric(metrics.criticalPathMs, durationText)}`,
+    "Parent and provider-accounted search usage must be supplied separately.",
+    "Parked status is not interpreted as mission success.",
+  ].join("\n");
+}
 
 const help = [
   "Agent Hub is the authoritative view of active, blocked, parked, and failed Hackler runs.",
@@ -19,6 +53,9 @@ const help = [
   "r    Refresh configuration and profiles",
   "?    Show this help",
   "Esc  Close the Hub",
+  "",
+  "/agents trace         Print redacted evaluation metrics",
+  "/agents trace --json  Print the allowlisted EvaluationTraceV1 JSON",
 ].join("\n");
 
 async function openHub(
@@ -157,6 +194,15 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
         }
         return;
       }
+      if (operation === "trace") {
+        await manager.status(ctx);
+        const trace = buildEvaluationTraceV1(manager.evaluationTrace());
+        ctx.ui.notify(
+          words.includes("--json") ? JSON.stringify(trace, null, 2) : traceSummary(trace),
+          "info",
+        );
+        return;
+      }
       if (operation === "doctor") {
         const hub = await manager.status(ctx);
         const json = args.includes("--json");
@@ -259,11 +305,46 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
       }
       if (ctx.mode !== "tui" || !ctx.hasUI) {
         const hub = await manager.status(ctx);
-        ctx.ui.notify(
-          hub.runs.map((run) => `${run.id}: ${formatRun(run)}\n  ${run.task}`).join("\n") ||
-            "No Hackler runs.",
-          "info",
-        );
+        const running = hub.runs.filter((run) =>
+          ["queued", "starting", "running"].includes(run.status),
+        ).length;
+        const wrapping = hub.runs.filter(
+          (run) =>
+            run.wrappingUp && ["queued", "starting", "running", "blocked"].includes(run.status),
+        ).length;
+        const text = [
+          `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
+          `Counts: running ${running} · wrapping ${wrapping} · blocked ${hub.runs.filter((run) => run.status === "blocked").length} · failed ${hub.runs.filter((run) => run.status === "failed").length} · stopped ${hub.runs.filter((run) => run.status === "stopped").length}`,
+          ...(hub.runs.length
+            ? hub.runs.flatMap((run) => [
+                "",
+                `${run.id}: ${formatRun(run)} · ${runState(run)}`,
+                ...runOperationalLines(run).map((line) => `  ${line}`),
+                `  task: ${run.task}`,
+                ...(run.status === "failed"
+                  ? runReport(run)
+                      .split("\n")
+                      .map((line) => `  ${line}`)
+                  : []),
+              ])
+            : ["", "No Hackler runs."]),
+          ...(hub.requests.some((request) => request.status === "pending")
+            ? [
+                "",
+                "Pending supervisor requests:",
+                ...hub.requests
+                  .filter((request) => request.status === "pending")
+                  .map((request) => {
+                    const createdAt = Date.parse(request.createdAt);
+                    const requestAge = Number.isFinite(createdAt)
+                      ? durationText(Math.max(0, Date.now() - createdAt))
+                      : "unavailable";
+                    return `- ${request.id} · ${request.kind} · ${safeDisplayText(request.title)} · from ${request.fromRunId} · ${requestAge} old · required action: answer in /agents`;
+                  }),
+              ]
+            : []),
+        ].join("\n");
+        ctx.ui.notify(text, "info");
         return;
       }
       await openHub(manager, ctx);

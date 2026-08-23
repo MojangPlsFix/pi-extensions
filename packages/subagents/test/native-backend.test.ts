@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fakes = vi.hoisted(() => {
   const listeners = new Set<(event: any) => void>();
+  const extensionHandlers = new Map<string, Array<(event: any, context: any) => unknown>>();
   let resolvePrompt: () => void = () => {};
   const promptPromise = () =>
     new Promise<void>((resolve) => {
@@ -11,10 +12,14 @@ const fakes = vi.hoisted(() => {
     sessionFile: "/tmp/session/run.jsonl",
     isStreaming: true,
     isIdle: true,
-    prompt: vi.fn((_text: string, options?: { preflightResult?: (success: boolean) => void }) => {
-      options?.preflightResult?.(true);
-      return promptPromise();
-    }),
+    prompt: vi.fn((_text: string, options?: { preflightResult?: (success: boolean) => void }) =>
+      (async () => {
+        for (const handler of extensionHandlers.get("before_agent_start") ?? [])
+          await handler({}, { signal: undefined, abort: vi.fn() });
+        options?.preflightResult?.(true);
+        await promptPromise();
+      })(),
+    ),
     waitForIdle: vi.fn(async () => {}),
     bindExtensions: vi.fn(async () => {}),
     getAllTools: vi.fn(() => [{ name: "read" }, { name: "write" }, { name: "contact_supervisor" }]),
@@ -31,6 +36,7 @@ const fakes = vi.hoisted(() => {
   };
   return {
     listeners,
+    extensionHandlers,
     session,
     resolvePrompt: () => resolvePrompt(),
     loaderReload: vi.fn(async () => {}),
@@ -44,6 +50,18 @@ const fakes = vi.hoisted(() => {
 vi.mock("@earendil-works/pi-coding-agent", () => ({
   createAgentSession: fakes.createAgentSession,
   DefaultResourceLoader: class {
+    constructor(options: { extensionFactories?: any[] }) {
+      for (const extension of options.extensionFactories ?? []) {
+        const factory = typeof extension === "function" ? extension : extension.factory;
+        factory({
+          on: (event: string, handler: (event: any, context: any) => unknown) => {
+            const handlers = fakes.extensionHandlers.get(event) ?? [];
+            handlers.push(handler);
+            fakes.extensionHandlers.set(event, handlers);
+          },
+        });
+      }
+    }
     reload = fakes.loaderReload;
     getExtensions() {
       return { extensions: [], errors: [] };
@@ -62,6 +80,7 @@ import { NativeBackend, type NativeRunEvent } from "../native-backend.js";
 
 beforeEach(() => {
   fakes.listeners.clear();
+  fakes.extensionHandlers.clear();
   for (const value of Object.values(fakes.session))
     if (typeof value === "function" && "mockClear" in value) value.mockClear();
   fakes.loaderReload.mockClear();
@@ -225,5 +244,64 @@ describe("NativeBackend", () => {
     controller.abort(new Error("parent closed"));
     await vi.waitFor(() => expect(backend.has("run-1")).toBe(false));
     expect(fakes.session.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("fails closed at the awaited child gate before prompt acceptance", async () => {
+    const backend = new NativeBackend();
+    const gate = vi.fn(async () => false);
+    await expect(backend.start({ ...spec(), preTurnGate: gate }, () => {})).rejects.toThrow(
+      "pre-turn gate denied",
+    );
+    expect(gate).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "run-1", boundary: "before_agent_start" }),
+    );
+    expect(backend.has("run-1")).toBe(false);
+  });
+
+  it("gates child-internal provider turns and fails closed on denial", async () => {
+    const backend = new NativeBackend();
+    const gate = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await backend.start({ ...spec(), preTurnGate: gate }, () => {});
+    const providerHandlers = fakes.extensionHandlers.get("before_provider_request") ?? [];
+    expect(providerHandlers).toHaveLength(1);
+    const context = { signal: new AbortController().signal, abort: vi.fn() };
+    await providerHandlers[0]?.({}, context); // consumes the initial before_agent_start credit
+    await expect(providerHandlers[0]?.({}, context)).rejects.toThrow("pre-turn gate denied");
+    expect(context.abort).toHaveBeenCalledOnce();
+    expect(gate).toHaveBeenLastCalledWith(
+      expect.objectContaining({ boundary: "before_provider_request" }),
+    );
+    await backend.park("run-1");
+    fakes.resolvePrompt();
+  });
+
+  it("retains trailing usage through idempotent abort and park cleanup", async () => {
+    const events: NativeRunEvent[] = [];
+    const backend = new NativeBackend();
+    await backend.start(spec(), (event) => events.push(event));
+    fakes.session.isIdle = false;
+    fakes.session.abort.mockImplementationOnce(async () => {
+      for (const listener of fakes.listeners)
+        listener({
+          type: "message_end",
+          message: { role: "assistant", usage: { input: 3, output: 2, cost: 0.1 } },
+        });
+    });
+    await Promise.all([backend.abort("run-1"), backend.abort("run-1")]);
+    await Promise.all([backend.park("run-1"), backend.park("run-1")]);
+    expect(events).toContainEqual(expect.objectContaining({ type: "usage", input: 3, output: 2 }));
+    expect(fakes.session.abort).toHaveBeenCalledOnce();
+    expect(fakes.session.dispose).toHaveBeenCalledOnce();
+    fakes.resolvePrompt();
+  });
+
+  it("does not emit a backend semantic timeout", async () => {
+    const events: NativeRunEvent[] = [];
+    const backend = new NativeBackend();
+    await backend.start({ ...spec(), timeoutMs: 5 }, (event) => events.push(event));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(events.filter((event) => event.type === "error")).toEqual([]);
+    await backend.park("run-1");
+    fakes.resolvePrompt();
   });
 });

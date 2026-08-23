@@ -59,46 +59,60 @@ const builtinSpecs = [
     "Fast read-only codebase reconnaissance that returns compressed, evidence-backed context.",
     "read",
     "Map only the delegated scope. Return exact paths and symbols, key architecture, constraints, risks, and the best starting point. Do not edit files or duplicate another owner's scope.",
+    600,
+    60,
   ],
   [
     "researcher",
     "Focused web and documentation researcher that prefers current primary sources.",
     "advisory",
     "Research the delegated question through distinct angles. Prefer official and primary sources, cite URLs, distinguish evidence from inference, and state remaining gaps.",
+    1800,
+    64,
   ],
   [
     "worker",
     "Focused implementation profile for one explicitly owned code slice.",
     "write",
     "Implement only the delegated ownership. Preserve unrelated work, escalate unapproved decisions, run local checks, and report exact changed files and validation.",
+    1800,
+    110,
   ],
   [
     "reviewer",
     "Evidence-based reviewer for code, plans, diffs, tests, and regressions.",
     "review",
     "Review only the assigned angle. Verify findings against code and requirements, cite exact paths, rank actionable issues, and do not edit files.",
+    2100,
+    40,
   ],
   [
     "oracle",
     "High-context advisor that detects decision drift, contradictions, and hidden assumptions.",
     "advisory",
     "Reconstruct inherited decisions before advising. Protect consistency, identify drift and hidden assumptions, recommend the narrowest justified correction, and explain uncertainty.",
+    2100,
+    72,
   ],
   [
     "orchestrator",
     "In-session sidecar coordinator for one explicit, exclusively owned mission scope.",
     "orchestrator",
     "Decompose the mission into a dependency-aware task graph, assign disjoint owners in batches, avoid doing specialist work yourself, verify every phase, and contact the supervisor only for decisions, approvals, blockers, meaningful progress, or integration readiness.",
+    2700,
+    128,
   ],
   [
     "plan-reviewer",
     "Hidden read-only plan reviewer.",
     "review",
     "Review the plan against the repository and return findings, risks, and missing work.",
+    2100,
+    40,
   ],
 ] as const;
 const builtinProfiles: AgentDefinition[] = builtinSpecs.map(
-  ([name, description, profileClass, prompt]) =>
+  ([name, description, profileClass, prompt, timeout, turnBudget]) =>
     makeProfile(
       name,
       description,
@@ -106,6 +120,8 @@ const builtinProfiles: AgentDefinition[] = builtinSpecs.map(
       prompt,
       "builtin",
       undefined,
+      timeout,
+      turnBudget,
       name === "plan-reviewer",
     ),
 );
@@ -157,6 +173,8 @@ function makeProfile(
   prompt: string,
   source: AgentSource,
   path?: string,
+  timeout?: number,
+  turnBudget?: number,
   hidden = false,
 ): AgentDefinition {
   return {
@@ -178,6 +196,8 @@ function makeProfile(
         : [],
     maxDepth: profileClass === "orchestrator" ? 2 : 0,
     workspace: profileClass === "write" ? "shared" : "read-only",
+    timeout,
+    turnBudget,
     infer: profileClass !== "orchestrator" && name !== "plan-reviewer",
     hidden,
     prompt,
@@ -319,8 +339,8 @@ function parseFrontmatterDetailed(
   const tokenBudget = numberField("tokenBudget");
   const costBudget = numberField("costBudget");
   if (timeout !== undefined && timeout <= 0) invalid(file, "timeout must be greater than zero.");
-  if (turnBudget !== undefined && !Number.isInteger(turnBudget))
-    invalid(file, "turnBudget must be an integer.");
+  if (turnBudget !== undefined && (!Number.isInteger(turnBudget) || turnBudget <= 0))
+    invalid(file, "turnBudget must be a positive integer.");
   if (tokenBudget !== undefined && !Number.isInteger(tokenBudget))
     invalid(file, "tokenBudget must be an integer.");
   const prompt = match![2]!.trim();

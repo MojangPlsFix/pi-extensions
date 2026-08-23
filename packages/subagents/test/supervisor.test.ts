@@ -34,6 +34,38 @@ describe("SupervisorInbox", () => {
     expect(inbox.open()).toHaveLength(0);
   });
 
+  it("finds all pending requests and the oldest request linked to one run", () => {
+    const inbox = new SupervisorInbox();
+    const first = inbox.request({
+      fromRunId: "run-1",
+      kind: "decision",
+      title: "Choose format",
+      detail: "A format is required.",
+    }).request;
+    const second = inbox.request({
+      fromRunId: "run-1",
+      kind: "blocker",
+      title: "Missing input",
+      detail: "The required input is missing.",
+    }).request;
+    inbox.request({
+      fromRunId: "run-2",
+      kind: "approval",
+      title: "Approve operation",
+      detail: "The other run needs approval.",
+    });
+
+    expect(inbox.pendingForRun("run-1").map((request) => request.id)).toEqual([
+      first.id,
+      second.id,
+    ]);
+    expect(inbox.oldestPendingForRun("run-1")?.id).toBe(first.id);
+    expect(inbox.oldestPendingForRun("missing")).toBeUndefined();
+    inbox.resolve(first.id, "continue");
+    expect(inbox.oldestPendingForRun("run-1")?.id).toBe(second.id);
+    inbox.dispose();
+  });
+
   it("cancels pending requests owned by a stopped run", async () => {
     const inbox = new SupervisorInbox();
     const listener = vi.fn();

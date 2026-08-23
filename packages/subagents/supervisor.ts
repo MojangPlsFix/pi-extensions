@@ -67,6 +67,14 @@ export class SupervisorInbox {
     return this.all().filter((entry) => entry.status === "pending");
   }
 
+  pendingForRun(runId: string): SupervisorRequest[] {
+    return this.open().filter((entry) => entry.fromRunId === runId);
+  }
+
+  oldestPendingForRun(runId: string): SupervisorRequest | undefined {
+    return this.pendingForRun(runId)[0];
+  }
+
   subscribe(listener: (requests: SupervisorRequest[]) => void): () => void {
     this.listeners.add(listener);
     listener(this.all());

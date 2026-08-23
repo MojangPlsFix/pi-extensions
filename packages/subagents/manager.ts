@@ -35,6 +35,7 @@ import {
   loadSubagentConfig,
   type ModelSelection,
   PI_AGENT_DIR,
+  type RuntimeLimits,
   resolveAgentCapabilities,
   resolveAgentModelPolicy,
   SESSION_ROOT,
@@ -42,6 +43,13 @@ import {
   type ThinkingPolicy,
   updateProfileControl,
 } from "./config.js";
+import {
+  buildEvaluationTraceV1,
+  type EvaluationActivityV1,
+  type EvaluationCapacityPointV1,
+  type EvaluationRequestV1,
+  type EvaluationTraceV1,
+} from "./evaluation.js";
 import { HerdrClient } from "./herdr-client.js";
 import { HerdrInspectorManager } from "./herdr-inspector.js";
 import { NativeBackend, type NativeRunEvent } from "./native-backend.js";
@@ -63,12 +71,17 @@ import {
 import {
   type AgentDefinition,
   capabilityPolicySnapshot,
+  type EffectiveRunLimits,
   emptyUsage,
   type ProfileClass,
   type RunActivityKind,
+  type RunLease,
+  type RunOperation,
   type RunRecord,
   type RunSnapshot,
   runSnapshot,
+  type StructuredTerminationReason,
+  type TerminationReasonCode,
   type Usage,
 } from "./types.js";
 import {
@@ -83,6 +96,8 @@ import {
 
 export type DispatchInput = DispatchTask;
 export type CollectMode = "none" | "next" | "all";
+export type CollectWaitReason = "settled" | "blocked" | "timeout" | "aborted";
+export type CollectResult = { runs: RunSnapshot[]; waitReason?: CollectWaitReason };
 
 export type MissionStatus = "running" | "blocked" | "parked" | "failed" | "integrated";
 export type MissionRecord = {
@@ -97,6 +112,7 @@ export type MissionRecord = {
   worktree?: MissionWorktree;
   candidate?: WorktreeCandidate;
   integrationRequestId?: string;
+  cleanupFailure?: { at: string; message: string };
 };
 
 export type MissionSnapshot = Omit<MissionRecord, "candidate"> & {
@@ -109,6 +125,13 @@ export type HubSnapshot = {
   missions: MissionSnapshot[];
   profiles: AgentDefinition[];
   diagnostics: AgentDiagnostic[];
+  capacity: {
+    used: number;
+    limit: number;
+    free: number;
+    sharedWritersUsed: number;
+    sharedWritersLimit: number;
+  };
   herdr: { enabled: boolean; available: boolean };
 };
 
@@ -144,6 +167,45 @@ type PreparedRun = {
 const ACTIVE_STATUSES = new Set<RunRecord["status"]>(["queued", "starting", "running", "blocked"]);
 const WRITE_CLASSES = new Set<ProfileClass>(["write"]);
 const ASSISTANT_WRITING_ACTIVITY = "writing response";
+const DEFAULT_COLLECT_TIMEOUT_SECONDS = 60;
+const WRAP_ENTRY_TYPE = "subagent-wrap-v1";
+
+type LeaseRuntime = {
+  generation: number;
+  controller: AbortController;
+  phase: "active" | "completing" | "terminalizing" | "closed";
+  wrapTimer?: ReturnType<typeof setTimeout>;
+  deadlineTimer?: ReturnType<typeof setTimeout>;
+  completion?: Promise<void>;
+  terminalization?: Promise<void>;
+  resolveDone: () => void;
+  done: Promise<void>;
+  wrapDelivery:
+    | "none"
+    | "queued"
+    | "sending"
+    | "sent"
+    | "failed"
+    | "external_warning"
+    | "suppressed_no_turns";
+};
+
+type ParentWrapNotice = { runId: string; cause: "wall" | "turn"; at: string };
+
+function iso(at = Date.now()): string {
+  return new Date(at).toISOString();
+}
+
+function cloneLimits(limits: EffectiveRunLimits): EffectiveRunLimits {
+  return { ...limits };
+}
+
+function terminalStatus(reason: TerminationReasonCode): RunRecord["status"] {
+  if (reason === "completed" || reason === "parent_shutdown" || reason === "session_change")
+    return "parked";
+  if (reason === "explicit_stop" || reason === "ancestor_terminated") return "stopped";
+  return "failed";
+}
 
 function usageHasValue(usage: Usage): boolean {
   return (
@@ -195,19 +257,20 @@ function profileClass(profile: AgentDefinition): ProfileClass {
   return profile.class;
 }
 
-function recordActivity(run: RunRecord, kind: RunActivityKind, text: string): void {
+function recordActivity(
+  run: RunRecord,
+  kind: RunActivityKind,
+  text: string,
+): { at: string; kind: RunActivityKind } {
+  const at = new Date().toISOString();
   run.activity.push({
-    at: new Date().toISOString(),
+    at,
     kind,
     text: text.replace(/\s+/gu, " ").trim(),
   });
+  run.lastEventAt = at;
   if (run.activity.length > 200) run.activity.splice(0, run.activity.length - 200);
-}
-
-function recordAssistantWritingActivity(run: RunRecord): void {
-  const latest = run.activity.at(-1);
-  if (latest?.kind === "status" && latest.text === ASSISTANT_WRITING_ACTIVITY) return;
-  recordActivity(run, "status", ASSISTANT_WRITING_ACTIVITY);
+  return { at, kind };
 }
 
 function profileClone(profile: AgentDefinition): AgentDefinition {
@@ -308,6 +371,12 @@ export class SubagentManager {
     { answer: string; promise: Promise<SupervisorRequest> }
   >();
   private readonly hubListeners = new Set<(snapshot: HubSnapshot) => void>();
+  private readonly leaseRuntimes = new Map<string, LeaseRuntime>();
+  private readonly parentWrapNotices: ParentWrapNotice[] = [];
+  private evaluationActivities: EvaluationActivityV1[] = [];
+  private evaluationCapacity: EvaluationCapacityPointV1[] = [];
+  private evaluationRequests = new Map<string, EvaluationRequestV1>();
+  private runtimeLimits: RuntimeLimits = { ...DEFAULT_SUBAGENT_CONFIG.runtime };
   private planMode = false;
   private profiles: AgentDefinition[] = [];
   private diagnostics: AgentDiagnostic[] = [];
@@ -371,6 +440,7 @@ export class SubagentManager {
     const parentChanged = this.restoredParent !== parent;
     if (parentChanged) {
       if (this.restoredParent) await this.leaveParentSession();
+      this.resetEvaluationLedger();
       this.restoredParent = parent;
     }
     const config = await this.refreshProfiles(ctx);
@@ -398,13 +468,78 @@ export class SubagentManager {
     }));
   }
 
+  private appendActivity(run: RunRecord, kind: RunActivityKind, text: string): void {
+    const activity = recordActivity(run, kind, text);
+    this.evaluationActivities.push({ runId: run.id, ...activity });
+  }
+
+  private recordAssistantWritingActivity(run: RunRecord): void {
+    const latest = run.activity.at(-1);
+    if (latest?.kind === "status" && latest.text === ASSISTANT_WRITING_ACTIVITY) return;
+    this.appendActivity(run, "status", ASSISTANT_WRITING_ACTIVITY);
+  }
+
+  private resetEvaluationLedger(): void {
+    this.evaluationActivities = [];
+    this.evaluationCapacity = [];
+    this.evaluationRequests = new Map();
+  }
+
+  private updateEvaluationLedger(snapshot: HubSnapshot): void {
+    const current = {
+      at: iso(),
+      used: snapshot.capacity.used,
+      limit: snapshot.capacity.limit,
+      sharedWritersUsed: snapshot.capacity.sharedWritersUsed,
+      sharedWritersLimit: snapshot.capacity.sharedWritersLimit,
+    };
+    const previous = this.evaluationCapacity.at(-1);
+    if (
+      !previous ||
+      previous.used !== current.used ||
+      previous.limit !== current.limit ||
+      previous.sharedWritersUsed !== current.sharedWritersUsed ||
+      previous.sharedWritersLimit !== current.sharedWritersLimit
+    )
+      this.evaluationCapacity.push(current);
+    for (const request of this.inbox.all())
+      this.evaluationRequests.set(request.id, {
+        id: request.id,
+        runId: request.fromRunId,
+        kind: request.kind,
+        createdAt: request.createdAt,
+        ...(request.resolvedAt ? { resolvedAt: request.resolvedAt } : {}),
+        status: request.status,
+      });
+  }
+
+  evaluationTrace(generatedAt = iso()): EvaluationTraceV1 {
+    return buildEvaluationTraceV1({
+      generatedAt,
+      runs: this.store.all(),
+      capacityTimeline: this.evaluationCapacity,
+      requests: [...this.evaluationRequests.values()],
+      activities: this.evaluationActivities,
+    });
+  }
+
   hubSnapshot(): HubSnapshot {
+    const summary = this.store.summary();
     return {
       runs: this.snapshots(),
       requests: this.inbox.all(),
       missions: this.missionSnapshots(),
       profiles: this.profiles.map(profileClone),
       diagnostics: this.diagnostics.map((diagnostic) => ({ ...diagnostic })),
+      capacity: {
+        used: summary.active,
+        limit: this.runtimeLimits.maxActive,
+        free: Math.max(0, this.runtimeLimits.maxActive - summary.active),
+        sharedWritersUsed: this.claims
+          .all()
+          .filter((claim) => claim.kind === "write" && claim.workspace === "shared").length,
+        sharedWritersLimit: this.runtimeLimits.maxSharedWriters,
+      },
       herdr: { ...this.herdr },
     };
   }
@@ -474,8 +609,17 @@ export class SubagentManager {
       ? `\n\nAvailable inferred profiles:\n${inferred}\nSelect a profile by its declared specialty. Do not send the same task or ownership to multiple profiles.`
       : "";
     const supervisorNotice =
-      "\n\nIf a child reports a pending supervisor request, inspect it with subagent_status and resolve it with subagent_respond before waiting again. Do not leave a blocked child inside an indefinite subagent_collect wait.";
-    return `${systemPrompt}\n\n${ORCHESTRATION_GUIDELINES}${supervisorNotice}${profileNotice}${missionNotice}`;
+      "\n\nIf a child reports a pending supervisor request, inspect it with subagent_status and resolve it with subagent_respond before waiting again. Use bounded collection, act on its wait reason, and do not poll immediately after a timeout.";
+    const wrapNotices = this.parentWrapNotices.splice(0);
+    const wrapNotice = wrapNotices.length
+      ? `\n\nHackler limit notice: ${wrapNotices
+          .map(
+            (notice) =>
+              `${notice.runId} began wrapping up because of its ${notice.cause} budget at ${notice.at}`,
+          )
+          .join("; ")}. This is status context only; do not steer the parent turn on its behalf.`
+      : "";
+    return `${systemPrompt}\n\n${ORCHESTRATION_GUIDELINES}${supervisorNotice}${profileNotice}${missionNotice}${wrapNotice}`;
   }
 
   private assertOpen(): void {
@@ -484,14 +628,46 @@ export class SubagentManager {
   }
 
   private publish(force = false): void {
-    if (this.shutdownController.signal.aborted && !force) return;
+    if (this.shutdownController.signal.aborted && !force) {
+      if (this.restoredParent) this.updateEvaluationLedger(this.hubSnapshot());
+      return;
+    }
     const snapshot = this.hubSnapshot();
+    if (this.restoredParent) this.updateEvaluationLedger(snapshot);
     const summary = this.store.summary();
+    const blockingRequests = snapshot.requests.filter(
+      (request) => request.blocking && request.status === "pending",
+    );
+    const oldestBlockingRequest = blockingRequests[0];
     this.pi.events.emit(events.subagentsStatus, {
       ...summary,
-      agents: snapshot.runs
-        .filter((run) => ACTIVE_STATUSES.has(run.status) || run.status === "failed")
-        .slice(-4),
+      capacity: snapshot.capacity,
+      blockingRequestCount: blockingRequests.length,
+      ...(oldestBlockingRequest
+        ? {
+            oldestBlockingRequest: {
+              id: oldestBlockingRequest.id,
+              title: oldestBlockingRequest.title,
+              createdAt: oldestBlockingRequest.createdAt,
+              action: "open /agents inbox and answer",
+            },
+          }
+        : {}),
+      agents: snapshot.runs.sort((left, right) => {
+        const priority = (value: RunSnapshot) =>
+          value.status === "blocked"
+            ? 0
+            : value.wrappingUp
+              ? 1
+              : value.status === "failed"
+                ? 2
+                : value.status === "stopped"
+                  ? 3
+                  : ACTIVE_STATUSES.has(value.status)
+                    ? 4
+                    : 5;
+        return priority(left) - priority(right);
+      }),
     });
     this.pi.events.emit(events.subagentsHub, snapshot);
     for (const listener of this.hubListeners) listener(snapshot);
@@ -524,6 +700,7 @@ export class SubagentManager {
         profiles: {},
       };
     }
+    this.runtimeLimits = { ...config.runtime };
     this.profiles = discovered.profiles.map((profile) => ({
       ...profileClone(profile),
       metadata: config.profiles[profile.name] ? { ...config.profiles[profile.name] } : undefined,
@@ -581,15 +758,13 @@ export class SubagentManager {
   }
 
   private async leaveParentSession(): Promise<void> {
-    for (const run of this.store.active()) {
-      await this.abortTransport(run).catch(() => {});
-      await this.parkTransport(run).catch(() => {});
-      run.status = "parked";
-      run.finishedAt = new Date().toISOString();
-      recordActivity(run, "park", "parent session changed; run stopped and parked");
-      this.claims.release(run.id);
-      this.inbox.cancelByRun(run.id, "Parent session changed.");
-    }
+    const active = this.store.active();
+    const activeIds = new Set(active.map((run) => run.id));
+    await Promise.all(
+      active
+        .filter((run) => !run.parentId || !activeIds.has(run.parentId))
+        .map((run) => this.beginTermination(run, "session_change", { phase: "cleanup" })),
+    );
     for (const mission of this.missions.values())
       if (mission.status === "running" || mission.status === "blocked") mission.status = "parked";
     await this.inspectors.shutdown();
@@ -602,25 +777,76 @@ export class SubagentManager {
     this.inbox.reset();
     this.claims.clear();
     this.missions.clear();
+    this.leaseRuntimes.clear();
+    this.parentWrapNotices.length = 0;
   }
 
   private async pruneRetention(config: SubagentConfig): Promise<void> {
-    const removed = this.store.prune(config.retention);
-    await Promise.all(
-      removed.map(async (run) => {
-        if (run.worktree)
-          await removeMissionWorktree(run.worktree, { force: true }).catch(() => {});
+    const candidates = this.store.prune(config.retention);
+    const removed: RunRecord[] = [];
+    for (const run of candidates) {
+      try {
+        if (run.worktree) {
+          await removeMissionWorktree(run.worktree, { force: true });
+          run.worktree = undefined;
+          run.candidate = undefined;
+        }
         const child = relative(this.sessionRoot, run.sessionDir);
-        if (!child || child.startsWith("..") || child.split(/[\\/]/u).includes("..")) return;
-        await fs.rm(run.sessionDir, { recursive: true, force: true }).catch(() => {});
-      }),
-    );
+        if (!child || child.startsWith("..") || child.split(/[\\/]/u).includes(".."))
+          throw new Error(`Refused to remove unsafe session directory ${run.sessionDir}.`);
+        await fs.rm(run.sessionDir, { recursive: true, force: true });
+        removed.push(run);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        run.cleanupFailure = { at: iso(), message };
+        run.error = `Retention cleanup failed: ${message}`;
+        this.appendActivity(run, "error", run.error);
+        this.store.add(run);
+        this.diagnostics.push({
+          path: this.statePath(this.restoredParent ?? "unknown-parent"),
+          code: "read-error",
+          message: `Run ${run.id} was retained after cleanup failed: ${message}`,
+        });
+      }
+    }
     const removedIds = new Set(removed.map((run) => run.id));
+    if (removedIds.size) {
+      this.evaluationActivities = this.evaluationActivities.filter(
+        (activity) => !removedIds.has(activity.runId),
+      );
+      for (const [requestId, request] of this.evaluationRequests)
+        if (removedIds.has(request.runId)) this.evaluationRequests.delete(requestId);
+      const retainedStarts = this.store.all().map((run) => Date.parse(run.startedAt));
+      if (retainedStarts.length) {
+        const earliest = Math.min(...retainedStarts);
+        const baseline = [...this.evaluationCapacity]
+          .reverse()
+          .find((point) => Date.parse(point.at) <= earliest);
+        this.evaluationCapacity = [
+          ...(baseline ? [baseline] : []),
+          ...this.evaluationCapacity.filter((point) => Date.parse(point.at) > earliest),
+        ];
+      } else this.evaluationCapacity = this.evaluationCapacity.slice(-1);
+    }
     for (const [id, mission] of this.missions) {
       if (!removedIds.has(mission.orchestratorId)) continue;
-      if (mission.worktree)
-        await removeMissionWorktree(mission.worktree, { force: true }).catch(() => {});
-      this.missions.delete(id);
+      try {
+        if (mission.worktree) {
+          await removeMissionWorktree(mission.worktree, { force: true });
+          mission.worktree = undefined;
+          mission.candidate = undefined;
+        }
+        this.missions.delete(id);
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        mission.status = "failed";
+        mission.cleanupFailure = { at: iso(), message };
+        this.diagnostics.push({
+          path: this.statePath(this.restoredParent ?? "unknown-parent"),
+          code: "read-error",
+          message: `Mission ${mission.id} was retained after cleanup failed: ${message}`,
+        });
+      }
     }
   }
 
@@ -783,7 +1009,6 @@ export class SubagentManager {
           envAllowlist: [
             ...new Set([...externalRunner.envAllowlist, ...capabilities.envAllowlist]),
           ],
-          timeoutMs: profile.timeout ? profile.timeout * 1_000 : externalRunner.timeoutMs,
         };
       }
       const resolved = resolveAgentModelPolicy(
@@ -822,6 +1047,545 @@ export class SubagentManager {
     }
   }
 
+  private effectiveLimits(prepared: PreparedRun): EffectiveRunLimits {
+    const profileWall = prepared.profile.timeout;
+    const runnerWall = prepared.externalRunner
+      ? prepared.externalRunner.timeoutMs / 1_000
+      : undefined;
+    const maxWallSeconds = Math.min(
+      prepared.config.runtime.maxWallSeconds,
+      profileWall ?? Number.POSITIVE_INFINITY,
+      runnerWall ?? Number.POSITIVE_INFINITY,
+    );
+    return {
+      maxWallSeconds,
+      maxTurns:
+        prepared.profile.runner === "external"
+          ? "notApplicable"
+          : Math.min(
+              prepared.config.runtime.maxTurns,
+              prepared.profile.turnBudget ?? Number.POSITIVE_INFINITY,
+            ),
+      wrapUpRatio: prepared.config.runtime.wrapUpRatio,
+      tokenBudget: prepared.profile.tokenBudget,
+      costBudget: prepared.profile.costBudget,
+    };
+  }
+
+  private tightenedRevivalLimits(run: RunRecord, runtime: RuntimeLimits): EffectiveRunLimits {
+    return {
+      ...cloneLimits(run.originalEffectiveLimits),
+      maxWallSeconds: Math.min(run.originalEffectiveLimits.maxWallSeconds, runtime.maxWallSeconds),
+      maxTurns:
+        run.originalEffectiveLimits.maxTurns === "notApplicable"
+          ? "notApplicable"
+          : Math.min(run.originalEffectiveLimits.maxTurns, runtime.maxTurns),
+      wrapUpRatio: Math.min(run.originalEffectiveLimits.wrapUpRatio, runtime.wrapUpRatio),
+    };
+  }
+
+  private lease(run: RunRecord, generation = run.activeLeaseGeneration): RunLease | undefined {
+    if (generation === undefined) return undefined;
+    return run.leaseHistory.find((candidate) => candidate.generation === generation);
+  }
+
+  private transition(
+    run: RunRecord,
+    next: RunRecord["status"],
+    cause: string,
+    at = Date.now(),
+    generation = run.activeLeaseGeneration ?? run.leaseHistory.at(-1)?.generation ?? 0,
+  ): void {
+    if (run.status === next) return;
+    const previous = run.status;
+    run.status = next;
+    run.statusChangedAt = iso(at);
+    run.statusTransitions.push({ from: previous, to: next, at: iso(at), generation, cause });
+  }
+
+  private setOperation(
+    run: RunRecord,
+    kind: RunOperation["kind"],
+    name: string,
+    at = Date.now(),
+  ): void {
+    run.currentOperation = {
+      kind,
+      name,
+      startedAt: iso(at),
+      generation: run.activeLeaseGeneration ?? 0,
+    };
+  }
+
+  private openLease(run: RunRecord, limits: EffectiveRunLimits, at = Date.now()): LeaseRuntime {
+    const generation = (run.leaseHistory.at(-1)?.generation ?? 0) + 1;
+    const wallMs = Math.max(1, Math.round(limits.maxWallSeconds * 1_000));
+    const wrapMs = Math.min(wallMs - 1, Math.ceil(wallMs * limits.wrapUpRatio));
+    const lease: RunLease = {
+      id: `${run.id}:${generation}`,
+      generation,
+      startedAt: iso(at),
+      wrapAt: iso(at + wrapMs),
+      deadlineAt: iso(at + wallMs),
+      effectiveLimits: cloneLimits(limits),
+    };
+    let resolveDone!: () => void;
+    const done = new Promise<void>((resolve) => {
+      resolveDone = resolve;
+    });
+    const runtime: LeaseRuntime = {
+      generation,
+      controller: new AbortController(),
+      phase: "active",
+      resolveDone,
+      done,
+      wrapDelivery: "none",
+    };
+    run.leaseHistory.push(lease);
+    run.activeLeaseGeneration = generation;
+    run.wrappingUp = false;
+    run.blockedSince = undefined;
+    run.terminationReason = undefined;
+    run.lastEventAt = iso(at);
+    this.leaseRuntimes.set(run.id, runtime);
+    runtime.wrapTimer = setTimeout(
+      () => this.onWallTimer(run.id, generation, "wrap"),
+      Math.max(0, Date.parse(lease.wrapAt) - Date.now()),
+    );
+    runtime.deadlineTimer = setTimeout(
+      () => this.onWallTimer(run.id, generation, "deadline"),
+      Math.max(0, Date.parse(lease.deadlineAt) - Date.now()),
+    );
+    runtime.wrapTimer.unref?.();
+    runtime.deadlineTimer.unref?.();
+    return runtime;
+  }
+
+  private clearLeaseTimers(runtime: LeaseRuntime): void {
+    if (runtime.wrapTimer) clearTimeout(runtime.wrapTimer);
+    if (runtime.deadlineTimer) clearTimeout(runtime.deadlineTimer);
+    runtime.wrapTimer = undefined;
+    runtime.deadlineTimer = undefined;
+  }
+
+  private onWallTimer(runId: string, generation: number, kind: "wrap" | "deadline"): void {
+    const run = this.store.get(runId);
+    const runtime = this.leaseRuntimes.get(runId);
+    const lease = run ? this.lease(run, generation) : undefined;
+    if (!run || !lease || runtime?.generation !== generation || runtime.phase === "closed") return;
+    const now = Date.now();
+    if (now >= Date.parse(lease.deadlineAt)) {
+      void this.beginTermination(run, "wall_limit", {
+        phase: runtime.phase === "completing" ? "finalization" : "execution",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
+      return;
+    }
+    if (kind === "wrap" && now >= Date.parse(lease.wrapAt)) this.triggerWrap(run, "wall", now);
+  }
+
+  private triggerWrap(run: RunRecord, requestedCause: "wall" | "turn", at = Date.now()): void {
+    const runtime = this.leaseRuntimes.get(run.id);
+    const lease = this.lease(run);
+    if (!runtime || !lease || runtime.phase !== "active" || lease.wrapTriggeredAt) return;
+    const cause = at >= Date.parse(lease.wrapAt) ? "wall" : requestedCause;
+    lease.wrapTriggeredAt = iso(at);
+    lease.wrapCause = cause;
+    run.wrappingUp = true;
+    run.lastEventAt = iso(at);
+    this.appendActivity(run, "status", `wrapping up at the ${cause} limit threshold`);
+    this.parentWrapNotices.push({ runId: run.id, cause, at: iso(at) });
+    this.ctx?.ui?.notify?.(
+      `${run.profile.name} is wrapping up before its ${cause} limit.`,
+      "warning",
+    );
+    const appendEntry = (
+      this.pi as ExtensionAPI & {
+        appendEntry?: (customType: string, data: unknown) => void;
+      }
+    ).appendEntry;
+    appendEntry?.(WRAP_ENTRY_TYPE, {
+      schemaVersion: 1,
+      runId: run.id,
+      cause,
+      at: iso(at),
+      deadlineAt: lease.deadlineAt,
+    });
+    const turnCap = lease.effectiveLimits.maxTurns;
+    if (turnCap !== "notApplicable" && run.turns >= turnCap) {
+      runtime.wrapDelivery = "suppressed_no_turns";
+    } else if (run.runner === "external") {
+      runtime.wrapDelivery = "external_warning";
+    } else if (run.status === "blocked" || run.status === "starting") {
+      runtime.wrapDelivery = "queued";
+    } else {
+      void this.deliverWrap(run, runtime.generation);
+    }
+    this.store.changed();
+  }
+
+  private async deliverWrap(run: RunRecord, generation: number): Promise<void> {
+    const runtime = this.leaseRuntimes.get(run.id);
+    if (
+      !runtime ||
+      runtime.generation !== generation ||
+      runtime.phase !== "active" ||
+      !run.wrappingUp ||
+      run.status === "blocked"
+    )
+      return;
+    const lease = this.lease(run, generation);
+    if (!lease) return;
+    const cap = lease.effectiveLimits.maxTurns;
+    if (cap !== "notApplicable" && run.turns >= cap) {
+      runtime.wrapDelivery = "suppressed_no_turns";
+      return;
+    }
+    runtime.wrapDelivery = "sending";
+    const guidance =
+      "Private limit notice: stop new exploration now. Produce the best supported final report from current evidence, including validation, blockers, and remaining risk.";
+    try {
+      if (run.runner === "native") await this.native.steer(run.id, guidance);
+      else if (run.runner === "rpc") await this.rpc.steer(run.id, guidance);
+      else {
+        runtime.wrapDelivery = "external_warning";
+        return;
+      }
+      if (this.leaseRuntimes.get(run.id) === runtime && runtime.phase === "active")
+        runtime.wrapDelivery = "sent";
+    } catch (cause) {
+      if (this.leaseRuntimes.get(run.id) === runtime && runtime.phase === "active") {
+        runtime.wrapDelivery = "failed";
+        this.appendActivity(
+          run,
+          "error",
+          `private wrap instruction failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        this.store.changed();
+      }
+    }
+  }
+
+  private maybeDeliverQueuedWrap(run: RunRecord): void {
+    const runtime = this.leaseRuntimes.get(run.id);
+    if (runtime?.wrapDelivery === "queued" && run.status === "running")
+      void this.deliverWrap(run, runtime.generation);
+  }
+
+  private terminationMessage(reason: TerminationReasonCode): string {
+    const messages: Record<TerminationReasonCode, string> = {
+      completed: "Run completed and parked.",
+      wall_limit: "Wall-time limit reached.",
+      turn_limit: "Turn limit reached before another model request.",
+      token_limit: "Token limit reached.",
+      cost_limit: "Cost limit reached.",
+      explicit_stop: "Stopped by the supervisor.",
+      parent_shutdown: "Parent session shut down; run parked.",
+      session_change: "Parent session changed; run parked.",
+      startup_error: "Run startup failed.",
+      runner_error: "Child runner failed.",
+      ancestor_terminated: "Ancestor run terminated.",
+      legacy_unknown: "Legacy run has no trustworthy termination reason.",
+    };
+    return messages[reason];
+  }
+
+  private beginTermination(
+    run: RunRecord,
+    code: Exclude<TerminationReasonCode, "completed">,
+    details: Omit<StructuredTerminationReason, "code" | "at" | "generation"> = {},
+    errorDetail?: string,
+  ): Promise<void> {
+    const runtime = this.leaseRuntimes.get(run.id);
+    const generation = run.activeLeaseGeneration ?? runtime?.generation;
+    if (
+      !runtime ||
+      generation === undefined ||
+      runtime.generation !== generation ||
+      runtime.phase === "closed"
+    )
+      return Promise.resolve();
+    if (runtime.terminalization) return runtime.terminalization;
+    const at = Date.now();
+    const reason: StructuredTerminationReason = {
+      code,
+      at: iso(at),
+      generation,
+      ...details,
+    };
+    runtime.phase = "terminalizing";
+    const lease = this.lease(run, generation);
+    if (lease) {
+      lease.endedAt = reason.at;
+      lease.endReason = code;
+    }
+    run.terminationReason = reason;
+    run.terminationHistory.push({
+      ...reason,
+      limit: reason.limit ? { ...reason.limit } : undefined,
+    });
+    run.finishedAt = reason.at;
+    run.wrappingUp = false;
+    const finalStatus = terminalStatus(code);
+    run.error = finalStatus === "failed" ? errorDetail || this.terminationMessage(code) : undefined;
+    this.transition(run, finalStatus, code, at, generation);
+    this.appendActivity(
+      run,
+      finalStatus === "failed" ? "error" : "park",
+      errorDetail || this.terminationMessage(code),
+    );
+    this.clearLeaseTimers(runtime);
+    this.setOperation(run, "cleanup", "transport cleanup", at);
+    this.inbox.cancelByRun(run.id, this.terminationMessage(code));
+    this.claims.release(run.id);
+    runtime.controller.abort(new Error(this.terminationMessage(code)));
+
+    const descendants = this.store
+      .children(run.id)
+      .filter((child) => ACTIVE_STATUSES.has(child.status))
+      .map((child) =>
+        this.beginTermination(
+          child,
+          "ancestor_terminated",
+          { phase: "cleanup", ancestorRunId: run.id },
+          `Ancestor ${run.id} terminated.`,
+        ),
+      );
+    let abort: Promise<void>;
+    let park: Promise<void>;
+    try {
+      abort = this.abortTransport(run);
+    } catch (cause) {
+      abort = Promise.reject(cause);
+    }
+    try {
+      park = this.parkTransport(run);
+    } catch (cause) {
+      park = Promise.reject(cause);
+    }
+    this.store.changed();
+    runtime.terminalization = (async () => {
+      const results = await Promise.allSettled([abort, park, ...descendants]);
+      for (const result of results)
+        if (result.status === "rejected")
+          this.appendActivity(
+            run,
+            "error",
+            `cleanup failed: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
+          );
+      const parkResult = results[1];
+      if (parkResult?.status === "rejected") {
+        const message =
+          parkResult.reason instanceof Error
+            ? parkResult.reason.message
+            : String(parkResult.reason);
+        run.cleanupFailure = { at: iso(), message: `Transport cleanup failed: ${message}` };
+      }
+      await this.inspectors.close(run.id).catch(() => {});
+      if (this.leaseRuntimes.get(run.id) === runtime) {
+        runtime.phase = "closed";
+        run.activeLeaseGeneration = undefined;
+        run.currentOperation = undefined;
+        runtime.resolveDone();
+      }
+      if (code !== "parent_shutdown" && code !== "session_change") {
+        try {
+          this.reportCompletion(run);
+        } catch (cause) {
+          this.appendActivity(
+            run,
+            "error",
+            `completion notification failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        }
+      }
+      this.store.changed();
+      if (run.missionId) await this.maybeFinalizeMission(run.missionId);
+    })();
+    return runtime.terminalization;
+  }
+
+  private completeRun(run: RunRecord, generation: number): Promise<void> {
+    const runtime = this.leaseRuntimes.get(run.id);
+    const lease = this.lease(run, generation);
+    if (!runtime || !lease || runtime.generation !== generation) return Promise.resolve();
+    if (runtime.terminalization) return runtime.terminalization;
+    if (runtime.completion) return runtime.completion;
+    if (Date.now() >= Date.parse(lease.deadlineAt))
+      return this.beginTermination(run, "wall_limit", {
+        phase: "finalization",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (Date.now() - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
+    runtime.phase = "completing";
+    this.setOperation(run, "finalization", "parking transport and finalizing output");
+    runtime.completion = (async () => {
+      try {
+        await this.parkTransport(run);
+        if (runtime.phase !== "completing" || this.leaseRuntimes.get(run.id) !== runtime) return;
+        if (run.worktree && !run.candidate)
+          await this.finalizeRunWorktree(run, runtime.controller.signal);
+        const mission = run.missionId ? this.missions.get(run.missionId) : undefined;
+        if (mission?.orchestratorId === run.id) {
+          this.setOperation(run, "finalization", "waiting for mission children");
+          await this.waitForMissionChildren(mission.id, run.id, runtime.controller.signal);
+          if (runtime.phase !== "completing" || this.leaseRuntimes.get(run.id) !== runtime) return;
+          const unsafeChild = this.store
+            .all()
+            .find(
+              (candidate) =>
+                candidate.id !== run.id &&
+                candidate.missionId === mission.id &&
+                candidate.cleanupFailure,
+            );
+          if (unsafeChild)
+            throw new Error(
+              `Mission child ${unsafeChild.id} did not complete transport cleanup; the mission worktree was retained.`,
+            );
+          if (mission.worktree && !mission.candidate) {
+            this.setOperation(run, "worktree", "capturing mission candidate");
+            const candidate = await captureWorktreeCandidate(mission.worktree, {
+              signal: runtime.controller.signal,
+            });
+            if (candidate.hasChanges) mission.candidate = candidate;
+            else {
+              await removeMissionWorktree(mission.worktree, {
+                force: true,
+                signal: runtime.controller.signal,
+              });
+              mission.worktree = undefined;
+            }
+          }
+        }
+        if (runtime.phase !== "completing" || this.leaseRuntimes.get(run.id) !== runtime) return;
+        const now = Date.now();
+        if (now >= Date.parse(lease.deadlineAt)) {
+          await this.beginTermination(run, "wall_limit", {
+            phase: "finalization",
+            limit: {
+              kind: "wall",
+              maximum: lease.effectiveLimits.maxWallSeconds,
+              observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+            },
+          });
+          return;
+        }
+        const reason: StructuredTerminationReason = {
+          code: "completed",
+          at: iso(now),
+          generation,
+        };
+        lease.endedAt = reason.at;
+        lease.endReason = "completed";
+        run.terminationReason = reason;
+        run.terminationHistory.push(reason);
+        run.finishedAt = reason.at;
+        run.error = undefined;
+        run.wrappingUp = false;
+        this.transition(run, "parked", "completed", now, generation);
+        this.appendActivity(run, "park", "completed session parked; live resources released");
+        this.clearLeaseTimers(runtime);
+        this.claims.release(run.id);
+        await this.inspectors
+          .close(run.id)
+          .catch((cause: unknown) =>
+            this.appendActivity(
+              run,
+              "error",
+              `inspector cleanup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+            ),
+          );
+        runtime.phase = "closed";
+        run.activeLeaseGeneration = undefined;
+        run.currentOperation = undefined;
+        runtime.resolveDone();
+        try {
+          this.reportCompletion(run);
+        } catch (cause) {
+          this.appendActivity(
+            run,
+            "error",
+            `completion notification failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        }
+        this.store.changed();
+        if (run.missionId) await this.maybeFinalizeMission(run.missionId);
+      } catch (cause) {
+        if (runtime.phase !== "completing") return;
+        await this.beginTermination(
+          run,
+          runtime.controller.signal.aborted && Date.now() >= Date.parse(lease.deadlineAt)
+            ? "wall_limit"
+            : "runner_error",
+          { phase: "finalization" },
+          cause instanceof Error ? cause.message : String(cause),
+        );
+      }
+    })();
+    return runtime.completion;
+  }
+
+  private beforeModelRequest(runId: string, generation: number): boolean {
+    const run = this.store.get(runId);
+    const runtime = this.leaseRuntimes.get(runId);
+    const lease = run ? this.lease(run, generation) : undefined;
+    if (
+      !run ||
+      !runtime ||
+      !lease ||
+      runtime.generation !== generation ||
+      runtime.phase !== "active"
+    )
+      return false;
+    const now = Date.now();
+    if (now >= Date.parse(lease.deadlineAt)) {
+      void this.beginTermination(run, "wall_limit", {
+        phase: "execution",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
+      return false;
+    }
+    const cap = lease.effectiveLimits.maxTurns;
+    if (cap !== "notApplicable" && run.turns >= cap) {
+      void this.beginTermination(run, "turn_limit", {
+        phase: "execution",
+        limit: { kind: "turn", maximum: cap, observed: run.turns + 1 },
+      });
+      return false;
+    }
+    const tokenBudget = lease.effectiveLimits.tokenBudget;
+    if (tokenBudget !== undefined && run.usage.total >= tokenBudget) {
+      void this.beginTermination(run, "token_limit", {
+        phase: "execution",
+        limit: { kind: "token", maximum: tokenBudget, observed: run.usage.total },
+      });
+      return false;
+    }
+    const costBudget = lease.effectiveLimits.costBudget;
+    if (costBudget !== undefined && run.usage.cost >= costBudget) {
+      void this.beginTermination(run, "cost_limit", {
+        phase: "execution",
+        limit: { kind: "cost", maximum: costBudget, observed: run.usage.cost },
+      });
+      return false;
+    }
+    this.setOperation(run, "model", `turn ${run.turns + 1}`, now);
+    run.lastEventAt = iso(now);
+    this.store.changed();
+    return true;
+  }
+
   private async startPrepared(
     prepared: PreparedRun,
     ctx: ExtensionContext,
@@ -831,15 +1595,8 @@ export class SubagentManager {
     this.assertOpen();
     const id = `${prepared.profile.name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
     const sessionDir = join(this.sessionRoot, parentSessionId(ctx), id);
-    const runWorktree =
-      prepared.profile.class === "write" && prepared.task.workspace === "worktree" && !missionId
-        ? await createMissionWorktree(prepared.cwd, id)
-        : undefined;
-    if (this.shutdownController.signal.aborted) {
-      if (runWorktree) await removeMissionWorktree(runWorktree, { force: true }).catch(() => {});
-      this.assertOpen();
-    }
-    const runCwd = runWorktree?.cwd ?? prepared.cwd;
+    const startedAt = Date.now();
+    const limits = this.effectiveLimits(prepared);
     const run: RunRecord = {
       id,
       parentId,
@@ -852,11 +1609,22 @@ export class SubagentManager {
         key: prepared.task.key,
         owns: [...prepared.task.owns],
         deliverable: prepared.task.deliverable,
+        acceptance: prepared.task.acceptance,
+        stopConditions: [...prepared.task.stopConditions],
         workspace: prepared.task.workspace ?? "shared",
       },
       status: "starting",
       runner: prepared.profile.runner,
-      startedAt: new Date().toISOString(),
+      startedAt: iso(startedAt),
+      originalEffectiveLimits: cloneLimits(limits),
+      leaseHistory: [],
+      statusChangedAt: iso(startedAt),
+      statusTransitions: [
+        { to: "starting", at: iso(startedAt), generation: 1, cause: "allocation" },
+      ],
+      lastEventAt: iso(startedAt),
+      terminationHistory: [],
+      wrappingUp: false,
       sessionDir,
       report: "",
       usage: emptyUsage(),
@@ -870,23 +1638,46 @@ export class SubagentManager {
       effectiveThinking: prepared.thinking,
       capabilityNames: [...prepared.profile.capabilities],
       capabilityPolicy: capabilityPolicySnapshot(prepared.capabilities),
-      worktree: runWorktree,
       completionReported: false,
     };
-    recordActivity(
+    this.appendActivity(
       run,
       "spawn",
       `starting ${prepared.profile.name} through ${prepared.profile.runner} runner`,
     );
     let registered = false;
+    let runtime: LeaseRuntime | undefined;
     try {
       this.store.add(run);
       registered = true;
+      runtime = this.openLease(run, limits, startedAt);
       this.claims.reserve(
         id,
         prepared.task,
         WRITE_CLASSES.has(profileClass(prepared.profile)) ? "write" : "read",
       );
+      const mission = missionId ? this.missions.get(missionId) : undefined;
+      if (
+        ["write", "orchestrator"].includes(prepared.profile.class) &&
+        prepared.task.workspace === "worktree"
+      ) {
+        this.setOperation(run, "worktree", "creating isolated worktree");
+        this.store.changed();
+        const retainWorktree = (worktree: MissionWorktree) => {
+          if (mission) mission.worktree = worktree;
+          else run.worktree = worktree;
+          this.store.changed();
+        };
+        const worktree = await createMissionWorktree(prepared.cwd, missionId ?? id, {
+          signal: runtime.controller.signal,
+          onPrepared: retainWorktree,
+        });
+        retainWorktree(worktree);
+      }
+      this.assertOpen();
+      const runCwd = run.worktree?.cwd ?? mission?.worktree?.cwd ?? prepared.cwd;
+      this.setOperation(run, "transport", `starting ${prepared.profile.runner} transport`);
+      this.store.changed();
       const task = [
         filteredParentContext(
           ctx,
@@ -897,6 +1688,9 @@ export class SubagentManager {
         `Task key: ${prepared.task.key}`,
         `Owned scope: ${prepared.task.owns.join(", ")}`,
         `Required deliverable: ${prepared.task.deliverable}`,
+        `Acceptance criteria: ${prepared.task.acceptance}`,
+        "Stop conditions:",
+        ...prepared.task.stopConditions.map((condition) => `- ${condition}`),
         "",
         prepared.task.task,
       ].join("\n");
@@ -931,10 +1725,11 @@ export class SubagentManager {
             skillPaths: [...new Set(skillPaths)],
             customTools: this.childTools(run, ctx, prepared.config),
             extensionFactories: [this.capabilityGuard(run, prepared.capabilities)],
-            timeoutMs: prepared.profile.timeout ? prepared.profile.timeout * 1_000 : undefined,
-            signal: this.shutdownController.signal,
+            timeoutMs: limits.maxWallSeconds * 1_000,
+            signal: runtime.controller.signal,
+            beforeModelRequest: () => this.beforeModelRequest(run.id, runtime!.generation),
           },
-          (event) => this.onRunnerEvent(run, event),
+          (event) => this.onRunnerEvent(run.id, runtime!.generation, event),
         );
       } else if (prepared.profile.runner === "rpc") {
         await this.rpc.start(
@@ -949,10 +1744,14 @@ export class SubagentManager {
             tools: [...new Set([...prepared.profile.tools, ...prepared.capabilities.tools])],
             extensionPaths: [...new Set(extensionPaths)],
             skillPaths: [...new Set(skillPaths)],
-            timeoutMs: prepared.profile.timeout ? prepared.profile.timeout * 1_000 : undefined,
-            signal: this.shutdownController.signal,
+            timeoutMs: limits.maxWallSeconds * 1_000,
+            signal: runtime.controller.signal,
+            beforeModelRequest: () => this.beforeModelRequest(run.id, runtime!.generation),
+            initialCompletedTurns: run.turns,
+            maxTurns: limits.maxTurns === "notApplicable" ? undefined : limits.maxTurns,
+            deadlineAtMs: Date.parse(this.lease(run, runtime!.generation)!.deadlineAt),
           },
-          (event) => this.onRunnerEvent(run, event),
+          (event) => this.onRunnerEvent(run.id, runtime!.generation, event),
         );
       } else {
         if (!prepared.externalRunner)
@@ -964,31 +1763,17 @@ export class SubagentManager {
             sessionDir,
             task: `${systemPrompt}\n\n${task}`,
             runner: prepared.externalRunner,
-            signal: this.shutdownController.signal,
+            signal: runtime.controller.signal,
           },
-          (event) => this.onRunnerEvent(run, event),
+          (event) => this.onRunnerEvent(run.id, runtime!.generation, event),
         );
       }
       return run;
     } catch (cause) {
-      if (registered) await this.parkTransport(run).catch(() => {});
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (registered && runtime)
+        await this.beginTermination(run, "startup_error", { phase: "startup" }, message);
       else this.claims.release(run.id);
-      if (run.worktree) {
-        try {
-          await removeMissionWorktree(run.worktree, { force: true });
-          run.worktree = undefined;
-        } catch (cleanupCause) {
-          recordActivity(
-            run,
-            "error",
-            `startup worktree cleanup failed: ${cleanupCause instanceof Error ? cleanupCause.message : String(cleanupCause)}`,
-          );
-        }
-      }
-      if (registered) {
-        this.fail(run, cause instanceof Error ? cause.message : String(cause));
-        this.store.changed();
-      }
       throw cause;
     }
   }
@@ -1023,22 +1808,38 @@ export class SubagentManager {
       .join("\n\n");
   }
 
-  private requestFromRun(
-    run: RunRecord,
-    input: Omit<SupervisorRequestInput, "fromRunId" | "missionId">,
-  ): ReturnType<SupervisorInbox["request"]> {
-    const outcome = this.inbox.request({
-      ...input,
-      fromRunId: run.id,
-      missionId: run.missionId,
-    });
-    if (outcome.request.blocking && run.missionId) {
+  private reconcileBlocking(run: RunRecord): void {
+    const runtime = this.leaseRuntimes.get(run.id);
+    if (runtime?.phase !== "active" || !ACTIVE_STATUSES.has(run.status)) return;
+    const pending = this.inbox.pendingForRun(run.id).filter((request) => request.blocking);
+    if (pending.length) {
+      const oldest = pending[0]!;
+      run.blockedSince = oldest.createdAt;
+      this.transition(run, "blocked", "supervisor_request", Date.parse(oldest.createdAt));
+      run.currentOperation = {
+        kind: "supervisor",
+        name: oldest.kind,
+        startedAt: oldest.createdAt,
+        generation: runtime.generation,
+      };
+    } else {
+      run.blockedSince = undefined;
+      if (run.status === "blocked") {
+        const lease = this.lease(run, runtime.generation);
+        this.transition(run, lease?.acceptedAt ? "running" : "starting", "requests_resolved");
+        run.currentOperation = undefined;
+      }
+      this.maybeDeliverQueuedWrap(run);
+    }
+    if (run.missionId) {
       const mission = this.missions.get(run.missionId);
-      if (mission?.status === "running") mission.status = "blocked";
-      void outcome.resolution.finally(() => {
-        const current = this.missions.get(run.missionId!);
-        if (current?.status === "blocked")
-          current.status = this.store
+      if (mission) {
+        const missionBlocked = this.inbox
+          .open()
+          .some((request) => request.missionId === run.missionId && request.blocking);
+        if (missionBlocked) mission.status = "blocked";
+        else if (mission.status === "blocked")
+          mission.status = this.store
             .all()
             .some(
               (candidate) =>
@@ -1046,8 +1847,26 @@ export class SubagentManager {
             )
             ? "running"
             : "parked";
-        this.publish();
-      });
+      }
+    }
+    this.store.changed();
+  }
+
+  private requestFromRun(
+    run: RunRecord,
+    input: Omit<SupervisorRequestInput, "fromRunId" | "missionId">,
+  ): ReturnType<SupervisorInbox["request"]> {
+    const runtime = this.leaseRuntimes.get(run.id);
+    if (runtime?.phase !== "active" || !ACTIVE_STATUSES.has(run.status))
+      throw new Error(`Run ${run.id} cannot create a supervisor request while ${run.status}.`);
+    const outcome = this.inbox.request({
+      ...input,
+      fromRunId: run.id,
+      missionId: run.missionId,
+    });
+    if (outcome.request.blocking) {
+      this.reconcileBlocking(run);
+      void outcome.resolution.finally(() => this.reconcileBlocking(run));
     }
     return outcome;
   }
@@ -1059,7 +1878,12 @@ export class SubagentManager {
       factory: (api) => {
         api.on("tool_call", async (event) => {
           if (
-            ["contact_supervisor", "subagent_dispatch", "subagent_collect"].includes(event.toolName)
+            [
+              "contact_supervisor",
+              "subagent_status",
+              "subagent_dispatch",
+              "subagent_collect",
+            ].includes(event.toolName)
           )
             return undefined;
           const matching = policy.capabilities.filter((capability) =>
@@ -1071,9 +1895,7 @@ export class SubagentManager {
           const needsApproval =
             risk || matching.some((capability) => capability.approval === "ask");
           if (!needsApproval) return undefined;
-          const prior = run.status;
-          run.status = "blocked";
-          recordActivity(run, "approval", `waiting for approval: ${risk ?? event.toolName}`);
+          this.appendActivity(run, "approval", `waiting for approval: ${risk ?? event.toolName}`);
           this.store.changed();
           const { resolution } = this.requestFromRun(run, {
             kind: "approval",
@@ -1089,8 +1911,7 @@ export class SubagentManager {
             ],
           });
           const answer = await resolution;
-          if (run.status === "blocked") run.status = prior === "blocked" ? "running" : prior;
-          recordActivity(
+          this.appendActivity(
             run,
             "approval",
             `${event.toolName} ${answer.answer === "allow" ? "approved" : "denied"}`,
@@ -1129,7 +1950,12 @@ export class SubagentManager {
             Type.Array(Type.Object({ value: Type.String(), label: Type.String() })),
           ),
         }),
-        execute: async (_toolCallId, params) => {
+        execute: async (_toolCallId, params, signal) => {
+          const toolSignal = signal ?? new AbortController().signal;
+          if (toolSignal.aborted)
+            throw toolSignal.reason instanceof Error
+              ? toolSignal.reason
+              : new Error("The supervisor request was aborted.");
           const kind =
             params.kind === "integration-ready" &&
             !["write", "orchestrator"].includes(profileClass(run.profile))
@@ -1142,11 +1968,17 @@ export class SubagentManager {
             choices: params.choices,
           });
           if (!request.blocking) return textResult("Progress update recorded.");
-          const previous = run.status;
-          run.status = "blocked";
-          this.store.changed();
-          const answer = await resolution;
-          if (run.status === "blocked") run.status = previous === "blocked" ? "running" : previous;
+          const onAbort = () => {
+            if (this.inbox.all().find((entry) => entry.id === request.id)?.status === "pending")
+              this.inbox.cancel(request.id, "The originating child operation was aborted.");
+          };
+          toolSignal.addEventListener("abort", onAbort, { once: true });
+          let answer: Awaited<typeof resolution>;
+          try {
+            answer = await resolution;
+          } finally {
+            toolSignal.removeEventListener("abort", onAbort);
+          }
           this.store.changed();
           return textResult(
             answer.status === "answered"
@@ -1161,10 +1993,41 @@ export class SubagentManager {
     if (this.depth(run) >= Math.min(config.runtime.maxDepth, run.profile.maxDepth)) return tools;
     tools.push(
       defineTool({
+        name: "subagent_status",
+        label: "Hackler status",
+        description:
+          "Inspect current general and shared-writer capacity plus owned child states before selecting the next adaptive wave.",
+        parameters: Type.Object({}),
+        execute: async () => {
+          const hub = this.hubSnapshot();
+          const children = this.store.children(run.id);
+          const pending = this.inbox
+            .open()
+            .filter(
+              (request) =>
+                request.fromRunId === run.id ||
+                children.some((child) => child.id === request.fromRunId),
+            );
+          return textResult(
+            [
+              `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
+              `Owned children: ${children.length}`,
+              ...(children.length
+                ? children.map(
+                    (child) =>
+                      `- ${child.id} · ${child.status} · ${child.ownership.key} · ${child.ownership.owns.join(", ")}`,
+                  )
+                : ["(none)"]),
+              `Pending owned requests: ${pending.length}`,
+            ].join("\n"),
+          );
+        },
+      }),
+      defineTool({
         name: "subagent_dispatch",
         label: "Dispatch Hackler",
         description:
-          "Dispatch all independent ready specialist tasks in one batch with disjoint ownership.",
+          "Dispatch the smallest justified batch from the independent ready frontier, up to current free capacity; never invent work to fill slots.",
         parameters: Type.Object({
           tasks: Type.Array(
             Type.Object({
@@ -1172,7 +2035,9 @@ export class SubagentManager {
               agent: Type.String(),
               task: Type.String(),
               owns: Type.Array(Type.String()),
-              deliverable: Type.String(),
+              deliverable: Type.String({ minLength: 1 }),
+              acceptance: Type.String({ minLength: 1 }),
+              stopConditions: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
               context: Type.Optional(
                 Type.Union([
                   Type.Literal("fresh"),
@@ -1187,6 +2052,31 @@ export class SubagentManager {
             { minItems: 1 },
           ),
         }),
+        prepareArguments: (args: unknown) => {
+          if (!args || typeof args !== "object") return args as { tasks: DispatchTask[] };
+          const input = args as { tasks?: unknown[] };
+          if (!Array.isArray(input.tasks)) return args as { tasks: DispatchTask[] };
+          return {
+            ...input,
+            tasks: input.tasks.map((value) => {
+              if (!value || typeof value !== "object") return value;
+              const task = value as Record<string, unknown>;
+              return {
+                ...task,
+                ...(task.acceptance === undefined && typeof task.deliverable === "string"
+                  ? { acceptance: task.deliverable }
+                  : {}),
+                ...(task.stopConditions === undefined
+                  ? {
+                      stopConditions: [
+                        "Stop when the deliverable is complete or report a blocker that prevents completion.",
+                      ],
+                    }
+                  : {}),
+              };
+            }),
+          } as { tasks: DispatchTask[] };
+        },
         execute: async (_toolCallId, params) => {
           try {
             const mission = run.missionId ? this.missions.get(run.missionId) : undefined;
@@ -1211,26 +2101,33 @@ export class SubagentManager {
       defineTool({
         name: "subagent_collect",
         label: "Collect Hackler",
-        description: "Wait for owned children and return their reports.",
+        description:
+          "Wait a bounded time for owned children; after timeout continue unowned work instead of polling immediately.",
         parameters: Type.Object({
           ids: Type.Optional(Type.Array(Type.String())),
           wait: Type.Optional(
             Type.Union([Type.Literal("none"), Type.Literal("next"), Type.Literal("all")]),
           ),
+          timeoutSeconds: Type.Optional(Type.Integer({ minimum: 10, maximum: 3600 })),
         }),
         execute: async (_toolCallId, params, signal) => {
           const owned = this.store.children(run.id).map((child) => child.id);
           const ids = params.ids ?? owned;
           if (ids.some((id) => !owned.includes(id)))
             return textResult("An orchestrator may collect only its owned children.", true);
-          const collected = await this.collect(ids, params.wait ?? "all", signal);
+          const collected = await this.collect(
+            ids,
+            params.wait ?? "all",
+            signal,
+            params.timeoutSeconds,
+          );
           return textResult(
-            collected
+            `${collected.runs
               .map(
                 (child) =>
                   `## ${child.name} · ${child.status}\n${child.report || child.error || "(no report)"}`,
               )
-              .join("\n\n"),
+              .join("\n\n")}\n\nWait ended: ${collected.waitReason ?? "none"}`,
           );
         },
       }),
@@ -1266,41 +2163,117 @@ export class SubagentManager {
     return model;
   }
 
-  private enforceBudget(run: RunRecord): void {
-    if (!ACTIVE_STATUSES.has(run.status)) return;
-    const profile = run.profileSnapshot;
-    let reason: string | undefined;
-    if (profile.turnBudget !== undefined && run.turns > profile.turnBudget)
-      reason = `Turn budget exceeded (${run.turns}/${profile.turnBudget}).`;
-    else if (profile.tokenBudget !== undefined && run.usage.total > profile.tokenBudget)
-      reason = `Token budget exceeded (${run.usage.total}/${profile.tokenBudget}).`;
-    else if (profile.costBudget !== undefined && run.usage.cost > profile.costBudget)
-      reason = `Cost budget exceeded ($${run.usage.cost.toFixed(4)}/$${profile.costBudget.toFixed(4)}).`;
-    if (!reason) return;
-    this.fail(run, reason);
-    void this.releaseFailedRun(run);
+  private enforceUsageBudget(run: RunRecord, generation: number): void {
+    const runtime = this.leaseRuntimes.get(run.id);
+    const lease = this.lease(run, generation);
+    if (!runtime || !lease || runtime.generation !== generation || runtime.phase !== "active")
+      return;
+    const now = Date.now();
+    if (now >= Date.parse(lease.deadlineAt)) {
+      void this.beginTermination(run, "wall_limit", {
+        phase: "execution",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
+      return;
+    }
+    const tokenBudget = lease.effectiveLimits.tokenBudget;
+    if (tokenBudget !== undefined && run.usage.total >= tokenBudget) {
+      void this.beginTermination(run, "token_limit", {
+        phase: "execution",
+        limit: { kind: "token", maximum: tokenBudget, observed: run.usage.total },
+      });
+      return;
+    }
+    const costBudget = lease.effectiveLimits.costBudget;
+    if (costBudget !== undefined && run.usage.cost >= costBudget)
+      void this.beginTermination(run, "cost_limit", {
+        phase: "execution",
+        limit: { kind: "cost", maximum: costBudget, observed: run.usage.cost },
+      });
   }
 
-  private onRunnerEvent(run: RunRecord, event: NativeRunEvent): void {
-    if (this.shutdownController.signal.aborted || !ACTIVE_STATUSES.has(run.status)) return;
+  private onRunnerEvent(runId: string, generation: number, event: NativeRunEvent): void {
+    const run = this.store.get(runId);
+    const runtime = this.leaseRuntimes.get(runId);
+    const lease = run ? this.lease(run, generation) : undefined;
+    if (
+      !run ||
+      !runtime ||
+      !lease ||
+      runtime.generation !== generation ||
+      runtime.phase === "closed"
+    )
+      return;
+    const cleanupEvent =
+      event.type === "text" ||
+      event.type === "usage" ||
+      event.type === "session" ||
+      event.type === "turn_end";
+    if (runtime.phase === "terminalizing" && !cleanupEvent) return;
+    const now = Date.now();
+    run.lastEventAt = iso(now);
     if (event.type === "accepted") {
-      run.status = "running";
+      lease.acceptedAt = iso(now);
+      this.transition(run, "running", "accepted", now, generation);
       run.sessionFile = event.sessionFile;
-      recordActivity(run, "prompt", `initial prompt accepted by ${run.runner} runner`);
+      if (run.currentOperation?.kind !== "model") run.currentOperation = undefined;
+      this.appendActivity(run, "prompt", `initial prompt accepted by ${run.runner} runner`);
+      this.maybeDeliverQueuedWrap(run);
     } else if (event.type === "session") {
       run.sessionFile = event.sessionFile;
     } else if (event.type === "text") {
       run.report = event.text;
-      recordAssistantWritingActivity(run);
-    } else if (event.type === "tool_start") {
+      this.recordAssistantWritingActivity(run);
+    } else if (event.type === "tool_start" && runtime.phase === "active") {
       run.currentTool = event.toolName;
-      recordActivity(run, "tool", `started ${event.toolName}`);
-    } else if (event.type === "tool_end") {
+      this.setOperation(run, "tool", event.toolName, now);
+      this.appendActivity(run, "tool", `started ${event.toolName}`);
+    } else if (event.type === "tool_end" && runtime.phase === "active") {
       run.currentTool = undefined;
-      recordActivity(run, "tool", `${event.toolName} ${event.isError ? "failed" : "finished"}`);
+      run.currentOperation = undefined;
+      this.appendActivity(
+        run,
+        "tool",
+        `${event.toolName} ${event.isError ? "failed" : "finished"}`,
+      );
+    } else if (event.type === "deadline_reached" && runtime.phase === "active") {
+      void this.beginTermination(run, "wall_limit", {
+        phase: "execution",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
+    } else if (event.type === "turn_limit" && runtime.phase === "active") {
+      const cap = lease.effectiveLimits.maxTurns;
+      void this.beginTermination(run, "turn_limit", {
+        phase: "execution",
+        ...(cap === "notApplicable"
+          ? {}
+          : { limit: { kind: "turn" as const, maximum: cap, observed: run.turns + 1 } }),
+      });
     } else if (event.type === "turn_end") {
-      run.turns += 1;
-      this.enforceBudget(run);
+      const cap = lease.effectiveLimits.maxTurns;
+      if (runtime.phase === "active" && cap !== "notApplicable" && run.turns >= cap) {
+        void this.beginTermination(run, "turn_limit", {
+          phase: "execution",
+          limit: { kind: "turn", maximum: cap, observed: run.turns + 1 },
+        });
+      } else if (cap === "notApplicable" || run.turns < cap) {
+        run.turns += 1;
+        run.currentOperation = undefined;
+        if (
+          runtime.phase === "active" &&
+          cap !== "notApplicable" &&
+          run.turns >= Math.ceil(cap * lease.effectiveLimits.wrapUpRatio)
+        )
+          this.triggerWrap(run, "turn", now);
+      }
     } else if (event.type === "usage") {
       run.usage.input += event.input;
       run.usage.output += event.output;
@@ -1309,72 +2282,89 @@ export class SubagentManager {
       run.usage.total =
         run.usage.input + run.usage.output + run.usage.cacheRead + run.usage.cacheWrite;
       run.usage.cost += event.cost;
-      this.enforceBudget(run);
-    } else if (event.type === "model") {
+      this.enforceUsageBudget(run, generation);
+    } else if (event.type === "model" && runtime.phase === "active") {
       run.effectiveModel = `${event.provider}/${event.id}`;
-    } else if (event.type === "settled") {
+    } else if (event.type === "settled" && runtime.phase === "active") {
       run.report = event.report || run.report;
-      void this.park(run.id);
-    } else if (event.type === "error") {
-      this.fail(run, event.error.message);
-      void this.releaseFailedRun(run);
+      if (now >= Date.parse(lease.deadlineAt))
+        void this.beginTermination(run, "wall_limit", {
+          phase: "execution",
+          limit: {
+            kind: "wall",
+            maximum: lease.effectiveLimits.maxWallSeconds,
+            observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+          },
+        });
+      else void this.completeRun(run, generation);
+    } else if (event.type === "error" && runtime.phase === "active") {
+      void this.beginTermination(run, "runner_error", { phase: "execution" }, event.error.message);
     }
+    if (runtime.phase === "active" && now >= Date.parse(lease.deadlineAt))
+      void this.beginTermination(run, "wall_limit", {
+        phase: "execution",
+        limit: {
+          kind: "wall",
+          maximum: lease.effectiveLimits.maxWallSeconds,
+          observed: Math.max(0, (now - Date.parse(lease.startedAt)) / 1_000),
+        },
+      });
     this.store.changed();
   }
 
-  private async releaseFailedRun(run: RunRecord): Promise<void> {
-    for (const child of this.store.children(run.id))
-      if (ACTIVE_STATUSES.has(child.status)) await this.stop(child.id).catch(() => {});
-    await this.parkTransport(run).catch(() => {});
-    await this.inspectors.close(run.id);
-    if (run.missionId) await this.maybeFinalizeMission(run.missionId);
-  }
-
-  private fail(run: RunRecord, error: string): void {
-    if (!ACTIVE_STATUSES.has(run.status)) return;
-    run.status = "failed";
-    run.error = error;
-    run.finishedAt = new Date().toISOString();
-    recordActivity(run, "error", error);
-    this.claims.release(run.id);
-    this.inbox.cancelByRun(run.id, "Source run failed.");
-    this.reportCompletion(run);
-    this.store.changed();
-  }
-
-  private async park(id: string): Promise<RunRecord> {
-    const run = this.store.get(id);
-    if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
-    if (run.status === "parked") return run;
-    await this.parkTransport(run);
-    if (ACTIVE_STATUSES.has(run.status) && run.worktree && !run.candidate) {
-      try {
-        await this.finalizeRunWorktree(run);
-      } catch (cause) {
-        this.fail(run, cause instanceof Error ? cause.message : String(cause));
+  private async waitForMissionChildren(
+    missionId: string,
+    orchestratorId: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const hasActiveChildren = () =>
+      this.store.all().some((candidate) => {
+        if (candidate.id === orchestratorId || candidate.missionId !== missionId) return false;
+        const runtime = this.leaseRuntimes.get(candidate.id);
+        return (
+          ACTIVE_STATUSES.has(candidate.status) || Boolean(runtime && runtime.phase !== "closed")
+        );
+      });
+    if (!hasActiveChildren()) return;
+    await new Promise<void>((resolve, reject) => {
+      let done = false;
+      let unsubscribe = (): void => {};
+      const finish = (cause?: unknown) => {
+        if (done) return;
+        done = true;
+        unsubscribe();
+        signal.removeEventListener("abort", onAbort);
+        if (cause !== undefined) reject(cause);
+        else resolve();
+      };
+      const onAbort = () =>
+        finish(signal.reason instanceof Error ? signal.reason : new Error("Mission lease ended."));
+      const inspect = () => {
+        if (signal.aborted) onAbort();
+        else if (!hasActiveChildren()) finish();
+      };
+      unsubscribe = this.store.subscribe(inspect);
+      if (done) {
+        unsubscribe();
+        return;
       }
-    }
-    if (ACTIVE_STATUSES.has(run.status)) {
-      run.status = "parked";
-      run.finishedAt = new Date().toISOString();
-      recordActivity(run, "park", "completed session parked; live resources released");
-    }
-    this.claims.release(id);
-    await this.inspectors.close(id);
-    this.reportCompletion(run);
-    this.store.changed();
-    if (run.missionId) await this.maybeFinalizeMission(run.missionId);
-    return run;
+      signal.addEventListener("abort", onAbort, { once: true });
+      inspect();
+      if (done) {
+        unsubscribe();
+        signal.removeEventListener("abort", onAbort);
+      }
+    });
   }
 
-  private async finalizeRunWorktree(run: RunRecord): Promise<void> {
+  private async finalizeRunWorktree(run: RunRecord, signal?: AbortSignal): Promise<void> {
     if (!run.worktree) return;
-    const candidate = await captureWorktreeCandidate(run.worktree);
+    const candidate = await captureWorktreeCandidate(run.worktree, { signal });
     run.candidate = candidate;
     if (!candidate.hasChanges) {
-      await removeMissionWorktree(run.worktree, { force: true });
+      await removeMissionWorktree(run.worktree, { force: true, signal });
       run.worktree = undefined;
-      recordActivity(run, "status", "isolated worktree had no changes and was removed");
+      this.appendActivity(run, "status", "isolated worktree had no changes and was removed");
       return;
     }
     const { request } = this.inbox.request({
@@ -1388,41 +2378,70 @@ export class SubagentManager {
       ],
     });
     run.integrationRequestId = request.id;
-    recordActivity(run, "status", `integration candidate ready: ${candidate.files.join(", ")}`);
+    this.appendActivity(
+      run,
+      "status",
+      `integration candidate ready: ${candidate.files.join(", ")}`,
+    );
+  }
+
+  private selectRuns(ids: readonly string[] | undefined): RunRecord[] {
+    if (ids === undefined) return this.store.all();
+    const selected: RunRecord[] = [];
+    const seen = new Set<string>();
+    for (const id of ids) {
+      if (seen.has(id)) continue;
+      seen.add(id);
+      const run = this.store.get(id);
+      if (!run) throw new Error(`Unknown Hackler run: ${id}.`);
+      selected.push(run);
+    }
+    return selected;
   }
 
   async collect(
     ids: readonly string[] | undefined,
     wait: CollectMode,
     signal?: AbortSignal,
-  ): Promise<RunSnapshot[]> {
-    const selected = ids?.length
-      ? ids.map((id) => this.store.get(id)).filter((run): run is RunRecord => Boolean(run))
-      : this.store.all();
-    if (wait !== "none" && selected.some((run) => ACTIVE_STATUSES.has(run.status)))
-      await new Promise<void>((resolve) => {
-        let done = false;
-        const finish = () => {
-          if (done) return;
-          const settled = selected.filter((run) => !ACTIVE_STATUSES.has(run.status)).length;
-          const blocked = selected.some((run) => run.status === "blocked");
-          if (
-            signal?.aborted ||
-            blocked ||
-            (wait === "next" ? settled > 0 : settled === selected.length)
-          ) {
-            done = true;
-            unsubscribe();
-            signal?.removeEventListener("abort", finish);
-            resolve();
-          }
-        };
-        let unsubscribe = (): void => {};
-        unsubscribe = this.store.subscribe(finish);
-        signal?.addEventListener("abort", finish, { once: true });
-        finish();
-      });
-    return selected.map((run) => runSnapshot(run));
+    timeoutSeconds = DEFAULT_COLLECT_TIMEOUT_SECONDS,
+  ): Promise<CollectResult> {
+    if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 3600)
+      throw new Error("Collect timeoutSeconds must be an integer from 10 through 3600.");
+    const selected = this.selectRuns(ids);
+    if (wait === "none") return { runs: selected.map((run) => runSnapshot(run)) };
+    if (!selected.length) return { runs: [], waitReason: signal?.aborted ? "aborted" : "settled" };
+    let waitReason: CollectWaitReason | undefined;
+    await new Promise<void>((resolve) => {
+      let done = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let unsubscribe = (): void => {};
+      const finish = (reason: CollectWaitReason) => {
+        if (done) return;
+        done = true;
+        waitReason = reason;
+        if (timer) clearTimeout(timer);
+        unsubscribe();
+        signal?.removeEventListener("abort", onAbort);
+        resolve();
+      };
+      const inspect = () => {
+        if (signal?.aborted) return finish("aborted");
+        if (selected.some((run) => run.status === "blocked")) return finish("blocked");
+        const settled = selected.filter((run) => !ACTIVE_STATUSES.has(run.status)).length;
+        if (wait === "next" ? settled > 0 : settled === selected.length) finish("settled");
+      };
+      const onAbort = () => finish("aborted");
+      unsubscribe = this.store.subscribe(inspect);
+      if (done) {
+        unsubscribe();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => finish("timeout"), timeoutSeconds * 1_000);
+      timer.unref?.();
+      inspect();
+    });
+    return { runs: selected.map((run) => runSnapshot(run)), waitReason };
   }
 
   /**
@@ -1431,9 +2450,7 @@ export class SubagentManager {
    * reloads do not double-count the same child turns.
    */
   takeUnreportedUsage(ids: readonly string[] | undefined): Usage {
-    const selected = ids?.length
-      ? ids.map((id) => this.store.get(id)).filter((run): run is RunRecord => Boolean(run))
-      : this.store.all();
+    const selected = this.selectRuns(ids);
     const total = emptyUsage();
     let changed = false;
     for (const run of selected) {
@@ -1460,7 +2477,7 @@ export class SubagentManager {
       throw new Error(`Hackler run ${id} cannot be steered while ${run.status}.`);
     run.task = message;
     run.taskHistory.push(message);
-    recordActivity(run, "steer", message.slice(0, 160));
+    this.appendActivity(run, "steer", message.slice(0, 160));
     if (run.runner === "native") await this.native.steer(id, message);
     else if (run.runner === "rpc") await this.rpc.steer(id, message);
     else throw new Error("One-shot external runners cannot be steered; start a new run instead.");
@@ -1481,44 +2498,119 @@ export class SubagentManager {
   }
 
   private async revive(run: RunRecord, message: string): Promise<RunRecord> {
+    let release!: () => void;
+    const previous = this.dispatchTail;
+    this.dispatchTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.reviveNow(run, message);
+    } finally {
+      release();
+    }
+  }
+
+  private async reviveNow(run: RunRecord, message: string): Promise<RunRecord> {
     this.assertOpen();
+    if (run.status !== "parked")
+      throw new Error(`Stale revival rejected because Hackler run ${run.id} is now ${run.status}.`);
     if (!this.ctx) throw new Error("The parent Pi session is unavailable.");
     if (run.runner === "external")
       throw new Error("One-shot external runners cannot be revived; dispatch a new task instead.");
-    if (run.ownership.workspace === "worktree" && (run.candidate || !run.worktree))
+    const mission = run.missionId ? this.missions.get(run.missionId) : undefined;
+    if (mission) {
+      const orchestratorRuntime = this.leaseRuntimes.get(mission.orchestratorId);
+      if (orchestratorRuntime?.phase === "completing" || this.missionFinalizers.has(mission.id))
+        throw new Error(
+          `Mission ${mission.id} is finalizing; dispatch a newly scoped run after its handoff instead.`,
+        );
+      if (
+        mission.candidate ||
+        mission.status === "failed" ||
+        mission.status === "integrated" ||
+        (mission.status === "parked" && !mission.worktree)
+      )
+        throw new Error(
+          `Mission ${mission.id} already produced or disposed its integration candidate; dispatch a new task instead.`,
+        );
+    }
+    if (
+      run.ownership.workspace === "worktree" &&
+      (run.candidate || (!run.worktree && !mission?.worktree))
+    )
       throw new Error(
         `Isolated run ${run.id} already produced or disposed its integration candidate; dispatch a new task instead.`,
       );
     if (!run.sessionFile)
       throw new Error(`Hackler run ${run.id} has no persistent session to revive.`);
-    const config = await this.loadConfig();
+    const priorRuntime = this.leaseRuntimes.get(run.id);
+    if (priorRuntime && priorRuntime.phase !== "closed") await priorRuntime.done;
+    if (run.status !== "parked")
+      throw new Error(`Stale revival rejected because Hackler run ${run.id} is now ${run.status}.`);
+    const config = await this.refreshProfiles(this.ctx);
+    const enabledProfiles = this.profiles.filter(
+      (profile) => profile.metadata?.disabled !== true && profile.metadata?.enabled !== false,
+    );
+    const currentProfile = enabledProfiles.find((profile) => profile.name === run.profile.name);
+    if (!currentProfile) throw new Error(`Profile ${run.profile.name} is currently disabled.`);
+    if (this.planMode && run.profileSnapshot.class === "write")
+      throw new Error(`Write profile ${run.profile.name} cannot revive while Plan Mode is active.`);
     if (this.store.active().length >= config.runtime.maxActive)
       throw new Error("No active Hackler capacity is available.");
-    run.status = "starting";
-    run.finishedAt = undefined;
-    run.task = message;
-    run.taskHistory.push(message);
-    run.error = undefined;
-    run.completionReported = false;
-    this.claims.reserve(
-      run.id,
-      {
-        key: run.ownership.key,
-        agent: run.profile.name,
-        task: message,
-        owns: run.ownership.owns,
-        deliverable: run.ownership.deliverable,
-        workspace: run.ownership.workspace,
-      },
-      WRITE_CLASSES.has(profileClass(run.profile)) ? "write" : "read",
-    );
+    if (
+      run.terminationReason &&
+      ["wall_limit", "turn_limit", "token_limit", "cost_limit"].includes(run.terminationReason.code)
+    )
+      throw new Error("A hard-limit failure cannot be revived; dispatch a newly scoped run.");
+    if (run.terminationReason?.code === "legacy_unknown")
+      throw new Error("This legacy run has no trustworthy captured limits and cannot be revived.");
+    const limits = this.tightenedRevivalLimits(run, config.runtime);
+    if (limits.maxTurns !== "notApplicable" && run.turns >= limits.maxTurns)
+      throw new Error(
+        `Run ${run.id} exhausted its cumulative turn limit (${run.turns}/${limits.maxTurns}); dispatch a newly scoped run.`,
+      );
+    if (limits.tokenBudget !== undefined && run.usage.total >= limits.tokenBudget)
+      throw new Error(
+        `Run ${run.id} exhausted its cumulative token limit (${run.usage.total}/${limits.tokenBudget}); dispatch a newly scoped run.`,
+      );
+    if (limits.costBudget !== undefined && run.usage.cost >= limits.costBudget)
+      throw new Error(
+        `Run ${run.id} exhausted its cumulative cost limit (${run.usage.cost}/${limits.costBudget}); dispatch a newly scoped run.`,
+      );
+    const proposedTask: DispatchTask = {
+      key: run.ownership.key,
+      agent: run.profile.name,
+      task: message,
+      owns: [...run.ownership.owns],
+      deliverable: run.ownership.deliverable,
+      acceptance: run.ownership.acceptance,
+      stopConditions: [...run.ownership.stopConditions],
+      workspace: run.ownership.workspace,
+    };
+    validateDispatchBatch([proposedTask], {
+      kinds: new Map(
+        enabledProfiles.map((profile) => [
+          profile.name,
+          WRITE_CLASSES.has(profileClass(profile)) ? ("write" as const) : ("read" as const),
+        ]),
+      ),
+      existing: this.claims.all(),
+      maxSharedWriters: config.runtime.maxSharedWriters,
+    });
+    const validatedWorktree = run.worktree
+      ? await validateMissionWorktree(run.worktree, this.ctx.cwd, {
+          signal: this.shutdownController.signal,
+        })
+      : undefined;
+    const validatedMissionWorktree = mission?.worktree
+      ? await validateMissionWorktree(mission.worktree, this.ctx.cwd, {
+          signal: this.shutdownController.signal,
+        })
+      : undefined;
     const capabilities = capabilityPolicySnapshot(run.capabilityPolicy);
-    if (capabilities.diagnostics.length) {
-      this.claims.release(run.id);
-      run.status = "parked";
-      run.finishedAt = new Date().toISOString();
+    if (capabilities.diagnostics.length)
       throw new Error(capabilities.diagnostics.map((entry) => entry.message).join("\n"));
-    }
     const extensionPaths = capabilities.capabilities.flatMap((capability) => [
       ...(capability.extensionPath ? [capability.extensionPath] : []),
       ...(capability.extensionPackage ? [capability.extensionPackage] : []),
@@ -1532,16 +2624,39 @@ export class SubagentManager {
     }
     const model = await this.resolveModel(run.effectiveModel, this.ctx);
     this.assertOpen();
+    this.claims.reserve(
+      run.id,
+      proposedTask,
+      WRITE_CLASSES.has(profileClass(run.profile)) ? "write" : "read",
+    );
+    run.worktree = validatedWorktree;
+    if (mission && validatedMissionWorktree) mission.worktree = validatedMissionWorktree;
+    run.finishedAt = undefined;
+    run.task = message;
+    run.taskHistory.push(message);
+    run.error = undefined;
+    run.completionReported = false;
+    const runtime = this.openLease(run, limits);
+    this.transition(run, "starting", "revival", Date.now(), runtime.generation);
+    this.setOperation(run, "transport", `reviving ${run.runner} transport`);
+    this.store.changed();
+    const revivalTask = [
+      `Acceptance criteria: ${run.ownership.acceptance}`,
+      "Stop conditions:",
+      ...run.ownership.stopConditions.map((condition) => `- ${condition}`),
+      "",
+      message,
+    ].join("\n");
     try {
       if (run.runner === "native")
         await this.native.start(
           {
             id: run.id,
-            cwd: run.worktree?.cwd ?? this.ctx.cwd,
+            cwd: run.worktree?.cwd ?? validatedMissionWorktree?.cwd ?? this.ctx.cwd,
             agentDir: PI_AGENT_DIR,
             sessionDir: run.sessionDir,
             resumeSessionFile: run.sessionFile,
-            task: message,
+            task: revivalTask,
             systemPrompt: this.childSystemPrompt(run.profileSnapshot, capabilities),
             model,
             modelRuntime: (this.ctx.modelRegistry as unknown as { runtime?: ModelRuntime }).runtime,
@@ -1552,41 +2667,43 @@ export class SubagentManager {
             skillPaths,
             customTools: this.childTools(run, this.ctx, config),
             extensionFactories: [this.capabilityGuard(run, capabilities)],
-            timeoutMs: run.profileSnapshot.timeout
-              ? run.profileSnapshot.timeout * 1_000
-              : undefined,
-            signal: this.shutdownController.signal,
+            timeoutMs: limits.maxWallSeconds * 1_000,
+            signal: runtime.controller.signal,
+            beforeModelRequest: () => this.beforeModelRequest(run.id, runtime.generation),
           },
-          (event) => this.onRunnerEvent(run, event),
+          (event) => this.onRunnerEvent(run.id, runtime.generation, event),
         );
       else
         await this.rpc.start(
           {
             id: run.id,
-            cwd: run.worktree?.cwd ?? this.ctx.cwd,
+            cwd: run.worktree?.cwd ?? validatedMissionWorktree?.cwd ?? this.ctx.cwd,
             sessionDir: run.sessionDir,
             resumeSessionFile: run.sessionFile,
-            task: message,
+            task: revivalTask,
             systemPrompt: this.childSystemPrompt(run.profileSnapshot, capabilities),
             model: run.effectiveModel,
             thinking: run.effectiveThinking,
             tools: [...new Set([...run.profileSnapshot.tools, ...capabilities.tools])],
             extensionPaths,
             skillPaths,
-            timeoutMs: run.profileSnapshot.timeout
-              ? run.profileSnapshot.timeout * 1_000
-              : undefined,
-            signal: this.shutdownController.signal,
+            timeoutMs: limits.maxWallSeconds * 1_000,
+            signal: runtime.controller.signal,
+            beforeModelRequest: () => this.beforeModelRequest(run.id, runtime.generation),
+            initialCompletedTurns: run.turns,
+            maxTurns: limits.maxTurns === "notApplicable" ? undefined : limits.maxTurns,
+            deadlineAtMs: Date.parse(this.lease(run, runtime.generation)!.deadlineAt),
           },
-          (event) => this.onRunnerEvent(run, event),
+          (event) => this.onRunnerEvent(run.id, runtime.generation, event),
         );
       return run;
     } catch (cause) {
-      this.claims.release(run.id);
-      run.status = "parked";
-      run.finishedAt = new Date().toISOString();
-      recordActivity(run, "error", cause instanceof Error ? cause.message : String(cause));
-      this.store.changed();
+      await this.beginTermination(
+        run,
+        "startup_error",
+        { phase: "startup" },
+        cause instanceof Error ? cause.message : String(cause),
+      );
       throw cause;
     }
   }
@@ -1597,34 +2714,7 @@ export class SubagentManager {
     if (run.status === "stopped") return run;
     if (!ACTIVE_STATUSES.has(run.status))
       throw new Error(`Hackler run ${id} cannot be stopped while ${run.status}.`);
-    for (const child of this.store.children(id))
-      if (ACTIVE_STATUSES.has(child.status)) await this.stop(child.id);
-    this.inbox.cancelByRun(id);
-    await this.abortTransport(run).catch(() => {});
-    await this.parkTransport(run).catch(() => {});
-    if (run.worktree && !run.candidate) {
-      try {
-        await this.finalizeRunWorktree(run);
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        recordActivity(run, "error", `could not capture stopped worktree: ${message}`);
-        this.inbox.request({
-          fromRunId: run.id,
-          kind: "blocker",
-          title: "Stopped worktree needs manual recovery",
-          detail: `${message}\nWorktree retained at ${run.worktree.root}.`,
-          choices: [{ value: "keep", label: "Keep worktree" }],
-        });
-      }
-    }
-    run.status = "stopped";
-    run.finishedAt = new Date().toISOString();
-    recordActivity(run, "park", "stopped by supervisor; transcript and recovery state retained");
-    this.claims.release(id);
-    await this.inspectors.close(id);
-    this.reportCompletion(run);
-    this.store.changed();
-    if (run.missionId) await this.maybeFinalizeMission(run.missionId);
+    await this.beginTermination(run, "explicit_stop", { phase: "cleanup" });
     return run;
   }
 
@@ -1679,7 +2769,10 @@ export class SubagentManager {
       if (pending.missionId) await this.integrateMission(pending.missionId);
       else await this.integrateRunCandidate(pending.fromRunId);
     }
-    return this.inbox.resolve(id, answer);
+    const resolved = this.inbox.resolve(id, answer);
+    const run = this.store.get(resolved.fromRunId);
+    if (run) this.reconcileBlocking(run);
+    return resolved;
   }
 
   private async integrateRunCandidate(id: string): Promise<void> {
@@ -1690,7 +2783,7 @@ export class SubagentManager {
     await removeMissionWorktree(run.worktree, { force: true });
     run.candidate = { ...run.candidate, patch: "" };
     run.worktree = undefined;
-    recordActivity(run, "status", "integration candidate applied to the source checkout");
+    this.appendActivity(run, "status", "integration candidate applied to the source checkout");
     this.store.changed();
   }
 
@@ -1712,12 +2805,6 @@ export class SubagentManager {
     if (!task.trim()) throw new Error("An orchestrator mission requires a task.");
     if (!scope.length) throw new Error("An orchestrator mission requires an explicit owned scope.");
     const id = `mission-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
-    const worktree =
-      workspace === "worktree" ? await createMissionWorktree(ctx.cwd, id) : undefined;
-    if (this.shutdownController.signal.aborted) {
-      if (worktree) await removeMissionWorktree(worktree, { force: true }).catch(() => {});
-      this.assertOpen();
-    }
     const mission: MissionRecord = {
       id,
       task,
@@ -1726,7 +2813,6 @@ export class SubagentManager {
       orchestratorId: "pending",
       startedAt: new Date().toISOString(),
       workspace,
-      worktree,
     };
     this.missions.set(id, mission);
     try {
@@ -1739,12 +2825,17 @@ export class SubagentManager {
             owns: scope,
             deliverable:
               "A reviewed implementation candidate, validation evidence, and integration handoff.",
+            acceptance:
+              "Every owned slice is reviewed, integrated or handed off explicitly, and supported by validation evidence.",
+            stopConditions: [
+              "Stop when the mission deliverable is ready, or report a blocker that prevents safe completion.",
+            ],
             context: "decisions",
             workspace: workspace === "worktree" ? "worktree" : "shared",
           },
         ],
         ctx,
-        { missionId: id, cwd: worktree?.cwd ?? ctx.cwd },
+        { missionId: id, cwd: ctx.cwd },
       );
       if (!orchestrator) throw new Error("Failed to start orchestrator.");
       mission.orchestratorId = orchestrator.id;
@@ -1752,8 +2843,25 @@ export class SubagentManager {
       this.publish();
       return { ...mission, scope: [...mission.scope] };
     } catch (cause) {
+      const worktree = mission.worktree;
+      if (worktree) {
+        try {
+          await removeMissionWorktree(worktree, { force: true });
+          mission.worktree = undefined;
+        } catch (cleanupCause) {
+          const cleanupMessage =
+            cleanupCause instanceof Error ? cleanupCause.message : String(cleanupCause);
+          mission.status = "failed";
+          mission.finishedAt = iso();
+          mission.cleanupFailure = { at: mission.finishedAt, message: cleanupMessage };
+          this.publish();
+          throw new Error(
+            `${cause instanceof Error ? cause.message : String(cause)} Worktree retained at ${worktree.root} because cleanup failed: ${cleanupMessage}`,
+            { cause },
+          );
+        }
+      }
       this.missions.delete(id);
-      if (worktree) await removeMissionWorktree(worktree, { force: true }).catch(() => {});
       throw cause;
     }
   }
@@ -1806,7 +2914,10 @@ export class SubagentManager {
     mission.status = "parked";
     mission.finishedAt = new Date().toISOString();
     if (mission.worktree) {
-      mission.candidate = await captureWorktreeCandidate(mission.worktree);
+      if (!mission.candidate)
+        throw new Error(
+          `Mission ${id} worktree finalization did not complete inside its orchestrator lease; the worktree was retained.`,
+        );
       if (mission.candidate.hasChanges) {
         const { request } = this.inbox.request({
           missionId: id,
@@ -1858,6 +2969,10 @@ export class SubagentManager {
           task,
           owns: ["topic:implementation-plan"],
           deliverable: "Evidence-backed plan risks, omissions, and concrete revisions.",
+          acceptance: "Findings cite repository evidence and identify actionable plan corrections.",
+          stopConditions: [
+            "Stop when the plan review is complete, or report a blocker that prevents evidence-backed review.",
+          ],
           context: "plan",
           workspace: "shared",
         },
@@ -1866,7 +2981,8 @@ export class SubagentManager {
       { modelOverride: { model, thinking: thinking as ThinkingPolicy | undefined } },
     );
     if (!run) throw new Error("Plan reviewer did not start.");
-    const [result] = await this.collect([run.id], "all");
+    const { runs: results } = await this.collect([run.id], "all");
+    const [result] = results;
     return {
       reviewerId: run.id,
       model: model ?? result?.effectiveModel,
@@ -1880,10 +2996,14 @@ export class SubagentManager {
     if (run.completionReported) return;
     run.completionReported = true;
     if (run.profile.hidden) return;
+    const content =
+      run.status === "failed"
+        ? `${run.profile.name} · failed\n\nFailure reason: ${run.terminationReason?.code ?? "legacy_unknown"}${run.error ? ` · ${run.error}` : ""}${run.report ? `\n\nPartial report:\n${run.report}` : ""}`
+        : `${run.profile.name} · ${run.status}\n\n${run.report || run.error || "(no report)"}`;
     this.pi.sendMessage(
       {
         customType: "subagent-completion-v2",
-        content: `${run.profile.name} · ${run.status}\n\n${run.report || run.error || "(no report)"}`,
+        content,
         display: true,
         details: { run: runSnapshot(run) },
       },
@@ -1919,6 +3039,7 @@ export class SubagentManager {
             ? { ...mission.candidate, files: [...mission.candidate.files] }
             : undefined,
         })),
+        evaluation: this.evaluationTrace(),
       },
       null,
       2,
@@ -1973,6 +3094,38 @@ export class SubagentManager {
     }
   }
 
+  private restoreIntegrationRequests(): void {
+    for (const run of this.store.all()) {
+      if (!run.worktree || !run.candidate?.hasChanges) continue;
+      const { request } = this.inbox.request({
+        fromRunId: run.id,
+        kind: "integration-ready",
+        title: `${run.profile.name} candidate ready to integrate`,
+        detail: `${run.candidate.files.length} changed file(s): ${run.candidate.files.join(", ")}`,
+        choices: [
+          { value: "integrate", label: "Apply candidate" },
+          { value: "keep", label: "Keep worktree" },
+        ],
+      });
+      run.integrationRequestId = request.id;
+    }
+    for (const mission of this.missions.values()) {
+      if (!mission.worktree || !mission.candidate?.hasChanges) continue;
+      const { request } = this.inbox.request({
+        missionId: mission.id,
+        fromRunId: mission.orchestratorId,
+        kind: "integration-ready",
+        title: "Mission candidate ready to integrate",
+        detail: `${mission.candidate.files.length} changed file(s): ${mission.candidate.files.join(", ")}`,
+        choices: [
+          { value: "integrate", label: "Apply candidate" },
+          { value: "keep", label: "Keep worktree" },
+        ],
+      });
+      mission.integrationRequestId = request.id;
+    }
+  }
+
   private async restore(parent: string): Promise<void> {
     if (this.store.all().length) return;
     try {
@@ -1980,10 +3133,62 @@ export class SubagentManager {
         schemaVersion?: number;
         runs?: RunRecord[];
         missions?: MissionRecord[];
+        evaluation?: EvaluationTraceV1;
       };
       if (parsed.schemaVersion !== 2) return;
+      if (parsed.evaluation?.schemaVersion === 1) {
+        const restored = buildEvaluationTraceV1(parsed.evaluation);
+        this.evaluationActivities = restored.activities;
+        this.evaluationCapacity = restored.capacityTimeline;
+        this.evaluationRequests = new Map(
+          restored.requests.map((request) => [request.id, request]),
+        );
+      }
       for (const run of parsed.runs ?? []) {
         run.turns ??= 0;
+        run.ownership.acceptance ??= run.ownership.deliverable;
+        run.ownership.stopConditions ??= [
+          "Stop when the deliverable is complete or report a blocker that prevents completion.",
+        ];
+        const legacyLimits: EffectiveRunLimits = {
+          maxWallSeconds: Math.min(
+            this.runtimeLimits.maxWallSeconds,
+            run.profileSnapshot?.timeout ?? Number.POSITIVE_INFINITY,
+          ),
+          maxTurns:
+            run.runner === "external"
+              ? "notApplicable"
+              : Math.min(
+                  this.runtimeLimits.maxTurns,
+                  run.profileSnapshot?.turnBudget ?? Number.POSITIVE_INFINITY,
+                ),
+          wrapUpRatio: this.runtimeLimits.wrapUpRatio,
+          tokenBudget: run.profileSnapshot?.tokenBudget,
+          costBudget: run.profileSnapshot?.costBudget,
+        };
+        const migratedLegacyLimits = !run.originalEffectiveLimits;
+        run.originalEffectiveLimits ??= legacyLimits;
+        run.leaseHistory ??= [];
+        run.statusChangedAt ??= run.finishedAt ?? run.startedAt;
+        run.statusTransitions ??= [
+          {
+            to: run.status,
+            at: run.statusChangedAt,
+            generation: 0,
+            cause: "legacy_restore",
+          },
+        ];
+        run.lastEventAt ??= run.activity.at(-1)?.at ?? run.startedAt;
+        run.terminationHistory ??= [];
+        run.wrappingUp ??= false;
+        if (migratedLegacyLimits && !run.terminationReason && !ACTIVE_STATUSES.has(run.status)) {
+          run.terminationReason = {
+            code: "legacy_unknown",
+            at: run.finishedAt ?? run.startedAt,
+            generation: 0,
+          };
+          run.terminationHistory.push({ ...run.terminationReason });
+        }
         run.capabilityPolicy ??= {
           requested: [...(run.capabilityNames ?? [])],
           capabilities: [],
@@ -2002,9 +3207,42 @@ export class SubagentManager {
           ],
         };
         if (ACTIVE_STATUSES.has(run.status)) {
+          const at = Date.now();
+          const generation = run.activeLeaseGeneration ?? run.leaseHistory.at(-1)?.generation ?? 0;
+          const reason: StructuredTerminationReason = migratedLegacyLimits
+            ? run.terminationReason?.code === "legacy_unknown"
+              ? run.terminationReason
+              : { code: "legacy_unknown", at: iso(at), generation }
+            : { code: "parent_shutdown", at: iso(at), generation };
+          run.terminationReason = reason;
+          if (
+            run.terminationHistory.at(-1)?.code !== reason.code ||
+            run.terminationHistory.at(-1)?.at !== reason.at
+          )
+            run.terminationHistory.push(reason);
+          run.statusTransitions.push({
+            from: run.status,
+            to: "parked",
+            at: reason.at,
+            generation,
+            cause: reason.code,
+          });
           run.status = "parked";
-          run.finishedAt ??= new Date().toISOString();
-          recordActivity(run, "park", "restored after parent shutdown; manual revival required");
+          run.statusChangedAt = reason.at;
+          run.finishedAt = reason.at;
+          run.activeLeaseGeneration = undefined;
+          const lease = run.leaseHistory.find((candidate) => candidate.generation === generation);
+          if (lease) {
+            lease.endedAt ??= reason.at;
+            lease.endReason ??= reason.code;
+          }
+          this.appendActivity(
+            run,
+            "park",
+            migratedLegacyLimits
+              ? "legacy run restored without trustworthy captured limits; revival disabled"
+              : "restored after parent shutdown; manual revival required",
+          );
         }
         if (run.worktree) {
           try {
@@ -2014,9 +3252,39 @@ export class SubagentManager {
             );
           } catch (cause) {
             const message = cause instanceof Error ? cause.message : String(cause);
-            run.status = "failed";
-            run.error = `Persisted worktree rejected: ${message}`;
-            run.worktree = undefined;
+            const at = iso();
+            const generation = run.leaseHistory.at(-1)?.generation ?? 0;
+            const hardReason =
+              run.terminationReason &&
+              ["wall_limit", "turn_limit", "token_limit", "cost_limit"].includes(
+                run.terminationReason.code,
+              );
+            if (!hardReason) {
+              const reason: StructuredTerminationReason = {
+                code: "startup_error",
+                at,
+                generation,
+                phase: "startup",
+              };
+              if (run.status !== "failed")
+                run.statusTransitions.push({
+                  from: run.status,
+                  to: "failed",
+                  at,
+                  generation,
+                  cause: "startup_error",
+                });
+              run.status = "failed";
+              run.statusChangedAt = at;
+              run.finishedAt = at;
+              run.terminationReason = reason;
+              run.terminationHistory.push(reason);
+            }
+            run.error = `Persisted worktree rejected and retained: ${message}`;
+            run.cleanupFailure = {
+              at,
+              message: `Safe cleanup cannot be proven after validation failed: ${message}`,
+            };
             run.candidate = undefined;
             this.diagnostics.push({
               path: this.statePath(parent),
@@ -2039,7 +3307,10 @@ export class SubagentManager {
           } catch (cause) {
             const message = cause instanceof Error ? cause.message : String(cause);
             mission.status = "failed";
-            mission.worktree = undefined;
+            mission.cleanupFailure = {
+              at: iso(),
+              message: `Safe cleanup cannot be proven after validation failed: ${message}`,
+            };
             mission.candidate = undefined;
             this.diagnostics.push({
               path: this.statePath(parent),
@@ -2050,6 +3321,7 @@ export class SubagentManager {
         }
         this.missions.set(mission.id, mission);
       }
+      this.restoreIntegrationRequests();
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== "ENOENT")
         this.diagnostics.push({
@@ -2061,34 +3333,12 @@ export class SubagentManager {
   }
 
   private async parkActiveForShutdown(): Promise<void> {
+    const active = this.store.active();
+    const activeIds = new Set(active.map((run) => run.id));
     await Promise.all(
-      this.store.active().map(async (run) => {
-        try {
-          await this.abortTransport(run);
-        } catch (cause) {
-          this.diagnostics.push({
-            path: `subagent-runtime:${run.id}`,
-            code: "lifecycle",
-            message: `Could not abort child transport: ${cause instanceof Error ? cause.message : String(cause)}`,
-          });
-        }
-        try {
-          await this.parkTransport(run);
-        } catch (cause) {
-          this.diagnostics.push({
-            path: `subagent-runtime:${run.id}`,
-            code: "lifecycle",
-            message: `Could not park child transport: ${cause instanceof Error ? cause.message : String(cause)}`,
-          });
-        }
-        if (ACTIVE_STATUSES.has(run.status)) {
-          run.status = "parked";
-          run.finishedAt = new Date().toISOString();
-          recordActivity(run, "park", "parent session closed; run stopped and parked");
-        }
-        this.claims.release(run.id);
-        this.inbox.cancelByRun(run.id, "Parent session closed.");
-      }),
+      active
+        .filter((run) => !run.parentId || !activeIds.has(run.parentId))
+        .map((run) => this.beginTermination(run, "parent_shutdown", { phase: "cleanup" })),
     );
   }
 

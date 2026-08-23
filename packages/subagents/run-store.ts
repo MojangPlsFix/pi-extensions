@@ -36,9 +36,12 @@ export class RunStore {
     const all = this.all();
     return {
       active: all.filter((run) => ACTIVE.has(run.status)).length,
+      running: all.filter((run) => ["queued", "starting", "running"].includes(run.status)).length,
+      wrappingUp: all.filter((run) => ACTIVE.has(run.status) && run.wrappingUp).length,
       blocked: all.filter((run) => run.status === "blocked").length,
       parked: all.filter((run) => run.status === "parked").length,
       failed: all.filter((run) => run.status === "failed").length,
+      stopped: all.filter((run) => run.status === "stopped").length,
       writers: all.filter((run) => ACTIVE.has(run.status) && run.profile.class === "write").length,
       total: all.length,
     };
@@ -47,7 +50,7 @@ export class RunStore {
   prune(policy: { days: number; entries: number }, now = Date.now()): RunRecord[] {
     const cutoff = now - policy.days * 24 * 60 * 60 * 1_000;
     const terminal = this.all()
-      .filter((run) => !ACTIVE.has(run.status))
+      .filter((run) => !ACTIVE.has(run.status) && !run.cleanupFailure)
       .sort(
         (left, right) =>
           Date.parse(right.finishedAt ?? right.startedAt) -

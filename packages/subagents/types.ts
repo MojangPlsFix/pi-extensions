@@ -32,6 +32,74 @@ export type RunActivityKind =
 
 export type RunActivity = { at: string; kind: RunActivityKind; text: string };
 
+export type TerminationReasonCode =
+  | "completed"
+  | "wall_limit"
+  | "turn_limit"
+  | "token_limit"
+  | "cost_limit"
+  | "explicit_stop"
+  | "parent_shutdown"
+  | "session_change"
+  | "startup_error"
+  | "runner_error"
+  | "ancestor_terminated"
+  | "legacy_unknown";
+
+export type EffectiveRunLimits = {
+  maxWallSeconds: number;
+  maxTurns: number | "notApplicable";
+  wrapUpRatio: number;
+  tokenBudget?: number;
+  costBudget?: number;
+};
+
+export type RunLease = {
+  id: string;
+  generation: number;
+  startedAt: string;
+  acceptedAt?: string;
+  wrapAt: string;
+  deadlineAt: string;
+  wrapTriggeredAt?: string;
+  wrapCause?: "wall" | "turn";
+  endedAt?: string;
+  endReason?: TerminationReasonCode;
+  effectiveLimits: EffectiveRunLimits;
+};
+
+export type StatusTransition = {
+  from?: RunStatus;
+  to: RunStatus;
+  at: string;
+  generation: number;
+  cause: string;
+};
+
+export type RunOperation = {
+  kind:
+    | "startup"
+    | "worktree"
+    | "transport"
+    | "model"
+    | "tool"
+    | "supervisor"
+    | "finalization"
+    | "cleanup";
+  name: string;
+  startedAt: string;
+  generation: number;
+};
+
+export type StructuredTerminationReason = {
+  code: TerminationReasonCode;
+  at: string;
+  generation: number;
+  phase?: "startup" | "execution" | "finalization" | "cleanup";
+  limit?: { kind: "wall" | "turn" | "token" | "cost"; maximum: number; observed: number };
+  ancestorRunId?: string;
+};
+
 export type Budget = { timeoutMs?: number; turns?: number; tokens?: number; cost?: number };
 export type ProfileMetadata = {
   enabled?: boolean;
@@ -95,6 +163,8 @@ export type TaskOwnership = {
   key: string;
   owns: string[];
   deliverable: string;
+  acceptance: string;
+  stopConditions: string[];
   workspace: "shared" | "worktree";
 };
 
@@ -112,10 +182,24 @@ export type RunRecord = {
   runner: RunnerKind;
   startedAt: string;
   finishedAt?: string;
+  /** Immutable limits captured on first allocation. Revival may only tighten them. */
+  originalEffectiveLimits: EffectiveRunLimits;
+  leaseHistory: RunLease[];
+  activeLeaseGeneration?: number;
+  statusChangedAt: string;
+  statusTransitions: StatusTransition[];
+  lastEventAt?: string;
+  currentOperation?: RunOperation;
+  terminationReason?: StructuredTerminationReason;
+  terminationHistory: StructuredTerminationReason[];
+  wrappingUp: boolean;
+  blockedSince?: string;
   sessionDir: string;
   sessionFile?: string;
   report: string;
   error?: string;
+  /** A cleanup quarantine that keeps unsafe-to-remove worktree state in retained history. */
+  cleanupFailure?: { at: string; message: string };
   usage: Usage;
   /** Child usage already attached to a parent Pi tool result. */
   accountedUsage?: Usage;
@@ -149,9 +233,12 @@ export type RunSnapshot = Omit<
 
 export type RunSummary = {
   active: number;
+  running: number;
+  wrappingUp: number;
   blocked: number;
   parked: number;
   failed: number;
+  stopped: number;
   writers: number;
   total: number;
 };
@@ -202,11 +289,34 @@ export function runSnapshot(run: RunRecord, now = Date.now()): RunSnapshot {
     ownership: {
       ...run.ownership,
       owns: [...run.ownership.owns],
+      stopConditions: [...run.ownership.stopConditions],
     },
     status: run.status,
     runner: run.runner,
     startedAt: run.startedAt,
     finishedAt: run.finishedAt,
+    originalEffectiveLimits: { ...run.originalEffectiveLimits },
+    leaseHistory: run.leaseHistory.map((lease) => ({
+      ...lease,
+      effectiveLimits: { ...lease.effectiveLimits },
+    })),
+    activeLeaseGeneration: run.activeLeaseGeneration,
+    statusChangedAt: run.statusChangedAt,
+    statusTransitions: run.statusTransitions.map((transition) => ({ ...transition })),
+    lastEventAt: run.lastEventAt,
+    currentOperation: run.currentOperation ? { ...run.currentOperation } : undefined,
+    terminationReason: run.terminationReason
+      ? {
+          ...run.terminationReason,
+          limit: run.terminationReason.limit ? { ...run.terminationReason.limit } : undefined,
+        }
+      : undefined,
+    terminationHistory: run.terminationHistory.map((reason) => ({
+      ...reason,
+      limit: reason.limit ? { ...reason.limit } : undefined,
+    })),
+    wrappingUp: run.wrappingUp,
+    blockedSince: run.blockedSince,
     elapsedMs: Math.max(
       0,
       (run.finishedAt ? Date.parse(run.finishedAt) : now) - Date.parse(run.startedAt),
@@ -215,6 +325,7 @@ export function runSnapshot(run: RunRecord, now = Date.now()): RunSnapshot {
     sessionFile: run.sessionFile,
     report: run.report,
     error: run.error,
+    cleanupFailure: run.cleanupFailure ? { ...run.cleanupFailure } : undefined,
     usage: { ...run.usage },
     turns: run.turns,
     activity: run.activity.map((entry) => ({ ...entry })),

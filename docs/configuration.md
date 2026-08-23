@@ -9,7 +9,7 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 - The `search` tool selects its backend at run time. `github-copilot` uses the authenticated local Copilot CLI. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider fallback.
 - Hackler resolves model policy when it starts. Resolution checks an explicit review override, `models.overrides`, profile frontmatter, `models.default`, and the parent snapshot. `inherit` selects the parent value.
 
-Use the [Hackler model-selection guide](../packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral criteria and local tests.
+Use the [Hackler model-selection guide](../packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels. Use the [orchestration evaluation guide](../packages/subagents/ORCHESTRATION_EVALUATION.md) to compare topologies under matched aggregate budgets.
 
 ### Hackler model providers
 
@@ -85,7 +85,10 @@ The file requires `schemaVersion: 2`. Version 2 rejects version 1 keys.
   "runtime": {
     "maxActive": 4,
     "maxSharedWriters": 1,
-    "maxDepth": 2
+    "maxDepth": 2,
+    "maxWallSeconds": 2700,
+    "maxTurns": 128,
+    "wrapUpRatio": 0.8
   },
   "retention": {
     "days": 30,
@@ -116,11 +119,23 @@ The file requires `schemaVersion: 2`. Version 2 rejects version 1 keys.
 
 The manager checks the selected model and provider authentication before it allocates a session. Completed runs park automatically and release active capacity.
 
+The runtime accepts 1 through 32 active runs and 0 through 8 shared writers. Nesting depth cannot exceed 2.
+
+The wall limit accepts 1 through 2,700 seconds. The turn limit accepts 1 through 128 turns. The wrap ratio must be greater than zero and less than one.
+
+A run uses the minimum applicable global, profile, and external-runner wall limit. A non-external run uses the minimum global and profile turn limit.
+
+Each start or revival opens a wall lease. A revival keeps the captured profile and capability policy, and later settings can only tighten limits.
+
+`subagent_collect` waits 60 seconds by default. Set `timeoutSeconds` from 10 through 3,600 seconds for another bounded wait.
+
 User profiles use `~/.pi/agent/subagents/agents/*.md`. Trusted project profiles use `<cwd>/.pi/agents/*.md`.
 
 The user configuration owns capability extension paths, package names, executable prefixes, and environment-variable names. Project profiles can select these capabilities after project trust is active.
 
-Run `/agents doctor --json` to inspect effective profile and capability policy. Read [the Hackler documentation](../packages/subagents/README.md) for the full schema and migration steps.
+Run `/agents doctor --json` to inspect effective profile and capability policy. Run `/agents trace --json` to inspect the redacted runtime evaluation trace.
+
+The trace excludes task text, reports, request text, ownership, and file paths. Read [the Hackler documentation](../packages/subagents/README.md) for the full schema and migration steps.
 
 The activity widget shows active task status. `/agents` contains lineage, reports, requests, profile controls, and diagnostics. New transcripts stay at `<agent-dir>/subagents/sessions/<parent>/<child>`. Stats also reads the legacy `<agent-dir>/sessions/subagents` location.
 

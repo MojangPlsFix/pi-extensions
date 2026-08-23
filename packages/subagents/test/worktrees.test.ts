@@ -80,6 +80,104 @@ describe("mission worktrees", () => {
     await removeMissionWorktree(worktree, { force: true });
   });
 
+  it("honors pre-cancellation across every public Git operation", async () => {
+    const root = await repository();
+    const base = await fs.mkdtemp(join(tmpdir(), "subagents-worktree-base-"));
+    cleanup.push(base);
+    const worktree = await createMissionWorktree(root, "cancel-all", base);
+    const controller = new AbortController();
+    controller.abort(new Error("mission cancelled"));
+    const candidate = { patch: "", hasChanges: false };
+
+    await expect(inspectGitRepository(root, controller.signal)).rejects.toThrow(
+      "mission cancelled",
+    );
+    await expect(
+      createMissionWorktree(root, "never-created", base, controller.signal),
+    ).rejects.toThrow("mission cancelled");
+    await expect(captureWorktreeCandidate(worktree, controller.signal)).rejects.toThrow(
+      "mission cancelled",
+    );
+    await expect(checkCandidateApplies(root, candidate, controller.signal)).rejects.toThrow(
+      "mission cancelled",
+    );
+    await expect(applyCandidate(root, candidate, controller.signal)).rejects.toThrow(
+      "mission cancelled",
+    );
+    await expect(validateMissionWorktree(worktree, root, controller.signal)).rejects.toThrow(
+      "mission cancelled",
+    );
+    await expect(
+      removeMissionWorktree(worktree, { force: true, signal: controller.signal }),
+    ).rejects.toThrow("mission cancelled");
+    expect(await fs.realpath(worktree.root)).toBe(worktree.root);
+    await removeMissionWorktree(worktree, { force: true });
+  });
+
+  it("cancels worktree creation by escalating against the owned Git process group", async () => {
+    if (process.platform === "win32") return;
+    const root = await repository();
+    const base = await fs.mkdtemp(join(tmpdir(), "subagents-worktree-base-"));
+    cleanup.push(base);
+    const hookDirectory = join(base, "hooks");
+    const hook = join(hookDirectory, "post-checkout");
+    const marker = join(base, "hook-child.pid");
+    await fs.mkdir(hookDirectory);
+    await fs.writeFile(
+      hook,
+      `#!/usr/bin/env node\nconst {spawn}=require('node:child_process');const fs=require('node:fs');process.on('SIGINT',()=>{});process.on('SIGTERM',()=>{});const c=spawn(process.execPath,['-e',"process.on('SIGINT',()=>{});process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:'ignore'});fs.writeFileSync(${JSON.stringify(marker)},String(c.pid));setInterval(()=>{},1000);\n`,
+      { mode: 0o755 },
+    );
+    git(root, "config", "core.hooksPath", hookDirectory);
+    const controller = new AbortController();
+    let preparedRoot: string | undefined;
+    const creating = createMissionWorktree(root, "cancel-group", {
+      baseDirectory: base,
+      signal: controller.signal,
+      onPrepared: (worktree) => {
+        preparedRoot = worktree.root;
+      },
+    });
+    let childPid = 0;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        childPid = Number(await fs.readFile(marker, "utf8"));
+        if (childPid) break;
+      } catch {
+        await new Promise((resolveWait) => setTimeout(resolveWait, 20));
+      }
+    }
+    expect(childPid).toBeGreaterThan(0);
+    controller.abort(new Error("stop git"));
+    await expect(creating).rejects.toThrow(/stop git.*retained/iu);
+    expect(preparedRoot).toBe(join(base, "pi-mission-cancel-group"));
+    expect(() => process.kill(childPid, 0)).toThrow();
+  }, 10_000);
+
+  it("retains an unregistered partial worktree when safe cleanup cannot be proven", async () => {
+    const root = await repository();
+    const base = await fs.mkdtemp(join(tmpdir(), "subagents-worktree-base-"));
+    cleanup.push(base);
+    const state = await inspectGitRepository(root);
+    const partialRoot = join(base, "pi-mission-partial");
+    await fs.mkdir(partialRoot);
+    await fs.writeFile(join(partialRoot, "sentinel.txt"), "retain\n");
+
+    await expect(
+      removeMissionWorktree(
+        {
+          missionId: "partial",
+          root: partialRoot,
+          cwd: partialRoot,
+          baseCommit: state!.head,
+          sourceRoot: state!.root,
+        },
+        { force: true },
+      ),
+    ).rejects.toThrow(/Safe cleanup cannot be proven.*retained/iu);
+    expect(await fs.readFile(join(partialRoot, "sentinel.txt"), "utf8")).toBe("retain\n");
+  });
+
   it("detects an overlapping source change before integration", async () => {
     const root = await repository();
     const base = await fs.mkdtemp(join(tmpdir(), "subagents-worktree-base-"));

@@ -15,6 +15,9 @@ export const PI_AGENT_DIR =
 export const MAX_ACTIVE = 4;
 export const MAX_SHARED_WRITERS = 1;
 export const MAX_DEPTH = 2;
+export const MAX_WALL_SECONDS = 2700;
+export const MAX_TURNS = 128;
+export const DEFAULT_WRAP_UP_RATIO = 0.8;
 export const DEFAULT_RETENTION_DAYS = 30;
 export const DEFAULT_RETENTION_ENTRIES = 200;
 export const SUBAGENT_ROOT = join(PI_AGENT_DIR, "subagents");
@@ -26,7 +29,14 @@ export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhig
 export type ThinkingPolicy = (typeof THINKING_LEVELS)[number] | "inherit";
 export type ModelPolicy = string | "inherit";
 export type ModelSelection = { model?: ModelPolicy; thinking?: ThinkingPolicy };
-export type RuntimeLimits = { maxActive: number; maxSharedWriters: number; maxDepth: number };
+export type RuntimeLimits = {
+  maxActive: number;
+  maxSharedWriters: number;
+  maxDepth: number;
+  maxWallSeconds: number;
+  maxTurns: number;
+  wrapUpRatio: number;
+};
 export type RetentionPolicy = { days: number; entries: number };
 export type ModelDefaults = {
   default?: ModelSelection;
@@ -67,7 +77,14 @@ export function herdrEnvironmentAvailable(env: NodeJS.ProcessEnv = process.env):
 
 export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   schemaVersion: 2,
-  runtime: { maxActive: MAX_ACTIVE, maxSharedWriters: MAX_SHARED_WRITERS, maxDepth: MAX_DEPTH },
+  runtime: {
+    maxActive: MAX_ACTIVE,
+    maxSharedWriters: MAX_SHARED_WRITERS,
+    maxDepth: MAX_DEPTH,
+    maxWallSeconds: MAX_WALL_SECONDS,
+    maxTurns: MAX_TURNS,
+    wrapUpRatio: DEFAULT_WRAP_UP_RATIO,
+  },
   retention: { days: DEFAULT_RETENTION_DAYS, entries: DEFAULT_RETENTION_ENTRIES },
   models: { overrides: {} },
   capabilities: {},
@@ -115,7 +132,20 @@ function only(value: Record<string, unknown>, keys: readonly string[], location:
 
 function parseRuntime(value: unknown, location = "runtime"): RuntimeLimits {
   const candidate = object(value, location);
-  only(candidate, ["maxActive", "maxSharedWriters", "maxDepth"], location);
+  only(
+    candidate,
+    ["maxActive", "maxSharedWriters", "maxDepth", "maxWallSeconds", "maxTurns", "wrapUpRatio"],
+    location,
+  );
+  const wrapUpRatio =
+    candidate.wrapUpRatio === undefined ? DEFAULT_WRAP_UP_RATIO : candidate.wrapUpRatio;
+  if (
+    typeof wrapUpRatio !== "number" ||
+    !Number.isFinite(wrapUpRatio) ||
+    wrapUpRatio <= 0 ||
+    wrapUpRatio >= 1
+  )
+    throw new Error(`${location}.wrapUpRatio must be a number greater than 0 and less than 1.`);
   return {
     maxActive: integer(candidate.maxActive ?? MAX_ACTIVE, `${location}.maxActive`, 1, 32),
     maxSharedWriters: integer(
@@ -125,6 +155,19 @@ function parseRuntime(value: unknown, location = "runtime"): RuntimeLimits {
       8,
     ),
     maxDepth: integer(candidate.maxDepth ?? MAX_DEPTH, `${location}.maxDepth`, 0, MAX_DEPTH),
+    maxWallSeconds: integer(
+      candidate.maxWallSeconds === undefined ? MAX_WALL_SECONDS : candidate.maxWallSeconds,
+      `${location}.maxWallSeconds`,
+      1,
+      MAX_WALL_SECONDS,
+    ),
+    maxTurns: integer(
+      candidate.maxTurns === undefined ? MAX_TURNS : candidate.maxTurns,
+      `${location}.maxTurns`,
+      1,
+      MAX_TURNS,
+    ),
+    wrapUpRatio,
   };
 }
 

@@ -158,7 +158,13 @@ Task decomposability and single-agent capability changed the result.
 
 Neither method improved agent results reliably. Verification and context limits affected both methods.
 
-**Role inference:** Compare orchestration with a strong single-agent baseline under equal tools and budgets. Measure completed work, coordination cost, duplicated work, and synthesis errors.
+**Role inference:** Compare orchestration with a strong parent-only baseline under matched aggregate budgets. Measure completed work, coordination cost, duplicate work, and synthesis errors.
+
+Test functional specialization before persona-only prompts. A functional specialist has distinct authority, tools, context, ownership, and acceptance criteria. One persona-prompting study found no consistent factual-performance gain from persona system prompts.[^personas]
+
+That study did not test Hackler-style functional controls. The cited studies do not prove that functional specialization always wins. Correlated model errors can remain despite apparent diversity.[^correlated-errors]
+
+Compare adaptive waves with a static initial batch and fixed fan-out. Stop delegation when no substantial independent task is ready.
 
 Plancraft and WorkBench can test component skills. They do not replace local software decomposition and dependency tests.
 
@@ -194,7 +200,11 @@ Other communication designs can behave differently. Measure tokens, latency, dup
 
 Do not assume that the most expensive or strongest overall model must orchestrate. Test Orchestrator and Worker strength separately.
 
-Delegate only independent work with clear ownership and deliverables. Keep dependent work sequential until its inputs are ready.
+Delegate only independent work with clear ownership, deliverables, acceptance criteria, and stop conditions. Keep dependent work sequential until its inputs are ready.
+
+Prefer sparse task-specific communication. Recompute the ready frontier after each wave instead of filling every slot.
+
+Use [ORCHESTRATION_EVALUATION.md](ORCHESTRATION_EVALUATION.md) for the matched five-policy comparison across four task strata. That guide defines runtime trace use, private local gates, and future-profile admission.
 
 ## Run a local evaluation
 
@@ -214,6 +224,8 @@ Use this procedure for one profile at a time:
 Five repetitions are a local heuristic, not an evidence-based adequacy threshold.
 
 Keep paired task-level results and report uncertainty when you compare close conditions.[^paired-evals] Use a power analysis for consequential decisions.
+
+Keep private local task distributions out of the repository. Continuous integration must use deterministic fixtures, not paid live-provider runs.
 
 Use pass criteria before you inspect model names. Include severe failures even when the average score is high.
 
@@ -347,6 +359,7 @@ Provider and commercial sources can describe interfaces or benchmark methods. Th
 [^swe-live]: [SWE-bench Goes Live!](https://papers.nips.cc/paper_files/paper/2025/hash/d83c4a745789690f82e86d0ef752ae7c-Abstract-Datasets_and_Benchmarks_Track.html), NeurIPS 2025.
 [^review-study]: [Are LLMs reliable code reviewers?](https://doi.org/10.1007/s10515-026-00638-5), Automated Software Engineering, June 26, 2026.
 [^persuasion]: [The Persuasion Paradox](https://arxiv.org/abs/2604.03237), 2026 preprint.
+[^personas]: [When “A Helpful Assistant” Is Not Really Helpful: Personas in System Prompts Do Not Improve Performances of Large Language Models](https://aclanthology.org/2024.findings-emnlp.888/), Findings of EMNLP 2024, November 2024.
 [^correlated-errors]: [Correlated Errors in Large Language Models](https://proceedings.mlr.press/v267/kim25e.html), ICML 2025.
 [^apple-panels]: [Nine Judges, Two Effective Votes](https://doi.org/10.48550/arXiv.2605.29800), May 28, 2026 preprint.
 [^plancraft]: [Plancraft: an evaluation dataset for planning with LLM agents](https://openreview.net/pdf?id=nSV8Depcpx), COLM 2025.

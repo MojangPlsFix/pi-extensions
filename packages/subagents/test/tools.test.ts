@@ -1,7 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import type { SubagentManager } from "../manager.js";
-import { registerSubagentTools } from "../tools.js";
+import {
+  LEGACY_STOP_CONDITION,
+  prepareDispatchArguments,
+  registerSubagentTools,
+} from "../tools.js";
 
 function usage() {
   return {
@@ -16,26 +20,41 @@ function usage() {
 
 describe("Subagent parent usage accounting", () => {
   it("attaches collected child usage as nested Pi tool usage", async () => {
-    const tools = new Map<string, { execute: (...args: any[]) => Promise<any>; label?: string }>();
+    const tools = new Map<
+      string,
+      {
+        execute: (...args: any[]) => Promise<any>;
+        label?: string;
+        description?: string;
+        parameters?: any;
+        prepareArguments?: (input: unknown) => unknown;
+      }
+    >();
     const pi = {
       registerTool(definition: {
         name: string;
         label?: string;
+        description?: string;
+        parameters?: any;
+        prepareArguments?: (input: unknown) => unknown;
         execute: (...args: any[]) => Promise<any>;
       }) {
         tools.set(definition.name, definition);
       },
     } as unknown as ExtensionAPI;
     const manager = {
-      collect: vi.fn(async () => [
-        {
-          id: "scout-1",
-          name: "scout",
-          status: "parked",
-          ownership: { owns: [] },
-          report: "done",
-        },
-      ]),
+      collect: vi.fn(async () => ({
+        runs: [
+          {
+            id: "scout-1",
+            name: "scout",
+            status: "parked",
+            ownership: { owns: [] },
+            report: "done",
+          },
+        ],
+        waitReason: "timeout",
+      })),
       takeUnreportedUsage: vi.fn(() => usage()),
       pendingRequests: vi.fn(() => []),
       respondRequest: vi.fn(async (id: string, answer: string) => ({
@@ -62,10 +81,37 @@ describe("Subagent parent usage accounting", () => {
       "Steer Hackler",
       "Stop Hackler",
     ]);
+    const oldArguments = {
+      tasks: [
+        {
+          key: "legacy",
+          agent: "scout",
+          task: "Map the parser.",
+          owns: ["path:src/parser"],
+          deliverable: "Parser map.",
+        },
+      ],
+    };
+    const prepared = tools.get("subagent_dispatch")!.prepareArguments!(oldArguments) as any;
+    expect(prepared.tasks[0]).toMatchObject({
+      acceptance: "Parser map.",
+      stopConditions: [LEGACY_STOP_CONDITION],
+    });
+    expect(oldArguments.tasks[0]).not.toHaveProperty("acceptance");
+    expect(prepareDispatchArguments(null)).toBeNull();
+    expect(tools.get("subagent_dispatch")!.description).toContain(
+      "never invent work to fill capacity",
+    );
+
+    const timeoutSchema = tools.get("subagent_collect")!.parameters.properties.timeoutSeconds;
+    expect(timeoutSchema).toMatchObject({ minimum: 10, maximum: 3600 });
     const result = await tools
       .get("subagent_collect")!
-      .execute("tool-call", { ids: ["scout-1"], wait: "all" }, undefined);
+      .execute("tool-call", { ids: ["scout-1"], wait: "all", timeoutSeconds: 45 }, undefined);
 
+    expect(manager.collect).toHaveBeenCalledWith(["scout-1"], "all", undefined, 45);
+    expect(result.details.waitReason).toBe("timeout");
+    expect(result.content[0].text).toContain("Wait ended: timeout");
     expect(result.usage).toEqual({
       input: 100,
       output: 25,

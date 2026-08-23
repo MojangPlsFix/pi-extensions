@@ -14,10 +14,80 @@ function expandHint(): string {
   }
 }
 
+function duration(ms: number): string {
+  const seconds = Math.max(0, Math.floor(ms / 1_000));
+  return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function age(value: string | undefined, now = Date.now()): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.max(0, now - parsed) : undefined;
+}
+
+export function runState(run: RunSnapshot, now = Date.now()): string {
+  if (run.status === "blocked") return "blocked";
+  if (run.status === "failed") return "failed";
+  if (run.status === "stopped") return "stopped";
+  if (run.status === "parked") return "done (parked)";
+  if (run.status === "queued" || run.status === "starting") return "starting";
+  if (run.wrappingUp) return "wrapping up";
+  const lastEventAge = age(run.lastEventAt, now);
+  return lastEventAge !== undefined && lastEventAge >= 30_000
+    ? `quiet · no event for ${duration(lastEventAge)}`
+    : "working";
+}
+
 function runLine(run: RunSnapshot): string {
   const icon = run.status === "running" ? "●" : run.status === "blocked" ? "!" : "○";
   const model = run.effectiveModel ? ` · ${safeDisplayText(run.effectiveModel)}` : "";
-  return `${icon} ${safeDisplayText(run.name)} · ${run.status}${model} · ${safeDisplayText(run.ownership.key)}`;
+  return `${icon} ${safeDisplayText(run.name)} · ${runState(run)}${model} · ${safeDisplayText(run.ownership.key)}`;
+}
+
+export function runOperationalLines(run: RunSnapshot, now = Date.now()): string[] {
+  const leases = run.leaseHistory ?? [];
+  const lease =
+    leases.find((candidate) => candidate.generation === run.activeLeaseGeneration) ?? leases.at(-1);
+  const end = run.finishedAt ? Math.min(now, Date.parse(run.finishedAt)) : now;
+  const wall = lease
+    ? `lease ${duration(end - Date.parse(lease.startedAt))} elapsed · ${duration(Date.parse(lease.deadlineAt) - end)} remaining`
+    : "lease unavailable";
+  const turnLimit = lease?.effectiveLimits.maxTurns ?? run.originalEffectiveLimits?.maxTurns;
+  const usedTurns = run.turns ?? 0;
+  const turns =
+    turnLimit === "notApplicable"
+      ? "turns not applicable (external)"
+      : turnLimit === undefined
+        ? "turns unavailable"
+        : `turns ${usedTurns} used · ${Math.max(0, turnLimit - usedTurns)} remaining`;
+  const lastEventAge = age(run.lastEventAt, now);
+  const operationAge = age(run.currentOperation?.startedAt, now);
+  return [
+    `${wall} · ${turns}`,
+    lastEventAge === undefined
+      ? "last event unavailable"
+      : `last event ${duration(lastEventAge)} ago`,
+    ...(run.currentOperation
+      ? [
+          `operation ${run.currentOperation.kind}: ${safeDisplayText(run.currentOperation.name)} · ${duration(operationAge ?? 0)} old`,
+        ]
+      : []),
+    ...(run.blockedSince ? [`blocked for ${duration(age(run.blockedSince, now) ?? 0)}`] : []),
+    ...(run.terminationReason
+      ? [
+          `termination ${run.terminationReason.code}${run.terminationReason.phase ? ` · phase ${run.terminationReason.phase}` : ""}`,
+        ]
+      : []),
+    ...(run.cleanupFailure
+      ? [`cleanup retained · ${safeDisplayText(run.cleanupFailure.message)}`]
+      : []),
+  ];
+}
+
+export function runReport(run: RunSnapshot): string {
+  if (run.status !== "failed") return run.report || run.error || "(no report yet)";
+  const reason = `Failure reason: ${run.terminationReason?.code ?? "legacy_unknown"}${run.error ? ` · ${run.error}` : ""}`;
+  return run.report ? `${reason}\n\nPartial report:\n${run.report}` : reason;
 }
 
 function runDetails(details: unknown): RunSnapshot[] {
@@ -112,9 +182,9 @@ function nestedUsage(usage: Usage) {
 
 function supervisorRequestLines(requests: readonly SupervisorRequest[]): string[] {
   return requests.flatMap((request) => [
-    `- ${request.id} · ${request.kind} · ${safeDisplayText(request.title)} · from ${request.fromRunId}`,
+    `- ${request.id} · ${request.kind} · ${safeDisplayText(request.title)} · from ${request.fromRunId} · ${duration(age(request.createdAt) ?? 0)} old`,
     `  ${safeDisplayText(request.detail)}`,
-    `  choices: ${request.choices.map((choice) => choice.value).join(", ") || "free-form response"}`,
+    `  required action: subagent_respond ${request.id} · choices: ${request.choices.map((choice) => choice.value).join(", ") || "free-form response"}`,
   ]);
 }
 
@@ -126,30 +196,90 @@ const dispatchTaskSchema = Type.Object({
     minItems: 1,
     description: "Owned paths, symbols, or topics. Prefix with path:, symbol:, or topic:.",
   }),
-  deliverable: Type.String({ description: "Concrete result this child must return." }),
+  deliverable: Type.String({
+    minLength: 1,
+    description: "Concrete result this child must return.",
+  }),
+  acceptance: Type.String({
+    minLength: 1,
+    description: "Observable criteria the result must satisfy before it is accepted.",
+  }),
+  stopConditions: Type.Array(Type.String({ minLength: 1 }), {
+    minItems: 1,
+    description: "Conditions that end work with either completion or a reported blocker.",
+  }),
   context: Type.Optional(
     Type.Union([Type.Literal("fresh"), Type.Literal("decisions"), Type.Literal("plan")]),
   ),
   workspace: Type.Optional(Type.Union([Type.Literal("shared"), Type.Literal("worktree")])),
 });
 
+export const LEGACY_STOP_CONDITION =
+  "Stop when the deliverable is complete or report a blocker that prevents completion.";
+
+type DispatchArguments = { tasks: DispatchInput[] };
+type LegacyDispatchArguments = {
+  tasks?: unknown;
+  [key: string]: unknown;
+};
+
+/** Add the adaptive contract to persisted calls created before it was required. */
+export function prepareDispatchArguments(input: unknown): DispatchArguments {
+  if (!input || typeof input !== "object") return input as DispatchArguments;
+  const args = input as LegacyDispatchArguments;
+  if (!Array.isArray(args.tasks)) return input as DispatchArguments;
+  return {
+    ...args,
+    tasks: args.tasks.map((value) => {
+      if (!value || typeof value !== "object") return value;
+      const task = value as Record<string, unknown>;
+      return {
+        ...task,
+        ...(task.acceptance === undefined && typeof task.deliverable === "string"
+          ? { acceptance: task.deliverable }
+          : {}),
+        ...(task.stopConditions === undefined ? { stopConditions: [LEGACY_STOP_CONDITION] } : {}),
+      };
+    }),
+  } as DispatchArguments;
+}
+
+type AdaptiveCollectResult = RunSnapshot[] | { runs: RunSnapshot[]; waitReason?: string };
+
+type AdaptiveCollect = (
+  ids: readonly string[] | undefined,
+  wait: CollectMode,
+  signal?: AbortSignal,
+  timeoutSeconds?: number,
+) => Promise<AdaptiveCollectResult>;
+
+function unpackCollectResult(result: AdaptiveCollectResult): {
+  runs: RunSnapshot[];
+  waitReason?: string;
+} {
+  return Array.isArray(result) ? { runs: result } : result;
+}
+
 export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager): void {
   pi.registerTool({
     name: "subagent_dispatch",
     label: "Dispatch Hackler",
     description:
-      "Dispatch one or more bounded Hackler tasks. Batch every independent ready task in one call. Each task must declare disjoint ownership and a deliverable; the parent must not duplicate active delegated scope.",
-    promptSnippet: "Dispatch independent, explicitly owned specialist work in one batch.",
+      "Dispatch one or more bounded Hackler tasks from the substantial independent ready frontier. Each task must declare disjoint ownership, a deliverable, acceptance criteria, and stop conditions; never invent work to fill capacity.",
+    promptSnippet: "Dispatch the smallest justified batch of independent, explicitly owned work.",
     promptGuidelines: [
       "Use Hackler for substantial independent or specialist work, not trivial or tightly sequential steps.",
-      "Enumerate ready work, assign one owner per path/symbol/angle, and batch it in one call.",
+      "Query capacity, rank an oversized ready frontier, and dispatch the smallest justified batch up to free capacity.",
+      "Never invent, split, or duplicate work merely to fill slots; recompute the frontier after each wave.",
       "Use Scout/Researcher/Reviewer/Oracle for read-only work and Worker only for an owned implementation slice.",
       "Do not work on a delegated scope while its child is active; continue only unowned work.",
+      "Resolve blockers before waiting again; after repeated correction, narrow or re-dispatch instead of steering repeatedly.",
       "The parent reviews reports and runs final integrated verification.",
     ],
     parameters: Type.Object({
       tasks: Type.Array(dispatchTaskSchema, { minItems: 1, maxItems: 16 }),
     }),
+    prepareArguments: prepareDispatchArguments,
     async execute(_toolCallId, params, _signal, _update, ctx) {
       try {
         const runs = await manager.dispatch(params.tasks as DispatchInput[], ctx);
@@ -197,11 +327,14 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
               `- ${profile.name} (${profile.class}, ${profile.runner}): ${profile.description}`,
           ),
           "",
+          `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
+          `Counts: running ${hub.runs.filter((run) => ["queued", "starting", "running"].includes(run.status)).length} · wrapping ${hub.runs.filter((run) => run.wrappingUp && ["queued", "starting", "running", "blocked"].includes(run.status)).length} · blocked ${hub.runs.filter((run) => run.status === "blocked").length} · failed ${hub.runs.filter((run) => run.status === "failed").length} · stopped ${hub.runs.filter((run) => run.status === "stopped").length}`,
+          "",
           "Runs:",
           ...(hub.runs.length
             ? hub.runs.map(
                 (run) =>
-                  `${runLine(run)}\n  owns: ${run.ownership.owns.join(", ")}\n  task: ${run.task}`,
+                  `${runLine(run)}\n  ${runOperationalLines(run).join("\n  ")}\n  owns: ${run.ownership.owns.join(", ")}\n  task: ${run.task}`,
               )
             : ["(none)"]),
           "",
@@ -285,13 +418,22 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       wait: Type.Optional(
         Type.Union([Type.Literal("none"), Type.Literal("next"), Type.Literal("all")]),
       ),
+      timeoutSeconds: Type.Optional(
+        Type.Integer({
+          minimum: 10,
+          maximum: 3600,
+          description: "Maximum time to wait before returning current state.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, signal) {
-      const runs = await manager.collect(
+      const collected = await (manager.collect as AdaptiveCollect)(
         params.ids,
         (params.wait ?? "none") as CollectMode,
         signal,
+        params.timeoutSeconds,
       );
+      const { runs, waitReason } = unpackCollectResult(collected);
       const usage = manager.takeUnreportedUsage(params.ids);
       const attached = usageHasValue(usage);
       const requests = manager.pendingRequests();
@@ -299,18 +441,20 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
         runs
           .map(
             (run) =>
-              `## ${run.name} · ${run.status}\nOwned: ${run.ownership.owns.join(", ")}\n\n${run.report || run.error || "(no report yet)"}`,
+              `## ${run.name} · ${runState(run)}\n${runOperationalLines(run).join("\n")}\nOwned: ${run.ownership.owns.join(", ")}\n\n${runReport(run)}`,
           )
           .join("\n\n") || "No matching Hackler runs.";
       const requestText = requests.length
         ? `\n\nPending supervisor requests:\n${supervisorRequestLines(requests).join("\n")}`
         : "";
+      const waitText = waitReason ? `\n\nWait ended: ${safeDisplayText(waitReason)}` : "";
       return {
-        content: [{ type: "text", text: reports + requestText }],
+        content: [{ type: "text", text: reports + requestText + waitText }],
         ...(attached ? { usage: nestedUsage(usage) } : {}),
         details: {
           runs,
           requests,
+          ...(waitReason ? { waitReason } : {}),
           ...(attached ? { subagentUsageAttached: true } : {}),
         },
       };

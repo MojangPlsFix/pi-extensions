@@ -47,6 +47,19 @@ describe("Subagents v2 profiles", () => {
     expect(BUILTIN_PROFILES.find((profile) => profile.name === "researcher")?.tools).toContain(
       "search",
     );
+    expect(
+      Object.fromEntries(
+        BUILTIN_PROFILES.map(({ name, timeout, turnBudget }) => [name, { timeout, turnBudget }]),
+      ),
+    ).toEqual({
+      scout: { timeout: 600, turnBudget: 60 },
+      researcher: { timeout: 1800, turnBudget: 64 },
+      worker: { timeout: 1800, turnBudget: 110 },
+      reviewer: { timeout: 2100, turnBudget: 40 },
+      oracle: { timeout: 2100, turnBudget: 72 },
+      orchestrator: { timeout: 2700, turnBudget: 128 },
+      "plan-reviewer": { timeout: 2100, turnBudget: 40 },
+    });
   });
 
   it("parses the v2 profile fields and rejects legacy schema keys", () => {
@@ -82,6 +95,8 @@ Do the work.`,
       runner: "rpc",
       tools: ["read", "grep"],
       maxDepth: 1,
+      timeout: 30,
+      turnBudget: 4,
       infer: true,
     });
     expect(
@@ -193,6 +208,8 @@ Do the work.`,
     ).toMatchObject({
       name: "scout",
       schemaVersion: 2,
+      timeout: 600,
+      turnBudget: 60,
     });
     await expect(ejectBuiltinProfile("scout", agents)).rejects.toThrow(/already exists/);
     await updateProfileControl("scout", { disabled: true, ejected: true }, configPath);
@@ -226,6 +243,11 @@ Do the work.`,
     const root = await mkdtemp(join(tmpdir(), "subagents-v2-config-"));
     temporary.push(root);
     const path = join(root, "config.json");
+    const firstDefault = await loadSubagentConfig(join(root, "missing.json"));
+    firstDefault.runtime.maxTurns = 1;
+    await expect(loadSubagentConfig(join(root, "missing.json"))).resolves.toMatchObject({
+      runtime: { maxTurns: 128 },
+    });
     await writeFile(
       path,
       JSON.stringify({
@@ -254,6 +276,9 @@ Do the work.`,
       maxActive: MAX_ACTIVE,
       maxSharedWriters: MAX_SHARED_WRITERS,
       maxDepth: MAX_DEPTH,
+      maxWallSeconds: 2700,
+      maxTurns: 128,
+      wrapUpRatio: 0.8,
     });
     expect(config.models.overrides.reviewer).toEqual({
       model: "provider/review",
@@ -267,6 +292,34 @@ Do the work.`,
       JSON.stringify({ schemaVersion: 2, runtime: { maxDepth: MAX_DEPTH + 1 } }),
     );
     await expect(loadSubagentConfig(path)).rejects.toThrow(/runtime.maxDepth/);
+    for (const runtime of [
+      { wrapUpRatio: 0 },
+      { wrapUpRatio: 1 },
+      { wrapUpRatio: null },
+      { maxWallSeconds: 2701 },
+      { maxWallSeconds: 0 },
+      { maxWallSeconds: null },
+      { maxTurns: 129 },
+      { maxTurns: 0 },
+      { maxTurns: null },
+    ]) {
+      await writeFile(path, JSON.stringify({ schemaVersion: 2, runtime }));
+      await expect(loadSubagentConfig(path)).rejects.toThrow(
+        /runtime\.(wrapUpRatio|maxWallSeconds|maxTurns)/,
+      );
+    }
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        runtime: { maxWallSeconds: 600, maxTurns: 50, wrapUpRatio: 0.5 },
+      }),
+    );
+    await expect(loadSubagentConfig(path)).resolves.toMatchObject({
+      runtime: { maxWallSeconds: 600, maxTurns: 50, wrapUpRatio: 0.5 },
+    });
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, runtime: { maxTurn: 50 } }));
+    await expect(loadSubagentConfig(path)).rejects.toThrow(/runtime.maxTurn is not supported/);
     await writeFile(
       path,
       JSON.stringify({ schemaVersion: 2, agents: { worker: { model: "old" } } }),

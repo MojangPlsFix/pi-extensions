@@ -32,11 +32,22 @@ function status(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
   );
   return {
     active: active.length,
+    running: agents.filter((agent) => ["queued", "starting", "running"].includes(agent.status))
+      .length,
+    wrappingUp: active.filter((agent) => agent.wrappingUp).length,
     blocked: agents.filter((agent) => agent.status === "blocked").length,
     parked: agents.filter((agent) => agent.status === "parked").length,
     failed: agents.filter((agent) => agent.status === "failed").length,
+    stopped: agents.filter((agent) => agent.status === "stopped").length,
     writers: active.filter((agent) => agent.profileClass === "write").length,
     total: agents.length,
+    capacity: {
+      used: active.length,
+      limit: 4,
+      free: 4 - active.length,
+      sharedWritersUsed: active.filter((agent) => agent.profileClass === "write").length,
+      sharedWritersLimit: 1,
+    },
     agents,
   };
 }
@@ -130,11 +141,11 @@ describe("working indicator lifecycle", () => {
     subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
 
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler hackeln...");
-    const output = subject.widget()?.render(120).join("\n") ?? "";
-    expect(output).toContain("Hackler · 1 active");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler working");
+    const output = subject.widget()?.render(160).join("\n") ?? "";
+    expect(output).toContain("Hackler · slots 1/4 used · 3 free · shared writer 0/1");
     expect(output).toContain("└─ Follow-up read-only inspection");
-    expect(output).toContain("read · running · luna · 60:31 · grep finished");
+    expect(output).toContain("read · working · luna · 60:31 · grep finished");
     expect(output).not.toMatch(/[△▵▴▲]/u);
   });
 
@@ -143,7 +154,7 @@ describe("working indicator lifecycle", () => {
     await emit(subject, "session_start");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([snapshot({ status: "blocked" })]));
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler warten auf Polier....");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler blocked");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);

@@ -1,8 +1,17 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { registerAgentsCommand } from "./agents-command.js";
 import { SubagentManager } from "./manager.js";
-import { completionMessageRenderer } from "./renderers.js";
+import { completionMessageRenderer, taskLabel } from "./renderers.js";
 import { registerSubagentTools } from "./tools.js";
+
+type WrapEntryV1 = {
+  schemaVersion: 1;
+  runId: string;
+  cause: "wall" | "turn";
+  at: string;
+  deadlineAt: string;
+};
 
 export default function subagentsExtension(pi: ExtensionAPI): void {
   const manager = new SubagentManager(pi);
@@ -19,6 +28,18 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
   pi.registerMessageRenderer("subagent-completion-v2", (message, options, theme) =>
     completionMessageRenderer(message.details, options.expanded, theme, options.outputPad),
   );
+  pi.registerEntryRenderer<WrapEntryV1>("subagent-wrap-v1", (entry, _options, theme) => {
+    const data = entry.data;
+    if (data?.schemaVersion !== 1) return new Text("", 0, 0);
+    return new Text(
+      theme.fg(
+        "warning",
+        `Hackler ${taskLabel(data.runId, 80)} is wrapping up at its ${data.cause} threshold · deadline ${taskLabel(data.deadlineAt, 40)}`,
+      ),
+      0,
+      0,
+    );
+  });
 
   registerSubagentTools(pi, manager);
   registerAgentsCommand(pi, manager);
@@ -65,6 +86,25 @@ export {
   SUBAGENT_ROOT,
   updateProfileControl,
 } from "./config.js";
+export type {
+  AvailableMetricV1,
+  DurationAggregateV1,
+  EvaluationActivityV1,
+  EvaluationBenchmarkFixtureV1,
+  EvaluationBenchmarkTaskV1,
+  EvaluationCapacityPointV1,
+  EvaluationLeaseV1,
+  EvaluationMetricsV1,
+  EvaluationRequestV1,
+  EvaluationRunSourceV1,
+  EvaluationRunV1,
+  EvaluationStatusTransitionV1,
+  EvaluationTraceInputV1,
+  EvaluationTraceV1,
+  EvaluationTransitionCauseV1,
+  ResourceTotalsV1,
+} from "./evaluation.js";
+export { buildEvaluationTraceV1, evaluateTraceV1 } from "./evaluation.js";
 export type { DispatchInput, HubSnapshot, MissionSnapshot } from "./manager.js";
 export { SubagentManager } from "./manager.js";
 export type { DispatchTask } from "./orchestration.js";

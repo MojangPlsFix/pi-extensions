@@ -8,11 +8,21 @@ const activeStatuses = new Set<string>(["queued", "starting", "running", "blocke
 
 const emptyStatus = (): SubagentsStatusEvent => ({
   active: 0,
+  running: 0,
+  wrappingUp: 0,
   blocked: 0,
   parked: 0,
   failed: 0,
+  stopped: 0,
   writers: 0,
   total: 0,
+  capacity: {
+    used: 0,
+    limit: 0,
+    free: 0,
+    sharedWritersUsed: 0,
+    sharedWritersLimit: 0,
+  },
   agents: [],
 });
 
@@ -20,21 +30,35 @@ function normalized(value: unknown): SubagentsStatusEvent {
   const candidate = (value ?? {}) as Partial<SubagentsStatusEvent>;
   const count = (entry: unknown) =>
     typeof entry === "number" && Number.isFinite(entry) ? Math.max(0, Math.floor(entry)) : 0;
+  const capacity = (candidate.capacity ?? {}) as Partial<SubagentsStatusEvent["capacity"]>;
   return {
     active: count(candidate.active),
+    running: count(candidate.running),
+    wrappingUp: count(candidate.wrappingUp),
     blocked: count(candidate.blocked),
     parked: count(candidate.parked),
     failed: count(candidate.failed),
+    stopped: count(candidate.stopped),
     writers: count(candidate.writers),
     total: count(candidate.total),
-    agents: Array.isArray(candidate.agents) ? candidate.agents.slice(0, 4) : [],
+    capacity: {
+      used: count(capacity.used),
+      limit: count(capacity.limit),
+      free: count(capacity.free),
+      sharedWritersUsed: count(capacity.sharedWritersUsed),
+      sharedWritersLimit: count(capacity.sharedWritersLimit),
+    },
+    oldestBlockingRequest: candidate.oldestBlockingRequest,
+    blockingRequestCount: count(candidate.blockingRequestCount),
+    agents: Array.isArray(candidate.agents) ? candidate.agents : [],
   };
 }
 
 function workingMessage(status: SubagentsStatusEvent): string {
   if (status.active === 0) return "Hackeln...";
-  if (status.blocked > 0) return "Hackler warten auf Polier....";
-  return "Hackler hackeln...";
+  if (status.blocked > 0) return "Hackler blocked";
+  if (status.wrappingUp > 0) return "Hackler wrapping up";
+  return "Hackler working";
 }
 
 /** Disposable, Pi-themed owner of the always-visible inline Subagent activity. */

@@ -14,6 +14,16 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { matchesAnyToolPattern } from "./capabilities.js";
 
+export type PreTurnGateContext = {
+  id: string;
+  model?: { provider: string; id: string };
+  boundary: "before_agent_start" | "before_provider_request" | "rpc_parent_prompt";
+  signal?: AbortSignal;
+};
+
+/** Return true to permit exactly one provider turn. Any other result fails closed. */
+export type PreTurnGate = (context: PreTurnGateContext) => boolean | Promise<boolean>;
+
 export type NativeRunSpec = {
   id: string;
   cwd: string;
@@ -32,8 +42,13 @@ export type NativeRunSpec = {
   skillPaths?: string[];
   customTools?: ToolDefinition[];
   extensionFactories?: InlineExtension[];
+  /** Retained for caller compatibility; the manager is the sole native deadline authority. */
   timeoutMs?: number;
   signal?: AbortSignal;
+  /** Awaited once per provider turn, including tool-loop continuations. */
+  preTurnGate?: PreTurnGate;
+  /** Manager-facing shorthand for a context-free per-model-request gate. */
+  beforeModelRequest?: () => boolean | Promise<boolean>;
 };
 
 export type NativeRunEvent =
@@ -44,6 +59,8 @@ export type NativeRunEvent =
   | { type: "tool_update"; toolName: string; update: unknown }
   | { type: "tool_end"; toolName: string; isError: boolean }
   | { type: "turn_end" }
+  | { type: "turn_limit" }
+  | { type: "deadline_reached" }
   | {
       type: "usage";
       input: number;
@@ -68,7 +85,7 @@ type LiveNativeRun = {
   stopping: boolean;
   rejectStartup?: (error: Error) => void;
   parking?: Promise<void>;
-  timer?: ReturnType<typeof setTimeout>;
+  aborting?: Promise<void>;
 };
 
 function assistantText(message: unknown): string {
@@ -156,13 +173,78 @@ export class NativeBackend {
     let registered = false;
     try {
       const settingsManager = SettingsManager.inMemory(undefined, { projectTrusted: false });
+      // before_agent_start is awaited before initial-prompt acceptance. It grants one request
+      // credit; before_provider_request consumes that credit and gates child-internal tool turns.
+      // This is the earliest complete child hook that covers every provider request.
+      const preTurnGate: PreTurnGate | undefined =
+        spec.preTurnGate ??
+        (spec.beforeModelRequest
+          ? async () => (await spec.beforeModelRequest?.()) === true
+          : undefined);
+      let gateCredit = 0;
+      const denyGate = (context: { abort(): void }, boundary: string): never => {
+        context.abort();
+        throw new Error(`Native Hackler ${spec.id} pre-turn gate denied at ${boundary}.`);
+      };
+      const gateExtension: InlineExtension | undefined = preTurnGate
+        ? {
+            name: "hackler-pre-turn-gate",
+            hidden: true,
+            factory: (pi) => {
+              pi.on("before_agent_start", async (_event, context) => {
+                let allowed = false;
+                try {
+                  allowed =
+                    (await preTurnGate?.({
+                      id: spec.id,
+                      model: spec.model
+                        ? { provider: spec.model.provider, id: spec.model.id }
+                        : undefined,
+                      boundary: "before_agent_start",
+                      signal: context.signal,
+                    })) === true;
+                } catch (cause) {
+                  context.abort();
+                  throw cause;
+                }
+                if (!allowed) denyGate(context, "before_agent_start");
+                gateCredit += 1;
+              });
+              pi.on("before_provider_request", async (_event, context) => {
+                if (gateCredit > 0) {
+                  gateCredit -= 1;
+                  return;
+                }
+                let allowed = false;
+                try {
+                  allowed =
+                    (await preTurnGate?.({
+                      id: spec.id,
+                      model: spec.model
+                        ? { provider: spec.model.provider, id: spec.model.id }
+                        : undefined,
+                      boundary: "before_provider_request",
+                      signal: context.signal,
+                    })) === true;
+                } catch (cause) {
+                  context.abort();
+                  throw cause;
+                }
+                if (!allowed) denyGate(context, "before_provider_request");
+              });
+            },
+          }
+        : undefined;
       const loader = new DefaultResourceLoader({
         cwd: spec.cwd,
         agentDir: spec.agentDir,
         settingsManager,
         additionalExtensionPaths: spec.extensionPaths ?? [],
         additionalSkillPaths: spec.skillPaths ?? [],
-        extensionFactories: spec.extensionFactories,
+        extensionFactories: [
+          ...(spec.extensionFactories ?? []),
+          ...(gateExtension ? [gateExtension] : []),
+        ],
         noExtensions: true,
         noSkills: true,
         noPromptTemplates: true,
@@ -238,19 +320,6 @@ export class NativeBackend {
       live.unsubscribe = session.subscribe((event) => this.forward(live, event, listener));
       this.runs.set(spec.id, live);
       registered = true;
-      if (spec.timeoutMs) {
-        live.timer = setTimeout(() => {
-          if (live.stopping) return;
-          listener({
-            type: "error",
-            error: new Error(`Native Hackler timed out after ${spec.timeoutMs} ms.`),
-          });
-          live.stopping = true;
-          void live.session.abort().catch(() => {});
-        }, spec.timeoutMs);
-        live.timer.unref?.();
-      }
-
       let accept: (() => void) | undefined;
       let reject: ((error: Error) => void) | undefined;
       const accepted = new Promise<void>((resolve, rejectPromise) => {
@@ -282,7 +351,6 @@ export class NativeBackend {
             return;
           }
           await session.waitForIdle();
-          if (live.timer) clearTimeout(live.timer);
           if (!live.stopping) listener({ type: "settled", report: live.report.trim() });
         })
         .catch((cause: unknown) => {
@@ -352,13 +420,15 @@ export class NativeBackend {
   async abort(id: string): Promise<void> {
     const run = this.runs.get(id);
     if (!run) return;
-    if (run.parking) {
-      await run.parking;
-      return;
-    }
+    if (run.parking) return run.parking;
     run.stopping = true;
-    await waitAtMost(run.session.abort(), 2_000);
-    await waitAtMost(run.session.waitForIdle(), 1_000);
+    run.aborting ??= (async () => {
+      await waitAtMost(run.session.abort(), 2_000);
+      // Keep the subscription installed through idle so same-generation trailing text and usage
+      // remain visible to manager cleanup.
+      await waitAtMost(run.session.waitForIdle(), 1_000);
+    })();
+    await run.aborting;
   }
 
   async park(id: string): Promise<void> {
@@ -370,11 +440,13 @@ export class NativeBackend {
         if (!run.accepted)
           run.rejectStartup?.(new Error(`Native Hackler ${id} was parked during startup.`));
         run.rejectStartup = undefined;
-        if (run.timer) clearTimeout(run.timer);
         run.removeAbortListener();
+        run.aborting ??= (async () => {
+          if (!run.session.isIdle) await waitAtMost(run.session.abort(), 2_000);
+          await waitAtMost(run.session.waitForIdle(), 1_000);
+        })();
+        await run.aborting;
         run.unsubscribe();
-        if (!run.session.isIdle) await waitAtMost(run.session.abort(), 2_000);
-        await waitAtMost(run.session.waitForIdle(), 1_000);
         run.session.dispose();
       } finally {
         if (this.runs.get(id) === run) this.runs.delete(id);

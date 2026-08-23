@@ -11,11 +11,28 @@ function run(id: string, status: RunRecord["status"], finishedAt?: string): RunR
     profileSnapshot: structuredClone(profile),
     task: id,
     taskHistory: [id],
-    ownership: { key: id, owns: [`topic:${id}`], deliverable: "report", workspace: "shared" },
+    ownership: {
+      key: id,
+      owns: [`topic:${id}`],
+      deliverable: "report",
+      acceptance: "verified report",
+      stopConditions: ["stop on completion or blocker"],
+      workspace: "shared",
+    },
     status,
     runner: "native",
     startedAt: finishedAt ?? "2026-01-01T00:00:00.000Z",
     finishedAt,
+    originalEffectiveLimits: {
+      maxWallSeconds: 600,
+      maxTurns: 60,
+      wrapUpRatio: 0.8,
+    },
+    leaseHistory: [],
+    statusChangedAt: finishedAt ?? "2026-01-01T00:00:00.000Z",
+    statusTransitions: [],
+    terminationHistory: [],
+    wrappingUp: false,
     sessionDir: `/tmp/${id}`,
     report: "",
     usage: emptyUsage(),
@@ -56,10 +73,16 @@ describe("RunStore", () => {
     store.add(run("new", "parked", "2026-06-10T00:00:00.000Z"));
     store.add(run("middle", "failed", "2026-06-09T00:00:00.000Z"));
     store.add(run("old", "stopped", "2025-01-01T00:00:00.000Z"));
+    const quarantined = run("quarantined", "failed", "2025-01-01T00:00:00.000Z");
+    quarantined.cleanupFailure = {
+      at: "2026-06-10T00:00:00.000Z",
+      message: "Safe cleanup cannot be proven.",
+    };
+    store.add(quarantined);
 
     const removed = store.prune({ days: 30, entries: 1 }, Date.parse("2026-06-11T00:00:00.000Z"));
 
     expect(removed.map((entry) => entry.id).sort()).toEqual(["middle", "old"]);
-    expect(store.all().map((entry) => entry.id)).toEqual(["active", "new"]);
+    expect(store.all().map((entry) => entry.id)).toEqual(["active", "new", "quarantined"]);
   });
 });

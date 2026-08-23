@@ -31,7 +31,7 @@ pi update --extensions
 | [Model Cost Badges](packages/model-cost-badges/) | Shows model input, cache, output, and long-context prices in the model selector. | Automatic | Interactive model selector |
 | [Stats](packages/stats/) | Reports local usage with summaries, time periods, model and project breakdowns, Hackler subsets, and optional Copilot credit history. | `/stats`, `/stats all`, `/stats week`, `/stats month`, `/stats previous` | Local session history. Optional Copilot snapshots |
 | [Session Summary](packages/session-summary/) | Makes one automatic title attempt for an unnamed session and shows the result in `/resume`. | `/session-summary`, `/session-summary-cost`, `/session-summaries` | Active provider. Built-in Copilot and Codex profiles |
-| [Hackler](packages/subagents/) | Runs profile-based child sessions with task ownership, parked reports, approvals, and reviewed worktree integration. | `/agents`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
+| [Hackler](packages/subagents/) | Runs child sessions with ownership, leases, parked reports, approvals, and reviewed integration. | `/agents`, `/agents trace`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_respond`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
 | [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
@@ -76,7 +76,10 @@ Hackler v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`
   "runtime": {
     "maxActive": 4,
     "maxSharedWriters": 1,
-    "maxDepth": 2
+    "maxDepth": 2,
+    "maxWallSeconds": 2700,
+    "maxTurns": 128,
+    "wrapUpRatio": 0.8
   },
   "retention": {
     "days": 30,
@@ -107,7 +110,7 @@ Hackler v2 uses a versioned configuration at `~/.pi/agent/subagents/config.json`
 
 Authenticate the selected provider before you start a child. Run `/agents doctor` after a configuration change. Existing runs keep their captured model and policy.
 
-Use the [Hackler model-selection guide](packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels with provider-neutral criteria.
+Use the [Hackler model-selection guide](packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels. Use the [orchestration evaluation guide](packages/subagents/ORCHESTRATION_EVALUATION.md) to compare topologies under matched aggregate budgets.
 
 Session Summary uses `github-copilot/gpt-5.6-luna` for Copilot. Codex tries `gpt-5.3-codex-spark` before `gpt-5.6-luna`. Automatic generation makes one persisted attempt per session. Use `/session-summary` for an explicit refresh.
 

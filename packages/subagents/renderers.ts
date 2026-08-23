@@ -48,6 +48,7 @@ export function shortModel(value: string | undefined): string {
 }
 
 const HACKLER_LABEL = "Hackler";
+export const QUIET_EVENT_AGE_MS = 30_000;
 
 function colorForStatus(status: RunStatus): "muted" | "success" | "warning" | "error" | "dim" {
   if (status === "running" || status === "starting" || status === "queued") return "muted";
@@ -55,6 +56,82 @@ function colorForStatus(status: RunStatus): "muted" | "success" | "warning" | "e
   if (status === "blocked") return "warning";
   if (status === "failed") return "error";
   return "dim";
+}
+
+function timestampAge(value: string | undefined, now: number): number | undefined {
+  if (!value) return undefined;
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.max(0, now - parsed) : undefined;
+}
+
+function operationalState(run: SubagentsStatusEvent["agents"][number], now: number): string {
+  if (run.status === "blocked") return "blocked";
+  if (run.status === "failed") return "failed";
+  if (run.status === "stopped") return "stopped";
+  if (run.status === "parked") return "done (parked)";
+  if (run.status === "queued" || run.status === "starting") return "starting";
+  if (run.wrappingUp) return "wrapping up";
+  const age = timestampAge(run.lastEventAt, now);
+  return age !== undefined && age >= QUIET_EVENT_AGE_MS
+    ? `quiet · no event for ${formatDuration(age)}`
+    : "working";
+}
+
+function terminationText(
+  reason: SubagentsStatusEvent["agents"][number]["terminationReason"],
+): string | undefined {
+  if (!reason) return undefined;
+  const facts: string[] = [reason.code];
+  if (reason.phase) facts.push(`phase ${reason.phase}`);
+  if (reason.limit)
+    facts.push(`${reason.limit.kind} ${reason.limit.observed}/${reason.limit.maximum}`);
+  if (reason.ancestorRunId) facts.push(`ancestor ${cleanDisplayLine(reason.ancestorRunId)}`);
+  return facts.join(" · ");
+}
+
+function activeLease(run: SubagentsStatusEvent["agents"][number]) {
+  const openLease = run.leaseHistory
+    ? [...run.leaseHistory].reverse().find((lease) => !lease.endedAt)
+    : undefined;
+  return (
+    run.leaseHistory?.find((lease) => lease.generation === run.activeLeaseGeneration) ??
+    openLease ??
+    run.leaseHistory?.at(-1)
+  );
+}
+
+function operationalFacts(run: SubagentsStatusEvent["agents"][number], now: number): string[] {
+  const lease = activeLease(run);
+  const leaseEnd = run.finishedAt ? Math.min(now, Date.parse(run.finishedAt)) : now;
+  const leaseElapsed = lease ? Math.max(0, leaseEnd - Date.parse(lease.startedAt)) : undefined;
+  const leaseRemaining = lease ? Math.max(0, Date.parse(lease.deadlineAt) - leaseEnd) : undefined;
+  const limits = lease?.effectiveLimits ?? run.originalEffectiveLimits;
+  const turns =
+    run.runner === "external" || limits?.maxTurns === "notApplicable"
+      ? "turns not applicable (external)"
+      : limits && run.turns !== undefined
+        ? `turns ${run.turns} used / ${Math.max(0, limits.maxTurns - run.turns)} remaining`
+        : undefined;
+  const lastEventAge = timestampAge(run.lastEventAt, now);
+  const operationAge = timestampAge(run.currentOperation?.startedAt, now);
+  return [
+    leaseElapsed !== undefined && leaseRemaining !== undefined
+      ? `lease ${formatDuration(leaseElapsed)} elapsed / ${formatDuration(leaseRemaining)} remaining`
+      : undefined,
+    turns,
+    lastEventAge === undefined
+      ? "last event not recorded"
+      : `last event ${formatDuration(lastEventAge)} ago`,
+    run.currentOperation
+      ? `operation ${run.currentOperation.kind}: ${taskLabel(run.currentOperation.name, 60)} · ${formatDuration(operationAge ?? 0)}`
+      : undefined,
+    terminationText(run.terminationReason)
+      ? `reason ${terminationText(run.terminationReason)}`
+      : undefined,
+    run.cleanupFailure
+      ? `cleanup retained: ${taskLabel(run.cleanupFailure.message, 100)}`
+      : undefined,
+  ].filter((fact): fact is string => Boolean(fact));
 }
 
 function styledJoin(
@@ -69,36 +146,74 @@ export function activityViewLines(
   status: SubagentsStatusEvent,
   theme: Theme,
   width: number,
+  now = Date.now(),
 ): string[] {
   if (width <= 0 || status.agents.length === 0) return [];
   const safe = (line: string) => truncateToWidth(line, width, "");
-  const header =
-    status.active > 0
-      ? theme.fg(
-          "muted",
-          `${HACKLER_LABEL} · ${status.active} active${status.blocked ? ` · ${status.blocked} blocked` : ""}`,
-        )
-      : theme.fg("muted", `${HACKLER_LABEL} · ${status.parked} parked`);
-  const lines = [safe(header)];
-  for (const [index, agent] of status.agents.slice(0, 4).entries()) {
-    const last = index === Math.min(4, status.agents.length) - 1;
-    const connector = theme.fg("dim", last ? "  └─ " : "  ├─ ");
+  const priority = (agent: SubagentsStatusEvent["agents"][number]): number =>
+    agent.status === "blocked"
+      ? 0
+      : agent.wrappingUp
+        ? 1
+        : agent.status === "failed"
+          ? 2
+          : agent.status === "stopped"
+            ? 3
+            : agent.status === "starting" || agent.status === "queued"
+              ? 4
+              : agent.status === "running"
+                ? 5
+                : 6;
+  const ordered = status.agents
+    .map((agent, index) => ({ agent, index }))
+    .sort((left, right) => priority(left.agent) - priority(right.agent) || left.index - right.index)
+    .map(({ agent }) => agent);
+  const shown = ordered.slice(0, 4);
+  const lines = [
+    safe(
+      theme.fg(
+        "muted",
+        `${HACKLER_LABEL} · slots ${status.capacity.used}/${status.capacity.limit} used · ${status.capacity.free} free · shared writer ${status.capacity.sharedWritersUsed}/${status.capacity.sharedWritersLimit}`,
+      ),
+    ),
+    safe(
+      theme.fg(
+        "dim",
+        `  running ${status.running} · wrapping ${status.wrappingUp} · blocked ${status.blocked} · failed ${status.failed} · stopped ${status.stopped}`,
+      ),
+    ),
+  ];
+  if (status.oldestBlockingRequest) {
+    const requestAge = timestampAge(status.oldestBlockingRequest.createdAt, now) ?? 0;
+    lines.push(
+      safe(
+        theme.fg(
+          "warning",
+          `  oldest block: ${taskLabel(status.oldestBlockingRequest.title, 80)} · ${formatDuration(requestAge)} ago · action: ${cleanDisplayLine(status.oldestBlockingRequest.action)}${(status.blockingRequestCount ?? 1) > 1 ? ` · +${(status.blockingRequestCount ?? 1) - 1} more request(s)` : ""}`,
+        ),
+      ),
+    );
+  }
+  for (const [index, agent] of shown.entries()) {
+    const isLastShown = index === shown.length - 1;
+    const connector = theme.fg("dim", isLastShown ? "  └─ " : "  ├─ ");
+    const continuation = theme.fg("dim", isLastShown ? "     " : "  │  ");
     lines.push(safe(connector + theme.fg("text", taskLabel(agent.task))));
+    const state = operationalState(agent, now);
     const metadata = styledJoin(theme, [
       { value: agent.profileClass ?? "agent", color: "dim" },
-      { value: agent.status, color: colorForStatus(agent.status) },
+      { value: state, color: colorForStatus(agent.status) },
       { value: shortModel(agent.effectiveModel), color: "dim" },
       { value: formatDuration(agent.elapsedMs), color: "dim" },
-      {
-        value: taskLabel(
-          agent.latestActivity ?? (agent.status === "running" ? "working…" : agent.status),
-          80,
-        ),
-        color: colorForStatus(agent.status),
-      },
+      ...(agent.latestActivity
+        ? [{ value: taskLabel(agent.latestActivity, 80), color: colorForStatus(agent.status) }]
+        : []),
     ]);
-    lines.push(safe(theme.fg("dim", last ? "     " : "  │  ") + metadata));
+    lines.push(safe(continuation + metadata));
+    lines.push(safe(continuation + theme.fg("dim", operationalFacts(agent, now).join(" · "))));
   }
+  const overflow = Math.max(0, status.total - shown.length);
+  if (overflow) lines.push(safe(theme.fg("dim", `  +${overflow} more`)));
   return lines;
 }
 
@@ -132,8 +247,7 @@ export type AgentsOverlayAction = {
     | "toggleProfile"
     | "ejectProfile"
     | "refresh"
-    | "help"
-    | "startMission";
+    | "help";
   id?: string;
 };
 
@@ -272,6 +386,12 @@ export class AgentsViewer {
     else if (this.section === "runs") {
       const run = this.runRows()[this.selected]?.run;
       if (!run) return;
+      if (matchesKey(data, Key.enter) && run.status === "blocked") {
+        const request = this.snapshot.requests
+          .filter((candidate) => candidate.fromRunId === run.id && candidate.status === "pending")
+          .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+        if (request) return this.close({ kind: "answer", id: request.id });
+      }
       if (data === "s" || (matchesKey(data, Key.enter) && run.status === "parked"))
         return this.close({ kind: "steer", id: run.id });
       if (data === "x" && ["queued", "starting", "running", "blocked"].includes(run.status))
@@ -340,7 +460,12 @@ export class AgentsViewer {
       this.snapshot.herdr.enabled && this.snapshot.herdr.available ? ["t transcript"] : [];
     const sectionHints =
       this.section === "runs"
-        ? ["enter revive parked", "s steer/revive", "x stop active", ...transcriptHint]
+        ? [
+            "enter answer blocked/revive parked",
+            "s steer/revive",
+            "x stop active",
+            ...transcriptHint,
+          ]
         : this.section === "inbox"
           ? ["enter answer pending"]
           : ["enter enable/disable", "e eject built-in"];
@@ -359,6 +484,36 @@ export class AgentsViewer {
   }
 
   private renderRuns(body: string[]): void {
+    const now = Date.now();
+    const running = this.snapshot.runs.filter((run) =>
+      ["queued", "starting", "running"].includes(run.status),
+    ).length;
+    const wrapping = this.snapshot.runs.filter(
+      (run) => ["queued", "starting", "running", "blocked"].includes(run.status) && run.wrappingUp,
+    ).length;
+    const blocked = this.snapshot.runs.filter((run) => run.status === "blocked").length;
+    const failed = this.snapshot.runs.filter((run) => run.status === "failed").length;
+    const stopped = this.snapshot.runs.filter((run) => run.status === "stopped").length;
+    body.push(
+      this.theme.fg(
+        "muted",
+        ` Slots ${this.snapshot.capacity.used}/${this.snapshot.capacity.limit} used · ${this.snapshot.capacity.free} free · shared writer ${this.snapshot.capacity.sharedWritersUsed}/${this.snapshot.capacity.sharedWritersLimit}`,
+      ),
+      this.theme.fg(
+        "dim",
+        ` Running ${running} · wrapping ${wrapping} · blocked ${blocked} · failed ${failed} · stopped ${stopped}`,
+      ),
+    );
+    const oldestBlock = this.snapshot.requests
+      .filter((request) => request.blocking && request.status === "pending")
+      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
+    if (oldestBlock)
+      body.push(
+        this.theme.fg(
+          "warning",
+          ` Oldest block: ${cleanDisplayLine(oldestBlock.title)} · ${formatDuration(timestampAge(oldestBlock.createdAt, now) ?? 0)} ago · action: tab to inbox, enter to answer`,
+        ),
+      );
     if (!this.snapshot.runs.length) {
       body.push(
         this.theme.fg(
@@ -375,7 +530,7 @@ export class AgentsViewer {
       const { run, depth } = rows[index]!;
       const selected = index === this.selected;
       const branch = depth > 0 ? `${"  ".repeat(Math.min(depth - 1, 4))}└─ ` : "";
-      const row = `${selected ? "›" : " "} ${branch}${taskLabel(run.task)}  ${run.profileClass} · ${run.status} · ${formatDuration(run.elapsedMs)}`;
+      const row = `${selected ? "›" : " "} ${branch}${taskLabel(run.task)}  ${run.profileClass} · ${operationalState(run, now)} · ${formatDuration(run.elapsedMs)}`;
       body.push(
         selected
           ? this.theme.bg("selectedBg", this.theme.fg("text", row))
@@ -391,8 +546,27 @@ export class AgentsViewer {
       this.theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`),
       this.theme.fg("dim", `Deliverable: ${cleanDisplayLine(run.ownership.deliverable)}`),
       this.theme.fg("dim", `Transcript: ${cleanDisplayLine(run.sessionFile ?? "pending")}`),
-      this.theme.fg("muted", `Activity: ${cleanDisplayLine(run.latestActivity ?? "waiting…")}`),
+      this.theme.fg("muted", `State: ${operationalState(run, now)}`),
+      ...operationalFacts(run, now).map((fact) => this.theme.fg("dim", fact)),
+      this.theme.fg("muted", `Activity: ${cleanDisplayLine(run.latestActivity ?? "not recorded")}`),
     );
+    const blockingRequests = this.snapshot.requests
+      .filter(
+        (request) =>
+          request.fromRunId === run.id && request.blocking && request.status === "pending",
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const blockingRequest = blockingRequests[0];
+    if (blockingRequest)
+      body.push(
+        this.theme.fg(
+          "warning",
+          `Blocking request: ${cleanDisplayLine(blockingRequest.title)} · ${formatDuration(timestampAge(blockingRequest.createdAt, now) ?? 0)} ago · action: enter to answer`,
+        ),
+        ...(blockingRequests.length > 1
+          ? [this.theme.fg("dim", `+${blockingRequests.length - 1} more request(s)`)]
+          : []),
+      );
     const mission = run.missionId
       ? this.snapshot.missions.find((candidate) => candidate.id === run.missionId)
       : undefined;
@@ -421,6 +595,9 @@ export class AgentsViewer {
             this.theme.fg("dim", `  ${entry.kind} · ${cleanDisplayLine(entry.text)}`),
           ),
       );
+    if (run.terminationReason)
+      body.push(this.theme.fg("error", `Termination: ${terminationText(run.terminationReason)}`));
+    if (run.error) body.push(this.theme.fg("error", `Error: ${cleanDisplayLine(run.error)}`));
     if (run.report)
       body.push(
         this.theme.fg("success", "Report"),
@@ -428,7 +605,6 @@ export class AgentsViewer {
           .slice(0, 8)
           .map((line) => this.theme.fg("text", `  ${line}`)),
       );
-    if (run.error) body.push(this.theme.fg("error", `Error: ${cleanDisplayLine(run.error)}`));
   }
 
   private renderInbox(body: string[]): void {
@@ -545,7 +721,11 @@ export function completionMessageRenderer(
     return box;
   };
   const title = theme.fg("text", taskLabel(run.task));
-  const state = theme.fg(colorForStatus(run.status), `${run.profileClass} · ${run.status}`);
+  const state = theme.fg(
+    colorForStatus(run.status),
+    `${run.profileClass} · ${operationalState(run, Date.now())}`,
+  );
+  const reason = terminationText(run.terminationReason);
   const usage = theme.fg(
     "dim",
     `${cleanDisplayLine(run.effectiveModel ?? "inherited model")} · ${formatDuration(run.elapsedMs)} · ${run.usage.total.toLocaleString()} tokens${run.usage.cost ? ` · $${run.usage.cost.toFixed(4)}` : ""}`,
@@ -556,11 +736,12 @@ export function completionMessageRenderer(
         title,
         state,
         usage,
-        theme.fg(
-          run.error ? "error" : "muted",
-          taskLabel(run.report || run.error || "No report", 240),
-        ),
-      ].join("\n"),
+        reason ? theme.fg(run.status === "parked" ? "success" : "error", `Reason: ${reason}`) : "",
+        run.error ? theme.fg("error", taskLabel(run.error, 240)) : "",
+        run.report ? theme.fg("muted", taskLabel(run.report, 240)) : theme.fg("muted", "No report"),
+      ]
+        .filter(Boolean)
+        .join("\n"),
     );
   return shell(
     [
@@ -569,6 +750,8 @@ export function completionMessageRenderer(
       theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`),
       theme.fg("dim", `Transcript: ${cleanDisplayLine(run.sessionFile ?? run.sessionDir)}`),
       usage,
+      reason ? theme.fg(run.status === "parked" ? "success" : "error", `Reason: ${reason}`) : "",
+      run.error ? theme.fg("error", `Error\n${safeDisplayText(run.error)}`) : "",
       run.activity.length
         ? theme.fg(
             "dim",
@@ -581,7 +764,6 @@ export function completionMessageRenderer(
           )
         : "",
       run.report ? `${theme.fg("success", "Report")}\n${safeDisplayText(run.report)}` : "",
-      run.error ? theme.fg("error", `Error\n${safeDisplayText(run.error)}`) : "",
     ]
       .filter(Boolean)
       .join("\n\n"),

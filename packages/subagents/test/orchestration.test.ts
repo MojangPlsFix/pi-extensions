@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   type DispatchTask,
   findOwnershipOverlap,
   normalizeOwnership,
+  ORCHESTRATION_GUIDELINES,
   TaskClaimRegistry,
   taskFingerprint,
   validateDispatchBatch,
@@ -21,6 +22,8 @@ function task(overrides: Partial<DispatchTask> = {}): DispatchTask {
     task: "Inspect the parser implementation.",
     owns: ["path:src/parser"],
     deliverable: "Evidence with exact paths.",
+    acceptance: "Cites the parser entry point and its callers.",
+    stopConditions: ["Stop after the evidence is complete or report a blocker."],
     ...overrides,
   };
 }
@@ -57,6 +60,26 @@ describe("validateDispatchBatch", () => {
         { kinds },
       ),
     ).not.toThrow();
+  });
+
+  it("rejects invalid adaptive contracts before looking up a profile or creating claims", () => {
+    const profileLookup = vi.spyOn(kinds, "get");
+    expect(() =>
+      validateDispatchBatch(
+        [task(), task({ key: "invalid", task: "Inspect another parser.", acceptance: "  " })],
+        { kinds },
+      ),
+    ).toThrow("non-empty acceptance criteria");
+    expect(profileLookup).not.toHaveBeenCalled();
+
+    expect(() => validateDispatchBatch([task({ stopConditions: [] })], { kinds })).toThrow(
+      "at least one stop condition",
+    );
+    expect(() =>
+      validateDispatchBatch([task({ stopConditions: ["done", " "] })], { kinds }),
+    ).toThrow("stop conditions must not be empty");
+    expect(profileLookup).not.toHaveBeenCalled();
+    profileLookup.mockRestore();
   });
 
   it("rejects normalized duplicate work", () => {
@@ -132,5 +155,12 @@ describe("validateDispatchBatch", () => {
     expect(() => validateDispatchBatch([task({ agent: "missing" })], { kinds })).toThrow(
       "Unknown or disabled",
     );
+  });
+
+  it("explicitly avoids dispatching invented work to fill slots", () => {
+    expect(ORCHESTRATION_GUIDELINES).toContain("smallest justified batch up to free capacity");
+    expect(ORCHESTRATION_GUIDELINES).toContain("never invent, split, or duplicate work");
+    expect(ORCHESTRATION_GUIDELINES).toContain("recompute the ready frontier after each wave");
+    expect(ORCHESTRATION_GUIDELINES).toContain("Resolve pending blockers before another wait");
   });
 });

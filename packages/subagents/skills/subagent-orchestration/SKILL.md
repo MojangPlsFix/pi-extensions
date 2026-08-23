@@ -22,15 +22,17 @@ Use the built-in profiles as follows:
 
 Do not invent a profile name.
 
-## Make a task graph
+## Make a task graph and dispatch adaptively
 
-1. List all ready work.
-2. Mark each dependency.
-3. Assign one owner to each path, symbol, or topic.
-4. Give each task one concrete deliverable.
-5. Put all independent ready tasks in one `subagent_dispatch` call.
+1. Identify the substantial independent work on the current ready frontier. Do not delegate trivial or tightly sequential steps.
+2. Call `subagent_status` to query current ownership and free capacity.
+3. Mark dependencies and assign one owner to each path, symbol, or topic.
+4. Give each task a concrete deliverable, observable acceptance criteria, and explicit completion-or-blocker stop conditions.
+5. If the frontier is larger than free capacity, rank it by dependency impact and uncertainty.
+6. Dispatch the smallest justified batch, up to free capacity, in one `subagent_dispatch` call.
+7. Recompute the ready frontier and capacity after each wave rather than assuming the original graph is still ready.
 
-Do not send the same task to two profiles. Do not assign overlapping writer scopes.
+Never invent, split, or duplicate work merely to fill slots. Leaving capacity unused is correct when fewer substantial independent tasks are ready. Do not send the same task to two profiles or assign overlapping writer scopes.
 
 Use one shared-checkout Worker by default. Use `workspace: "worktree"` only for a clean Git checkout and disjoint writer scopes.
 
@@ -42,9 +44,9 @@ Do not wait immediately if useful parent work remains. Use `subagent_collect` wh
 
 The manager parks a completed child automatically. A parked child does not use active capacity.
 
-Use `subagent_steer` for a narrow correction or follow-up. Do not replace the original ownership through steering.
+Use `subagent_steer` for one narrow correction or follow-up. Do not replace the original ownership through steering. If a task needs repeated corrective steering, stop it, narrow the contract, and re-dispatch only the remaining justified work.
 
-Use `subagent_stop` when a task is obsolete, unsafe, or outside its ownership.
+Use `subagent_stop` when a task is obsolete, unsafe, outside its ownership, or no longer has a coherent bounded contract.
 
 ## Handle supervisor requests
 
@@ -56,7 +58,7 @@ Children do not ask the user directly. Native children use `contact_supervisor` 
 - progress
 - integration-ready
 
-The parent agent handles pending requests with `subagent_status` and `subagent_respond`. `subagent_collect` returns when a child blocks instead of waiting indefinitely. Review the detail and tool input before you approve an action. Open `/agents` only as a manual fallback.
+The parent agent handles pending requests with `subagent_status` and `subagent_respond`. `subagent_collect` returns when a child blocks instead of waiting indefinitely and accepts a bounded `timeoutSeconds` from 10 through 3600. Resolve pending blockers before another wait. A run can have multiple linked requests, so answer the oldest actionable request and re-check status until no blocker remains. Review the detail and tool input before you approve an action. Open `/agents` only as a manual fallback.
 
 Do not claim that a pending child succeeded. Read its settled report first.
 

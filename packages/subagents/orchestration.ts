@@ -10,6 +10,8 @@ export type DispatchTask = {
   task: string;
   owns: string[];
   deliverable: string;
+  acceptance: string;
+  stopConditions: string[];
   context?: DispatchContextMode;
   workspace?: DispatchWorkspace;
 };
@@ -98,6 +100,12 @@ function validateTaskShape(task: DispatchTask): void {
   if (!task.agent.trim()) throw new Error(`Task ${task.key} must select an agent profile.`);
   if (!task.task.trim()) throw new Error(`Task ${task.key} must include a self-contained task.`);
   if (!task.deliverable.trim()) throw new Error(`Task ${task.key} must state its deliverable.`);
+  if (typeof task.acceptance !== "string" || !task.acceptance.trim())
+    throw new Error(`Task ${task.key} must state non-empty acceptance criteria.`);
+  if (!Array.isArray(task.stopConditions) || !task.stopConditions.length)
+    throw new Error(`Task ${task.key} must declare at least one stop condition.`);
+  if (task.stopConditions.some((condition) => typeof condition !== "string" || !condition.trim()))
+    throw new Error(`Task ${task.key} stop conditions must not be empty.`);
   if (!task.owns.length) throw new Error(`Task ${task.key} must declare at least one owned scope.`);
   for (const ownership of task.owns) normalizeOwnership(ownership);
 }
@@ -116,8 +124,9 @@ export function validateDispatchBatch(
   const fingerprints = new Map<string, string>();
   const pendingClaims: ActiveTaskClaim[] = [];
 
+  for (const task of tasks) validateTaskShape(task);
+
   for (const task of tasks) {
-    validateTaskShape(task);
     if (keys.has(task.key)) throw new Error(`Duplicate task key: ${task.key}.`);
     keys.add(task.key);
     const kind = options.kinds.get(task.agent);
@@ -201,9 +210,11 @@ export class TaskClaimRegistry {
   }
 }
 
-export const ORCHESTRATION_GUIDELINES = `Use Hackler for substantial independent slices or specialist work, not for trivial or tightly sequential steps.
-Before dispatching, enumerate the ready work and assign one owner to each path, symbol, or research angle.
-Dispatch all independent ready tasks in one subagent_dispatch call. Give every task a self-contained brief, explicit ownership, and a concrete deliverable.
-Do not work on an active delegated scope in the parent. Continue only with unowned work while children run.
+export const ORCHESTRATION_GUIDELINES = `Use Hackler for the substantial independent current frontier or specialist work, not for trivial or tightly sequential steps.
+Before each wave, query status and free capacity, enumerate only ready work, and assign one owner to each path, symbol, or research angle.
+If the ready frontier exceeds capacity, rank it by dependency impact and uncertainty. Dispatch the smallest justified batch up to free capacity; never invent, split, or duplicate work merely to fill slots.
+Give every task a self-contained brief, explicit ownership, concrete deliverable, acceptance criteria, and stop conditions.
+Do not work on an active delegated scope in the parent. Continue only with unowned work while children run, then recompute the ready frontier after each wave.
 Never assign overlapping writer scopes. Use one shared-tree writer, or explicit disjoint worktrees when parallel writers are justified.
-Require evidence and local validation from every child. The parent remains responsible for reviewing reports and running final integrated checks.`;
+Require evidence and local validation from every child. After repeated corrective steering, stop and narrow or re-dispatch the task instead of continuing to steer it.
+Resolve pending blockers before another wait. The parent remains responsible for reviewing reports and running final integrated checks.`;
