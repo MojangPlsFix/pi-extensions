@@ -205,6 +205,7 @@ export type AgentsOverlayAction = {
     | "stop"
     | "inspect"
     | "answer"
+    | "validate"
     | "toggleProfile"
     | "ejectProfile"
     | "refresh"
@@ -398,7 +399,7 @@ export class AgentsViewer {
     else if (this.section === "runs") {
       const run = this.runRows()[this.selected]?.run;
       if (!run) return;
-      if (matchesKey(data, Key.enter) && run.status === "blocked") {
+      if (matchesKey(data, Key.enter)) {
         const request = this.snapshot.requests
           .filter((candidate) => candidate.fromRunId === run.id && candidate.status === "pending")
           .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
@@ -415,6 +416,15 @@ export class AgentsViewer {
         this.snapshot.herdr.available
       )
         return this.close({ kind: "inspect", id: run.id });
+    } else if (this.section === "inbox" && data === "v") {
+      const request = this.snapshot.requests[this.selected];
+      if (
+        request?.status === "pending" &&
+        request.kind === "integration-ready" &&
+        (this.snapshot.validators?.length ?? 0) > 0 &&
+        (this.snapshot.validatableRequestIds ?? []).includes(request.id)
+      )
+        return this.close({ kind: "validate", id: request.id });
     } else if (this.section === "inbox" && matchesKey(data, Key.enter)) {
       const request = this.snapshot.requests[this.selected];
       if (request?.status === "pending") return this.close({ kind: "answer", id: request.id });
@@ -668,6 +678,12 @@ export class AgentsViewer {
         ...displayLines(request.detail)
           .slice(0, 8)
           .map((line) => this.theme.fg(request.status === "pending" ? "warning" : "dim", line)),
+        ...(request.status === "pending" &&
+        request.kind === "integration-ready" &&
+        (this.snapshot.validators?.length ?? 0) > 0 &&
+        (this.snapshot.validatableRequestIds ?? []).includes(request.id)
+          ? [this.theme.fg("dim", `v validates with a trusted configured command`)]
+          : []),
         request.choices.length
           ? this.theme.fg(
               "dim",

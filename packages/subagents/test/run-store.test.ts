@@ -82,10 +82,20 @@ describe("RunStore", () => {
       message: "Safe cleanup cannot be proven.",
     };
     store.add(quarantined);
+    store.add(run("validation-quarantine", "parked", "2025-01-01T00:00:00.000Z"));
 
-    const removed = store.prune({ days: 30, entries: 1 }, Date.parse("2026-06-11T00:00:00.000Z"));
+    const removed = store.prune(
+      { days: 30, entries: 1 },
+      Date.parse("2026-06-11T00:00:00.000Z"),
+      new Set(["validation-quarantine"]),
+    );
 
     expect(removed.map((entry) => entry.id).sort()).toEqual(["middle", "old"]);
-    expect(store.all().map((entry) => entry.id)).toEqual(["active", "new", "quarantined"]);
+    expect(store.all().map((entry) => entry.id)).toEqual([
+      "active",
+      "new",
+      "quarantined",
+      "validation-quarantine",
+    ]);
   });
 });

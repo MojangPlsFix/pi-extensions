@@ -119,6 +119,17 @@ export class SupervisorInbox {
     return { request: clone(entry), resolution };
   }
 
+  updateDetail(id: string, detail: string): SupervisorRequest {
+    const entry = this.entries.get(id);
+    if (!entry) throw new Error(`Unknown supervisor request: ${id}.`);
+    if (entry.status !== "pending")
+      throw new Error(`Supervisor request ${id} is already resolved.`);
+    if (!detail.trim()) throw new Error("Supervisor request detail must not be empty.");
+    entry.detail = detail.trim();
+    this.publish();
+    return clone(entry);
+  }
+
   resolve(id: string, answer: string): SupervisorRequest {
     const entry = this.entries.get(id);
     if (!entry) throw new Error(`Unknown supervisor request: ${id}.`);

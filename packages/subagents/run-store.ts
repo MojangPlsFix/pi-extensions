@@ -47,10 +47,14 @@ export class RunStore {
     };
   }
 
-  prune(policy: { days: number; entries: number }, now = Date.now()): RunRecord[] {
+  prune(
+    policy: { days: number; entries: number },
+    now = Date.now(),
+    protectedIds: ReadonlySet<string> = new Set(),
+  ): RunRecord[] {
     const cutoff = now - policy.days * 24 * 60 * 60 * 1_000;
     const terminal = this.all()
-      .filter((run) => !ACTIVE.has(run.status) && !run.cleanupFailure)
+      .filter((run) => !ACTIVE.has(run.status) && !run.cleanupFailure && !protectedIds.has(run.id))
       .sort(
         (left, right) =>
           Date.parse(right.finishedAt ?? right.startedAt) -

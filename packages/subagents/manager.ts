@@ -42,6 +42,7 @@ import {
   type SubagentConfig,
   type ThinkingPolicy,
   updateProfileControl,
+  type ValidatorDefinition,
 } from "./config.js";
 import {
   buildEvaluationTraceV1,
@@ -89,10 +90,17 @@ import {
   type Usage,
 } from "./types.js";
 import {
+  runPatchValidator,
+  type ValidationRecord,
+  type ValidationTarget,
+  validationSummary,
+} from "./validation.js";
+import {
   applyCandidate,
   captureWorktreeCandidate,
   createMissionWorktree,
   type MissionWorktree,
+  normalizeWorktreeCandidate,
   removeMissionWorktree,
   validateMissionWorktree,
   type WorktreeCandidate,
@@ -120,7 +128,7 @@ export type MissionRecord = {
 };
 
 export type MissionSnapshot = Omit<MissionRecord, "candidate"> & {
-  candidate?: { files: string[]; hasChanges: boolean };
+  candidate?: { candidateId: string; files: string[]; hasChanges: boolean };
 };
 
 export type HubSnapshot = {
@@ -139,6 +147,10 @@ export type HubSnapshot = {
     sharedWritersLimit: number;
   };
   herdr: { enabled: boolean; available: boolean };
+  validators?: string[];
+  validations?: ValidationRecord[];
+  /** Exact pending integration requests currently backed by an isolated candidate. */
+  validatableRequestIds?: string[];
 };
 
 export type SubagentManagerDependencies = {
@@ -149,6 +161,7 @@ export type SubagentManagerDependencies = {
   loadConfig?: () => Promise<SubagentConfig>;
   discoverProfiles?: typeof discoverAgents;
   sessionRoot?: string;
+  runValidator?: typeof runPatchValidator;
 };
 
 type DispatchOptions = {
@@ -385,7 +398,9 @@ export class SubagentManager {
   private readonly loadConfig: () => Promise<SubagentConfig>;
   private readonly discoverProfiles: typeof discoverAgents;
   private readonly sessionRoot: string;
+  private readonly runValidator: typeof runPatchValidator;
   private readonly missions = new Map<string, MissionRecord>();
+  private readonly validations = new Map<string, ValidationRecord>();
   private readonly batches = new Map<string, DispatchBatch>();
   private batchSequence = 0;
   private readonly batchRoutes = new Map<string, Promise<void>>();
@@ -405,6 +420,15 @@ export class SubagentManager {
   private evaluationCapacity: EvaluationCapacityPointV1[] = [];
   private evaluationRequests = new Map<string, EvaluationRequestV1>();
   private runtimeLimits: RuntimeLimits = { ...DEFAULT_SUBAGENT_CONFIG.runtime };
+  private validators: Record<string, ValidatorDefinition> = {};
+  private validationTail: Promise<void> = Promise.resolve();
+  private validationController?: AbortController;
+  private validationEpoch = 0;
+  private validationAdmissionOpen = false;
+  private sessionReady = false;
+  private sessionTransitions = 0;
+  private attachmentTail: Promise<void> = Promise.resolve();
+  private candidateDecisionRequestId?: string;
   private planMode = false;
   private profiles: AgentDefinition[] = [];
   private diagnostics: AgentDiagnostic[] = [];
@@ -431,6 +455,7 @@ export class SubagentManager {
     this.loadConfig = dependencies.loadConfig ?? (() => loadSubagentConfig());
     this.discoverProfiles = dependencies.discoverProfiles ?? discoverAgents;
     this.sessionRoot = dependencies.sessionRoot ?? SESSION_ROOT;
+    this.runValidator = dependencies.runValidator ?? runPatchValidator;
     const plan = pi.events.on(events.planMode, (data: unknown) => {
       this.planMode = (data as { enabled?: boolean }).enabled === true;
     });
@@ -475,18 +500,47 @@ export class SubagentManager {
   }
 
   async attachUi(ctx: ExtensionContext): Promise<void> {
-    this.ctx = ctx;
+    this.assertOpen();
     const parent = parentSessionId(ctx);
-    const parentChanged = this.restoredParent !== parent;
-    if (parentChanged) {
-      if (this.restoredParent) await this.leaveParentSession();
-      this.resetEvaluationLedger();
-      this.restoredParent = parent;
+    const switching = this.restoredParent !== undefined && this.restoredParent !== parent;
+    if (switching) {
+      this.sessionTransitions += 1;
+      this.sessionReady = false;
+      this.closeValidationAdmission("Parent session changed.");
     }
-    const config = await this.refreshProfiles(ctx);
-    if (parentChanged) await this.restore(parent);
-    await this.pruneRetention(config);
-    this.reconcileBranch(ctx);
+
+    let release!: () => void;
+    const turn = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const predecessor = this.attachmentTail;
+    this.attachmentTail = predecessor.catch(() => {}).then(() => turn);
+    await predecessor.catch(() => {});
+    let ready = false;
+    try {
+      this.assertOpen();
+      const parentChanged = this.restoredParent !== parent;
+      if (parentChanged) {
+        this.sessionReady = false;
+        this.closeValidationAdmission("Parent session changed.");
+        if (this.restoredParent) await this.leaveParentSession();
+        // Do not expose the new context until every operation admitted by the old
+        // session has drained and its state has been persisted and cleared.
+        this.ctx = ctx;
+        this.resetEvaluationLedger();
+        this.restoredParent = parent;
+      } else this.ctx = ctx;
+      const config = await this.refreshProfiles(ctx);
+      if (parentChanged) await this.restore(parent);
+      await this.pruneRetention(config);
+      this.reconcileBranch(ctx);
+      this.sessionReady = true;
+      ready = true;
+    } finally {
+      if (switching) this.sessionTransitions = Math.max(0, this.sessionTransitions - 1);
+      release();
+      if (ready) this.reopenValidationAdmission();
+    }
   }
 
   reconcileBranch(ctx: ExtensionContext): void {
@@ -517,7 +571,11 @@ export class SubagentManager {
       scope: [...mission.scope],
       worktree: mission.worktree ? { ...mission.worktree } : undefined,
       candidate: mission.candidate
-        ? { files: [...mission.candidate.files], hasChanges: mission.candidate.hasChanges }
+        ? {
+            candidateId: mission.candidate.candidateId,
+            files: [...mission.candidate.files],
+            hasChanges: mission.candidate.hasChanges,
+          }
         : undefined,
     }));
   }
@@ -632,6 +690,9 @@ export class SubagentManager {
         sharedWritersLimit: this.runtimeLimits.maxSharedWriters,
       },
       herdr: { ...this.herdr },
+      validators: Object.keys(this.validators).sort(),
+      validations: [...this.validations.values()].map((record) => structuredClone(record)),
+      validatableRequestIds: this.validatableRequestIds(),
     };
   }
 
@@ -855,11 +916,18 @@ export class SubagentManager {
         models: { overrides: {} },
         capabilities: {},
         runners: {},
+        validators: {},
         herdr: { ...DEFAULT_SUBAGENT_CONFIG.herdr },
         profiles: {},
       };
     }
     this.runtimeLimits = { ...config.runtime };
+    this.validators = Object.fromEntries(
+      Object.entries(config.validators).map(([name, validator]) => [
+        name,
+        { ...validator, args: [...validator.args] },
+      ]),
+    );
     this.profiles = discovered.profiles.map((profile) => ({
       ...profileClone(profile),
       metadata: config.profiles[profile.name] ? { ...config.profiles[profile.name] } : undefined,
@@ -917,6 +985,8 @@ export class SubagentManager {
   }
 
   private async leaveParentSession(): Promise<void> {
+    await this.cancelValidation("Parent session changed.");
+    await this.drainRequestResponses();
     const active = this.store.active();
     const activeIds = new Set(active.map((run) => run.id));
     await Promise.all(
@@ -936,6 +1006,7 @@ export class SubagentManager {
     this.inbox.reset();
     this.claims.clear();
     this.missions.clear();
+    this.validations.clear();
     this.batches.clear();
     this.batchRoutes.clear();
     this.pendingContinuationReceipts.clear();
@@ -945,14 +1016,45 @@ export class SubagentManager {
   }
 
   private async pruneRetention(config: SubagentConfig): Promise<void> {
-    const candidates = this.store.prune(config.retention);
+    const protectedRunIds = new Set<string>();
+    for (const validation of this.validations.values()) {
+      if (validation.cleanup !== "retained" && validation.terminationProven === true) continue;
+      if (validation.target.kind === "run") protectedRunIds.add(validation.target.id);
+      else {
+        const mission = this.missions.get(validation.target.id);
+        if (mission) protectedRunIds.add(mission.orchestratorId);
+      }
+    }
+    for (const mission of this.missions.values())
+      if (mission.cleanupFailure) protectedRunIds.add(mission.orchestratorId);
+    const candidates = this.store.prune(config.retention, Date.now(), protectedRunIds);
     const removed: RunRecord[] = [];
+    const removedMissionIds = new Set<string>();
     for (const run of candidates) {
       try {
         if (run.worktree) {
           await removeMissionWorktree(run.worktree, { force: true });
           run.worktree = undefined;
           run.candidate = undefined;
+        }
+        for (const [missionId, mission] of this.missions) {
+          if (mission.orchestratorId !== run.id) continue;
+          try {
+            if (mission.worktree) {
+              await removeMissionWorktree(mission.worktree, { force: true });
+              mission.worktree = undefined;
+              mission.candidate = undefined;
+            }
+            this.missions.delete(missionId);
+            removedMissionIds.add(missionId);
+          } catch (cause) {
+            const message = cause instanceof Error ? cause.message : String(cause);
+            mission.status = "failed";
+            mission.cleanupFailure = { at: iso(), message };
+            throw new Error(`Mission ${mission.id} retention cleanup failed: ${message}`, {
+              cause,
+            });
+          }
         }
         const child = relative(this.sessionRoot, run.sessionDir);
         if (!child || child.startsWith("..") || child.split(/[\\/]/u).includes(".."))
@@ -991,26 +1093,12 @@ export class SubagentManager {
         ];
       } else this.evaluationCapacity = this.evaluationCapacity.slice(-1);
     }
-    for (const [id, mission] of this.missions) {
-      if (!removedIds.has(mission.orchestratorId)) continue;
-      try {
-        if (mission.worktree) {
-          await removeMissionWorktree(mission.worktree, { force: true });
-          mission.worktree = undefined;
-          mission.candidate = undefined;
-        }
-        this.missions.delete(id);
-      } catch (cause) {
-        const message = cause instanceof Error ? cause.message : String(cause);
-        mission.status = "failed";
-        mission.cleanupFailure = { at: iso(), message };
-        this.diagnostics.push({
-          path: this.statePath(this.restoredParent ?? "unknown-parent"),
-          code: "read-error",
-          message: `Mission ${mission.id} was retained after cleanup failed: ${message}`,
-        });
-      }
-    }
+    for (const [id, validation] of this.validations)
+      if (
+        (validation.target.kind === "run" && removedIds.has(validation.target.id)) ||
+        (validation.target.kind === "mission" && removedMissionIds.has(validation.target.id))
+      )
+        this.validations.delete(id);
   }
 
   async status(ctx: ExtensionContext): Promise<HubSnapshot> {
@@ -3413,11 +3501,30 @@ export class SubagentManager {
   }
 
   async respondRequest(id: string, answer: string): Promise<SupervisorRequest> {
+    this.assertOpen();
+    if (this.sessionTransitions > 0 || !this.sessionReady)
+      throw new Error("The parent session is changing.");
     const inFlight = this.requestResponses.get(id);
     if (inFlight) {
       if (inFlight.answer !== answer)
         throw new Error(`Supervisor request ${id} already has a response in progress.`);
       return inFlight.promise;
+    }
+    const pending = this.inbox.all().find((request) => request.id === id);
+    if (!pending) throw new Error(`Unknown supervisor request: ${id}.`);
+    const candidateDecision =
+      pending.status === "pending" &&
+      pending.kind === "integration-ready" &&
+      (answer === "integrate" || answer === "keep");
+    if (candidateDecision) {
+      if (this.candidateDecisionRequestId)
+        throw new Error(
+          `Candidate decision ${this.candidateDecisionRequestId} is already in progress.`,
+        );
+      // This is deliberately synchronous: once a decision call has been admitted,
+      // no later validate() call can enter behind its safety check.
+      this.candidateDecisionRequestId = id;
+      this.closeValidationAdmission(`Candidate decision ${answer} was requested.`);
     }
     const operation = this.respondRequestOnce(id, answer);
     this.requestResponses.set(id, { answer, promise: operation });
@@ -3425,19 +3532,315 @@ export class SubagentManager {
       return await operation;
     } finally {
       if (this.requestResponses.get(id)?.promise === operation) this.requestResponses.delete(id);
+      if (candidateDecision && this.candidateDecisionRequestId === id) {
+        this.candidateDecisionRequestId = undefined;
+        this.reopenValidationAdmission();
+      }
     }
+  }
+
+  private validatableRequestIds(): string[] {
+    return this.inbox
+      .all()
+      .filter((request) => {
+        if (request.status !== "pending" || request.kind !== "integration-ready") return false;
+        if (request.missionId) {
+          const mission = this.missions.get(request.missionId);
+          return Boolean(
+            mission?.candidate?.hasChanges &&
+              mission.worktree &&
+              mission.integrationRequestId === request.id,
+          );
+        }
+        const run = this.store.get(request.fromRunId);
+        return Boolean(
+          run?.candidate?.hasChanges && run.worktree && run.integrationRequestId === request.id,
+        );
+      })
+      .map((request) => request.id);
+  }
+
+  private assertValidatableRequest(requestId: string | undefined, target: ValidationTarget): void {
+    const request = requestId
+      ? this.inbox.all().find((entry) => entry.id === requestId)
+      : undefined;
+    if (
+      request?.status !== "pending" ||
+      request.kind !== "integration-ready" ||
+      (target.kind === "mission"
+        ? request.missionId !== target.id
+        : request.missionId !== undefined || request.fromRunId !== target.id)
+    )
+      throw new Error("The exact candidate integration request is no longer pending.");
+  }
+
+  private validationCandidate(target: ValidationTarget): {
+    candidate: WorktreeCandidate;
+    worktree: MissionWorktree;
+    requestId?: string;
+    detail: string;
+  } {
+    if (target.kind === "run") {
+      const run = this.store.get(target.id);
+      if (!run?.candidate?.hasChanges || !run.worktree)
+        throw new Error(`Run ${target.id} has no pending isolated integration candidate.`);
+      this.assertValidatableRequest(run.integrationRequestId, target);
+      return {
+        candidate: run.candidate,
+        worktree: run.worktree,
+        requestId: run.integrationRequestId,
+        detail: `${run.candidate.files.length} changed file(s): ${run.candidate.files.join(", ")}`,
+      };
+    }
+    const mission = this.missions.get(target.id);
+    if (!mission?.candidate?.hasChanges || !mission.worktree)
+      throw new Error(`Mission ${target.id} has no pending isolated integration candidate.`);
+    this.assertValidatableRequest(mission.integrationRequestId, target);
+    return {
+      candidate: mission.candidate,
+      worktree: mission.worktree,
+      requestId: mission.integrationRequestId,
+      detail: `${mission.candidate.files.length} changed file(s): ${mission.candidate.files.join(", ")}`,
+    };
+  }
+
+  validationSnapshots(): ValidationRecord[] {
+    return [...this.validations.values()].map((record) => structuredClone(record));
+  }
+
+  private setValidationRecord(record: ValidationRecord, replacePreviousSafe = false): void {
+    if (replacePreviousSafe)
+      for (const [id, previous] of this.validations)
+        if (
+          id !== record.id &&
+          previous.target.kind === record.target.kind &&
+          previous.target.id === record.target.id &&
+          previous.candidateId === record.candidateId &&
+          previous.validator === record.validator &&
+          previous.cleanup === "removed" &&
+          previous.terminationProven === true
+        )
+          this.validations.delete(id);
+    this.validations.set(record.id, structuredClone(record));
+  }
+
+  private updateIntegrationValidationDetail(
+    requestId: string,
+    target: ValidationTarget,
+    detail: string,
+    candidate: WorktreeCandidate,
+    worktree: MissionWorktree,
+  ): void {
+    if (candidate.baseCommit !== worktree.baseCommit)
+      throw new Error("Candidate metadata is inconsistent with its worktree.");
+    const candidateId = candidate.candidateId;
+    const latest = [...this.validations.values()]
+      .filter(
+        (record) =>
+          record.target.kind === target.kind &&
+          record.target.id === target.id &&
+          record.candidateId === candidateId,
+      )
+      .sort((left, right) =>
+        (right.finishedAt ?? right.startedAt ?? right.preparedAt).localeCompare(
+          left.finishedAt ?? left.startedAt ?? left.preparedAt,
+        ),
+      )[0];
+    if (latest)
+      this.inbox.updateDetail(
+        requestId,
+        `${detail}\n\nLatest validation (report only):\n${validationSummary(latest)}`,
+      );
+  }
+
+  private assertValidationAdmission(epoch?: number): void {
+    this.assertOpen();
+    if (
+      !this.validationAdmissionOpen ||
+      !this.sessionReady ||
+      this.sessionTransitions > 0 ||
+      this.candidateDecisionRequestId ||
+      (epoch !== undefined && epoch !== this.validationEpoch)
+    )
+      throw new Error("Candidate validation admission is closed.");
+  }
+
+  private closeValidationAdmission(reason: string): void {
+    this.validationAdmissionOpen = false;
+    this.validationEpoch += 1;
+    this.validationController?.abort(new Error(reason));
+  }
+
+  private reopenValidationAdmission(): void {
+    if (
+      !this.shutdownController.signal.aborted &&
+      !this.shutdownPromise &&
+      this.sessionReady &&
+      this.sessionTransitions === 0 &&
+      !this.candidateDecisionRequestId
+    )
+      this.validationAdmissionOpen = true;
+  }
+
+  /** Explicitly run one trusted validator. Calls are serialized and never retried. */
+  async validate(
+    target: ValidationTarget,
+    validatorName: string,
+    signal?: AbortSignal,
+  ): Promise<ValidationRecord> {
+    this.assertValidationAdmission();
+    if (!validatorName.trim()) throw new Error("A configured validator name is required.");
+    const validator = this.validators[validatorName];
+    if (!validator)
+      throw new Error(
+        `Unknown trusted validator: ${validatorName}. Configure validators.${validatorName} first.`,
+      );
+    // Capture exact identity synchronously. It is checked again when this serialized
+    // attempt reaches the head of the queue.
+    const admitted = this.validationCandidate(target);
+    const admittedCandidateId = admitted.candidate.candidateId;
+    const admittedRequestId = admitted.requestId;
+    const epoch = this.validationEpoch;
+    let resolveResult!: (record: ValidationRecord) => void;
+    let rejectResult!: (cause: unknown) => void;
+    const result = new Promise<ValidationRecord>((resolve, reject) => {
+      resolveResult = resolve;
+      rejectResult = reject;
+    });
+    const queued = this.validationTail
+      .catch(() => {})
+      .then(async () => {
+        this.assertValidationAdmission(epoch);
+        const selected = this.validationCandidate(target);
+        if (
+          selected.requestId !== admittedRequestId ||
+          selected.candidate.candidateId !== admittedCandidateId
+        )
+          throw new Error("The admitted integration candidate changed before validation started.");
+        if (selected.candidate.baseCommit !== selected.worktree.baseCommit)
+          throw new Error("Candidate metadata is inconsistent with its worktree.");
+        const candidateId = selected.candidate.candidateId;
+        const quarantined = [...this.validations.values()].find(
+          (record) =>
+            record.target.kind === target.kind &&
+            record.target.id === target.id &&
+            record.candidateId === candidateId &&
+            record.validator === validatorName &&
+            (record.cleanup === "retained" || record.terminationProven === false),
+        );
+        if (quarantined)
+          throw new Error(
+            `Validator ${validatorName} cannot run again while attempt ${quarantined.id} remains quarantined.`,
+          );
+        const updateRequestDetail = () => {
+          if (!selected.requestId) return;
+          const pending = this.inbox
+            .all()
+            .some((request) => request.id === selected.requestId && request.status === "pending");
+          if (pending)
+            this.updateIntegrationValidationDetail(
+              selected.requestId,
+              target,
+              selected.detail,
+              selected.candidate,
+              selected.worktree,
+            );
+        };
+        const controller = new AbortController();
+        this.validationController = controller;
+        const abort = (reason: unknown) => {
+          if (!controller.signal.aborted)
+            controller.abort(reason instanceof Error ? reason : new Error(String(reason)));
+        };
+        const onCallerAbort = () => abort(signal?.reason ?? new Error("Validation was aborted."));
+        const onShutdown = () => abort(this.shutdownController.signal.reason);
+        signal?.addEventListener("abort", onCallerAbort, { once: true });
+        this.shutdownController.signal.addEventListener("abort", onShutdown, { once: true });
+        if (signal?.aborted) onCallerAbort();
+        try {
+          // Admission may have closed between controller setup and process invocation.
+          this.assertValidationAdmission(epoch);
+          const completed = await this.runValidator({
+            target,
+            validatorName,
+            validator: { ...validator, args: [...validator.args] },
+            candidate: selected.candidate,
+            worktree: selected.worktree,
+            signal: controller.signal,
+            onPreparing: async (record) => {
+              this.setValidationRecord(record, true);
+              updateRequestDetail();
+              this.publish();
+              await this.flushPersistence();
+            },
+            onRunning: async (record) => {
+              this.setValidationRecord(record);
+              updateRequestDetail();
+              this.publish();
+              await this.flushPersistence();
+            },
+          });
+          this.setValidationRecord(completed);
+          updateRequestDetail();
+          this.publish();
+          await this.flushPersistence();
+          resolveResult(structuredClone(completed));
+        } finally {
+          signal?.removeEventListener("abort", onCallerAbort);
+          this.shutdownController.signal.removeEventListener("abort", onShutdown);
+          if (this.validationController === controller) this.validationController = undefined;
+        }
+      });
+    this.validationTail = queued.catch((cause) => rejectResult(cause));
+    return result;
+  }
+
+  private async cancelValidation(reason: string): Promise<void> {
+    this.closeValidationAdmission(reason);
+    await this.validationTail.catch(() => {});
+  }
+
+  private async drainRequestResponses(): Promise<void> {
+    while (this.requestResponses.size) {
+      const pending = [...this.requestResponses.values()].map((entry) => entry.promise);
+      await Promise.allSettled(pending);
+    }
+  }
+
+  private assertValidationAllowsIntegration(
+    target: ValidationTarget,
+    candidate: WorktreeCandidate,
+    worktree: MissionWorktree,
+  ): void {
+    if (candidate.baseCommit !== worktree.baseCommit)
+      throw new Error("Candidate metadata is inconsistent with its worktree.");
+    const candidateId = candidate.candidateId;
+    const matching = [...this.validations.values()].filter(
+      (record) =>
+        record.target.kind === target.kind &&
+        record.target.id === target.id &&
+        record.candidateId === candidateId,
+    );
+    if (matching.some((record) => record.status === "preparing" || record.status === "running"))
+      throw new Error("Integration is blocked while candidate validation is active.");
+    const unsafe = matching.find(
+      (record) => record.cleanup === "retained" || record.terminationProven !== true,
+    );
+    if (unsafe)
+      throw new Error(
+        `Integration is blocked because validator cleanup is unproven; inspect retained workspace ${unsafe.retainedPath ?? unsafe.intendedPath}.`,
+      );
   }
 
   private async respondRequestOnce(id: string, answer: string): Promise<SupervisorRequest> {
     const pending = this.inbox.all().find((request) => request.id === id);
     if (!pending) throw new Error(`Unknown supervisor request: ${id}.`);
-    if (
-      pending.kind === "integration-ready" &&
-      answer === "integrate" &&
-      pending.status === "pending"
-    ) {
-      if (pending.missionId) await this.integrateMission(pending.missionId);
-      else await this.integrateRunCandidate(pending.fromRunId);
+    if (pending.kind === "integration-ready" && pending.status === "pending") {
+      if (answer === "integrate") {
+        if (pending.missionId) await this.integrateMission(pending.missionId);
+        else await this.integrateRunCandidate(pending.fromRunId);
+      } else if (answer === "keep")
+        await this.cancelValidation("The candidate was kept for manual recovery.");
     }
     const resolved = this.inbox.resolve(id, answer);
     const run = this.store.get(resolved.fromRunId);
@@ -3446,15 +3849,35 @@ export class SubagentManager {
   }
 
   private async integrateRunCandidate(id: string): Promise<void> {
+    await this.cancelValidation("Integration was requested.");
     const run = this.store.get(id);
     if (!run?.worktree || !run.candidate)
       throw new Error(`Run ${id} has no isolated integration candidate.`);
-    await applyCandidate(run.worktree.sourceRoot, run.candidate);
-    await removeMissionWorktree(run.worktree, { force: true });
-    run.candidate = { ...run.candidate, patch: "" };
-    run.worktree = undefined;
+    const worktree = run.worktree;
+    const candidate = run.candidate;
+    this.assertValidationAllowsIntegration({ kind: "run", id }, candidate, worktree);
+    await applyCandidate(worktree.sourceRoot, candidate);
+    // Applying is the irreversible boundary. Persist removal of the candidate
+    // before cleanup so a cleanup error or restart can never apply it twice.
+    run.candidate = undefined;
+    run.integrationRequestId = undefined;
+    this.store.changed();
+    await this.flushPersistence();
+    try {
+      await removeMissionWorktree(worktree, { force: true });
+      run.worktree = undefined;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      run.cleanupFailure ??= { at: iso(), message };
+      this.appendActivity(
+        run,
+        "error",
+        `integration applied, but the original candidate worktree was retained: ${message}`,
+      );
+    }
     this.appendActivity(run, "status", "integration candidate applied to the source checkout");
     this.store.changed();
+    await this.flushPersistence();
     this.pi.events.emit(events.implementationWaveAdvance, {
       producerId: COMPLETION_PRODUCER_ID,
       reason: `integrated worktree candidate from ${run.id}`,
@@ -3612,15 +4035,27 @@ export class SubagentManager {
   }
 
   private async integrateMission(id: string): Promise<void> {
+    await this.cancelValidation("Integration was requested.");
     const mission = this.missions.get(id);
     if (!mission?.worktree || !mission.candidate)
       throw new Error(`Mission ${id} has no isolated integration candidate.`);
-    await applyCandidate(mission.worktree.sourceRoot, mission.candidate);
-    await removeMissionWorktree(mission.worktree, { force: true });
-    mission.candidate = { ...mission.candidate, patch: "" };
-    mission.worktree = undefined;
+    const worktree = mission.worktree;
+    const candidate = mission.candidate;
+    this.assertValidationAllowsIntegration({ kind: "mission", id }, candidate, worktree);
+    await applyCandidate(worktree.sourceRoot, candidate);
+    mission.candidate = undefined;
+    mission.integrationRequestId = undefined;
+    await this.flushPersistence();
+    try {
+      await removeMissionWorktree(worktree, { force: true });
+      mission.worktree = undefined;
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      mission.cleanupFailure ??= { at: iso(), message };
+    }
     mission.status = "integrated";
     mission.finishedAt = new Date().toISOString();
+    await this.flushPersistence();
     this.pi.events.emit(events.implementationWaveAdvance, {
       producerId: COMPLETION_PRODUCER_ID,
       reason: `integrated mission worktree ${mission.id}`,
@@ -3701,10 +4136,11 @@ export class SubagentManager {
     const path = this.statePath(this.restoredParent);
     const payload = JSON.stringify(
       {
-        schemaVersion: 3,
+        schemaVersion: 4,
         batchSequence: this.batchSequence,
         batches: this.batchSnapshots(),
         runs: this.store.all(),
+        validations: this.validationSnapshots(),
         missions: [...this.missions.values()].map((mission) => ({
           ...mission,
           scope: [...mission.scope],
@@ -3782,6 +4218,13 @@ export class SubagentManager {
         ],
       });
       run.integrationRequestId = request.id;
+      this.updateIntegrationValidationDetail(
+        request.id,
+        { kind: "run", id: run.id },
+        `${run.candidate.files.length} changed file(s): ${run.candidate.files.join(", ")}`,
+        run.candidate,
+        run.worktree,
+      );
     }
     for (const mission of this.missions.values()) {
       if (!mission.worktree || !mission.candidate?.hasChanges) continue;
@@ -3797,6 +4240,13 @@ export class SubagentManager {
         ],
       });
       mission.integrationRequestId = request.id;
+      this.updateIntegrationValidationDetail(
+        request.id,
+        { kind: "mission", id: mission.id },
+        `${mission.candidate.files.length} changed file(s): ${mission.candidate.files.join(", ")}`,
+        mission.candidate,
+        mission.worktree,
+      );
     }
   }
 
@@ -3809,10 +4259,12 @@ export class SubagentManager {
         batches?: DispatchBatch[];
         runs?: RunRecord[];
         missions?: MissionRecord[];
+        validations?: ValidationRecord[];
         evaluation?: EvaluationTraceV1;
       };
-      if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3) return;
-      if (parsed.schemaVersion === 3) {
+      if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3 && parsed.schemaVersion !== 4)
+        return;
+      if (parsed.schemaVersion === 3 || parsed.schemaVersion === 4) {
         this.batchSequence = Number.isSafeInteger(parsed.batchSequence)
           ? Math.max(0, parsed.batchSequence ?? 0)
           : 0;
@@ -3828,6 +4280,53 @@ export class SubagentManager {
             continue;
           this.batches.set(batch.id, structuredClone(batch));
           this.batchSequence = Math.max(this.batchSequence, batch.sequence || 0);
+        }
+      }
+      if (parsed.schemaVersion === 4) {
+        for (const raw of parsed.validations ?? []) {
+          if (
+            !raw ||
+            typeof raw.id !== "string" ||
+            typeof raw.candidateId !== "string" ||
+            typeof raw.validator !== "string" ||
+            !raw.target ||
+            !["run", "mission"].includes(raw.target.kind) ||
+            typeof raw.target.id !== "string" ||
+            !["preparing", "running", "completed", "interrupted"].includes(raw.status) ||
+            typeof raw.intendedPath !== "string"
+          )
+            continue;
+          const record = structuredClone(raw);
+          record.terminationProven ??= false;
+          if (record.status === "preparing" || record.status === "running") {
+            record.status = "interrupted";
+            record.outcome = "aborted";
+            record.finishedAt = iso();
+            record.durationMs = Math.max(
+              0,
+              Date.parse(record.finishedAt) - Date.parse(record.startedAt ?? record.preparedAt),
+            );
+            record.error =
+              "Validation was interrupted by manager restart; it was not executed again.";
+            try {
+              await fs.lstat(record.intendedPath);
+              // A restarted manager cannot prove that the former validator process tree ended.
+              // Retain the workspace rather than racing it with forced cleanup.
+              record.cleanup = "retained";
+              record.retainedPath = record.intendedPath;
+              record.cleanupError =
+                "Restart recovery retained the workspace because prior process termination is unproven.";
+            } catch (cause) {
+              record.cleanup =
+                (cause as NodeJS.ErrnoException).code === "ENOENT" ? "removed" : "retained";
+              if (record.cleanup === "retained") record.retainedPath = record.intendedPath;
+              record.cleanupError =
+                record.cleanup === "removed"
+                  ? "The workspace is absent, but prior process termination is unproven."
+                  : `Restart recovery could not inspect the workspace: ${cause instanceof Error ? cause.message : String(cause)}`;
+            }
+          }
+          this.validations.set(record.id, record);
         }
       }
       if (parsed.evaluation?.schemaVersion === 1) {
@@ -3951,6 +4450,8 @@ export class SubagentManager {
         }
         if (run.worktree) {
           try {
+            if (run.candidate)
+              run.candidate = normalizeWorktreeCandidate(run.candidate, run.worktree.baseCommit);
             run.worktree = await validateMissionWorktree(
               run.worktree,
               this.ctx?.cwd ?? run.worktree.sourceRoot,
@@ -4009,6 +4510,11 @@ export class SubagentManager {
         if (mission.status === "running" || mission.status === "blocked") mission.status = "parked";
         if (mission.worktree) {
           try {
+            if (mission.candidate)
+              mission.candidate = normalizeWorktreeCandidate(
+                mission.candidate,
+                mission.worktree.baseCommit,
+              );
             mission.worktree = await validateMissionWorktree(
               mission.worktree,
               this.ctx?.cwd ?? mission.worktree.sourceRoot,
@@ -4031,7 +4537,7 @@ export class SubagentManager {
         this.missions.set(mission.id, mission);
       }
       this.restoreIntegrationRequests();
-      if (parsed.schemaVersion === 3) {
+      if (parsed.schemaVersion === 3 || parsed.schemaVersion === 4) {
         let acknowledgementChanged = false;
         for (const batch of this.batches.values())
           if (this.acknowledgeDeliveredBatch(batch)) acknowledgementChanged = true;
@@ -4089,6 +4595,8 @@ export class SubagentManager {
     this.unsubscribePlanReview();
     this.unsubscribeContinuationReceipt();
     if (!this.shutdownPromise) {
+      this.sessionReady = false;
+      this.closeValidationAdmission("Parent session is shutting down.");
       this.shutdownController.abort(new Error("Parent session is shutting down."));
       this.shutdownPromise = this.shutdownNow();
     }
@@ -4096,6 +4604,8 @@ export class SubagentManager {
   }
 
   private async shutdownNow(): Promise<void> {
+    await this.cancelValidation("Parent session is shutting down.");
+    await this.drainRequestResponses();
     await this.parkActiveForShutdown();
     let timeout: ReturnType<typeof setTimeout> | undefined;
     const dispatchSettled = await Promise.race([

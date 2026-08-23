@@ -48,6 +48,7 @@ A profile class sets an authority ceiling. A read, review, advisory, or orchestr
 | `subagent_status` | Show profiles, task claims, capacity, requests, and diagnostics. |
 | `subagent_respond` | Resolve a pending supervisor request so a blocked child can continue. |
 | `subagent_collect` | Read reports or wait for selected runs; returns early when a child needs supervisor input. |
+| `subagent_validate` | Explicitly run one trusted configured validator against the exact pending run or mission patch. |
 | `subagent_steer` | Guide an active run or revive a parked native or RPC run. |
 | `subagent_stop` | Stop runs and their descendants. |
 
@@ -77,9 +78,9 @@ A top-level batch sends one aggregate continuation after all members are termina
 
 The collapsed aggregate renderer shows each report or failure summary. Expanded output shows ordered reports and terminal evidence. The legacy `subagent-completion-v2` renderer remains available for old session messages.
 
-Manager persistence now uses schema version 3. Schema-version-2 state restores its runs but does not create or replay ambiguous historical completion batches. Batch claims, ready state, and continuation IDs survive reload. The manager reconciles coordinator receipts before it retries delivery. It writes batch membership and each starting run before it starts that run's worktree or transport.
+Manager persistence now uses schema version 4 and reads versions 2, 3, and 4. Schema-version-2 state restores its runs but does not create or replay ambiguous historical completion batches. Batch claims, ready state, and continuation IDs survive reload. Schema 4 also stores the latest validation for each candidate and validator. The manager marks unfinished validation interrupted on restore and never executes or retries its command. It writes the intended disposable path before worktree creation and the running state before command spawn.
 
-An open worktree integration request gates implementation finalization. Accepting the integration advances the implementation wave after the candidate changes the source checkout. Keeping the worktree closes the gate without reporting a source change.
+An open worktree integration request gates implementation finalization. Accepting the integration advances the implementation wave after the candidate changes the source checkout. Keeping the worktree closes the gate without reporting a source change. Validation does not answer this request. An ordinary failed check remains manually integrable. Active validation or unproven validator-workspace cleanup blocks integration.
 
 ## Native transport and lifecycle
 
@@ -132,6 +133,7 @@ Use these keys:
 | Up or Down | Change the selected item. |
 | Home, End, Page Up, or Page Down | Move through long sections. |
 | Enter | Answer a request, revive a parked run, or toggle a profile. |
+| `v` | Validate a selected pending integration candidate with a configured trusted validator. |
 | `s` | Steer the selected run. |
 | `x` | Stop the selected active run and its descendants. |
 | `t` | Open a display-only Herdr transcript. |
@@ -241,6 +243,14 @@ If the file exists, it must use `schemaVersion: 2`.
   },
   "capabilities": {},
   "runners": {},
+  "validators": {
+    "package-tests": {
+      "command": "npm",
+      "args": ["test", "--", "packages/example/test"],
+      "timeoutMs": 300000,
+      "maxOutputBytes": 1000000
+    }
+  },
   "herdr": {
     "direction": "right",
     "maxOutputBytes": 1000000
@@ -367,6 +377,18 @@ The external runner definition uses the profile name as its key:
 ```
 
 An external run cannot be steered or revived. Start a new run for a follow-up.
+
+## Report-only patch validation
+
+The optional global `validators` catalog is trusted user configuration. Project configuration cannot define it. Each entry has a `command` with a non-whitespace character, literal string-token `args`, `timeoutMs` from 1 through 600,000, and `maxOutputBytes` from 1 through 1,048,576. Command and argument tokens are not shell text. Empty arguments and leading or trailing argument whitespace are preserved. Validator entries cannot configure environment variables. Hackler starts the command directly with `shell: false`, closes stdin, and does not interpret shell metacharacters in an argument.
+
+Validation is always an explicit `subagent_validate` call or Agent Hub `v` action. Hackler derives a SHA-256 candidate ID from the base commit and exact captured patch, creates a disposable detached worktree at that commit, applies only that patch, and runs from the equivalent relative working directory. The source checkout and the Worker's original worktree are not used as the command workspace.
+
+Hackler globally serializes validators. It retains bounded combined stdout and stderr in manager state and in the pending request summary. The latest safe result follows the normal run or mission retention period. A cleanup quarantine protects its owning record from retention. Zero exit, nonzero exit, spawn failure, timeout, cancellation, and output overflow are report outcomes. A failed check does not apply changes and does not prevent a later manual Integrate or Keep decision after safe cleanup.
+
+Timeout, cancellation, session switch, and shutdown escalate termination of the owned process tree before cleanup. Hackler removes the disposable worktree only after it can prove termination. This version has no Windows Job Object integration, so it cannot prove descendant termination after a Windows validator process starts. It quarantines the workspace even after the direct process exits normally. Any other uncertain termination or cleanup also retains the path and blocks integration. Restart marks unfinished validation interrupted and does not execute, retry, or apply it.
+
+This feature is not an operating-system sandbox. A trusted validator inherits the Pi process environment and can access resources allowed to that user. On POSIX, Hackler owns the spawned process group; a command that deliberately daemonizes into another session escapes that lifecycle boundary. Configure only reviewed, non-daemonizing local commands. Validation uses no provider or paid service unless the configured command itself does so. Hackler makes no correctness claim from a pass and never automatically runs, retries, ranks, integrates, or resolves an integration request.
 
 ## Sidecar orchestrator
 

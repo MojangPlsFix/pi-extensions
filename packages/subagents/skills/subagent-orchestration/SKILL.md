@@ -75,6 +75,10 @@ For each report:
 
 A worktree candidate requires an Inbox response. The parent agent can answer the integration request with `subagent_respond`; the manager never applies it automatically.
 
+When trusted validators are configured, use `subagent_validate` only as an explicit evidence-gathering action for a pending candidate. Select an exact validator name reported by status. The command runs once against only the stored patch in a disposable detached worktree. Read its bounded output and inspect the patch before deciding Integrate or Keep.
+
+Validation never answers the request, retries an agent or command, ranks candidates, or applies changes. An ordinary failed check remains a manual decision. Do not integrate while validation is active or when cleanup is unproven. A retained validator workspace is a quarantine that requires manual inspection. Validators have timeout, cancellation, output, process-tree, and cleanup bounds, but no operating-system sandbox. This version cannot prove Windows descendant termination after a validator starts, so Windows validation workspaces remain quarantined. Validators use no model provider or paid service unless the configured command does so. A pass is evidence for covered behavior, not a correctness guarantee.
+
 ## Plan Mode
 
 Plan Mode permits Hackler control tools. The manager rejects write dispatch and write-session revival during Plan Mode.

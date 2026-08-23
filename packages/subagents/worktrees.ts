@@ -1,4 +1,5 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
@@ -20,12 +21,22 @@ export type MissionWorktree = {
 };
 
 export type WorktreeCandidate = {
-  patch: string;
+  candidateId: string;
+  baseCommit: string;
+  patchBase64: string;
+  /** Legacy schema 2/3/early-4 UTF-8 patch representation; never written for new candidates. */
+  patch?: string;
   files: string[];
   hasChanges: boolean;
 };
 
-type CommandResult = { stdout: string; stderr: string; code: number };
+type CommandResult = {
+  stdout: string;
+  stderr: string;
+  stdoutBytes: Buffer;
+  stderrBytes: Buffer;
+  code: number;
+};
 type AbortOptions = { signal?: AbortSignal };
 
 type OwnedCommand = {
@@ -105,7 +116,7 @@ async function terminateProcessGroup(command: OwnedCommand): Promise<void> {
 function run(
   command: string,
   args: string[],
-  options: { cwd: string; input?: string; timeoutMs?: number; signal?: AbortSignal },
+  options: { cwd: string; input?: string | Buffer; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<CommandResult> {
   throwIfAborted(options.signal);
   return new Promise((resolveResult, reject) => {
@@ -170,9 +181,13 @@ function run(
       if (settled || stopping) return;
       settled = true;
       cleanup();
+      const stdoutBytes = Buffer.concat(stdout);
+      const stderrBytes = Buffer.concat(stderr);
       resolveResult({
-        stdout: Buffer.concat(stdout).toString("utf8"),
-        stderr: Buffer.concat(stderr).toString("utf8"),
+        stdout: stdoutBytes.toString("utf8"),
+        stderr: stderrBytes.toString("utf8"),
+        stdoutBytes,
+        stderrBytes,
         code: code ?? -1,
       });
     });
@@ -291,6 +306,72 @@ export async function createMissionWorktree(
   return prepared;
 }
 
+export function deriveCandidateId(baseCommit: string, patchBytes: Uint8Array): string {
+  const base = Buffer.from(baseCommit, "utf8");
+  const patch = Buffer.from(patchBytes);
+  const lengths = Buffer.alloc(16);
+  lengths.writeBigUInt64BE(BigInt(base.length), 0);
+  lengths.writeBigUInt64BE(BigInt(patch.length), 8);
+  return createHash("sha256").update(lengths).update(base).update(patch).digest("hex");
+}
+
+export function candidatePatchBytes(
+  candidate: Pick<WorktreeCandidate, "patchBase64" | "patch">,
+): Buffer {
+  if (typeof candidate.patchBase64 === "string") {
+    const bytes = Buffer.from(candidate.patchBase64, "base64");
+    if (bytes.toString("base64") !== candidate.patchBase64)
+      throw new Error("Candidate patchBase64 is not canonical base64.");
+    return bytes;
+  }
+  if (typeof candidate.patch === "string") return Buffer.from(candidate.patch, "utf8");
+  throw new Error("Candidate has no patch bytes.");
+}
+
+export function normalizeWorktreeCandidate(
+  candidate: Partial<WorktreeCandidate> & Pick<WorktreeCandidate, "files" | "hasChanges">,
+  baseCommit: string,
+): WorktreeCandidate {
+  const bytes = candidatePatchBytes(candidate as Pick<WorktreeCandidate, "patchBase64" | "patch">);
+  const candidateId = deriveCandidateId(baseCommit, bytes);
+  if (candidate.candidateId !== undefined && candidate.candidateId !== candidateId)
+    throw new Error("Stored candidate ID does not match its base commit and exact patch bytes.");
+  if (candidate.baseCommit !== undefined && candidate.baseCommit !== baseCommit)
+    throw new Error("Stored candidate base commit is inconsistent with its worktree.");
+  const normalized = {
+    candidateId,
+    baseCommit,
+    patchBase64: bytes.toString("base64"),
+    files: [...candidate.files],
+    hasChanges: candidate.hasChanges,
+  };
+  validateWorktreeCandidate(normalized);
+  return normalized;
+}
+
+export function validateWorktreeCandidate(candidate: WorktreeCandidate): Buffer {
+  if (!/^[0-9a-f]{40,64}$/iu.test(candidate.baseCommit))
+    throw new Error("Candidate base commit is invalid.");
+  const bytes = candidatePatchBytes(candidate);
+  if (deriveCandidateId(candidate.baseCommit, bytes) !== candidate.candidateId)
+    throw new Error("Stored candidate ID does not match its exact patch bytes.");
+  if (!Array.isArray(candidate.files)) throw new Error("Candidate files metadata is invalid.");
+  if (
+    candidate.files.some(
+      (file) => typeof file !== "string" || file.length === 0 || file.includes("\0"),
+    ) ||
+    new Set(candidate.files).size !== candidate.files.length
+  )
+    throw new Error("Candidate files metadata contains an invalid or duplicate path.");
+  const filesHaveChanges = candidate.files.length > 0;
+  const patchHasChanges = bytes.length > 0;
+  if (candidate.hasChanges !== filesHaveChanges || candidate.hasChanges !== patchHasChanges)
+    throw new Error(
+      "Candidate change metadata is inconsistent with its files and exact patch bytes.",
+    );
+  return bytes;
+}
+
 /** Stage only inside the isolated worktree to produce a binary-safe candidate patch. */
 export async function captureWorktreeCandidate(
   worktree: MissionWorktree,
@@ -299,13 +380,11 @@ export async function captureWorktreeCandidate(
   const signal = optionSignal(options);
   await git(worktree.root, ["add", "-A"], undefined, signal);
   try {
-    const [patch, names] = await Promise.all([
-      git(
-        worktree.root,
-        ["diff", "--cached", "--binary", "--full-index", worktree.baseCommit],
-        undefined,
+    const [patchResult, names] = await Promise.all([
+      run("git", ["diff", "--cached", "--binary", "--full-index", worktree.baseCommit], {
+        cwd: worktree.root,
         signal,
-      ),
+      }),
       git(
         worktree.root,
         ["diff", "--cached", "--name-only", "-z", worktree.baseCommit],
@@ -313,8 +392,17 @@ export async function captureWorktreeCandidate(
         signal,
       ),
     ]);
+    if (patchResult.code !== 0)
+      throw new Error(patchResult.stderr.trim() || "Failed to capture candidate patch.");
     const files = names.split("\0").filter(Boolean);
-    return { patch, files, hasChanges: files.length > 0 };
+    const patchBytes = patchResult.stdoutBytes;
+    return {
+      candidateId: deriveCandidateId(worktree.baseCommit, patchBytes),
+      baseCommit: worktree.baseCommit,
+      patchBase64: patchBytes.toString("base64"),
+      files,
+      hasChanges: files.length > 0,
+    };
   } finally {
     // Reset is part of capture and uses the same cancellation contract. On cancellation the
     // isolated worktree is retained, making any staged state inspectable rather than hidden.
@@ -324,15 +412,16 @@ export async function captureWorktreeCandidate(
 
 export async function checkCandidateApplies(
   sourceRoot: string,
-  candidate: Pick<WorktreeCandidate, "patch" | "hasChanges">,
+  candidate: WorktreeCandidate,
   options?: AbortSignal | AbortOptions,
 ): Promise<void> {
   const signal = optionSignal(options);
   throwIfAborted(signal);
+  const patchBytes = validateWorktreeCandidate(candidate);
   if (!candidate.hasChanges) return;
   const result = await run("git", ["apply", "--check", "--binary", "-"], {
     cwd: sourceRoot,
-    input: candidate.patch,
+    input: patchBytes,
     signal,
   });
   if (result.code !== 0)
@@ -343,16 +432,17 @@ export async function checkCandidateApplies(
 
 export async function applyCandidate(
   sourceRoot: string,
-  candidate: Pick<WorktreeCandidate, "patch" | "hasChanges">,
+  candidate: WorktreeCandidate,
   options?: AbortSignal | AbortOptions,
 ): Promise<void> {
   const signal = optionSignal(options);
   throwIfAborted(signal);
+  const patchBytes = validateWorktreeCandidate(candidate);
   if (!candidate.hasChanges) return;
   await checkCandidateApplies(sourceRoot, candidate, signal);
   const result = await run("git", ["apply", "--binary", "--whitespace=nowarn", "-"], {
     cwd: sourceRoot,
-    input: candidate.patch,
+    input: patchBytes,
     signal,
   });
   if (result.code !== 0)
@@ -425,13 +515,28 @@ export async function removeMissionWorktree(
     throw new Error(
       `Git reported that ${basename(worktree.root)} was removed, but its directory still exists. Safe cleanup cannot be proven; worktree retained at ${worktree.root}.`,
     );
-  try {
-    await run("git", ["worktree", "prune"], {
-      cwd: worktree.sourceRoot,
-      signal: options.signal,
-    });
-  } catch (cause) {
-    if (options.signal?.aborted) throw cause;
-    // Removal is already proven; pruning stale administrative entries is best effort.
-  }
+  const prune = await run("git", ["worktree", "prune"], {
+    cwd: worktree.sourceRoot,
+    signal: options.signal,
+  });
+  if (prune.code !== 0)
+    throw new Error(
+      `Worktree directory is absent, but Git registration pruning failed: ${prune.stderr.trim() || prune.stdout.trim() || "unknown error"}`,
+    );
+  const listed = await run("git", ["worktree", "list", "--porcelain", "-z"], {
+    cwd: worktree.sourceRoot,
+    signal: options.signal,
+  });
+  if (listed.code !== 0)
+    throw new Error(
+      `Worktree directory is absent, but Git registration inspection failed: ${listed.stderr.trim() || listed.stdout.trim() || "unknown error"}`,
+    );
+  const expectedRoot = resolve(worktree.root);
+  const remainsRegistered = listed.stdout
+    .split("\0")
+    .some((field) => field.startsWith("worktree ") && resolve(field.slice(9)) === expectedRoot);
+  if (remainsRegistered)
+    throw new Error(
+      `Worktree directory is absent, but ${basename(worktree.root)} remains registered with Git.`,
+    );
 }

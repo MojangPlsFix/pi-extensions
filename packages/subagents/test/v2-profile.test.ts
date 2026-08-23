@@ -239,6 +239,49 @@ Do the work.`,
     await expect(loadSubagentConfig(path)).resolves.toMatchObject({ herdr: { enabled: false } });
   });
 
+  it("loads strict trusted validators as literal argv without environment configuration", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagents-v2-validators-"));
+    temporary.push(root);
+    const path = join(root, "config.json");
+    await writeFile(
+      path,
+      JSON.stringify({
+        schemaVersion: 2,
+        validators: {
+          check: {
+            command: " validator-command ",
+            args: ["literal ; $HOME && *", " leading", "trailing ", ""],
+            timeoutMs: 600000,
+            maxOutputBytes: 1048576,
+          },
+        },
+      }),
+    );
+    await expect(loadSubagentConfig(path)).resolves.toMatchObject({
+      schemaVersion: 2,
+      validators: {
+        check: {
+          command: " validator-command ",
+          args: ["literal ; $HOME && *", " leading", "trailing ", ""],
+          timeoutMs: 600000,
+          maxOutputBytes: 1048576,
+        },
+      },
+    });
+    await expect(loadSubagentConfig(path, { source: "project" })).rejects.toThrow(
+      /project validators are not trusted/,
+    );
+    for (const validator of [
+      { command: "x", env: { TOKEN: "secret" } },
+      { command: "x", timeoutMs: 600001 },
+      { command: "x", maxOutputBytes: 1048577 },
+      { command: "x", args: "--shell-token" },
+    ]) {
+      await writeFile(path, JSON.stringify({ schemaVersion: 2, validators: { check: validator } }));
+      await expect(loadSubagentConfig(path)).rejects.toThrow(/validators\.check/);
+    }
+  });
+
   it("loads v2 runtime ceilings and retention defaults", async () => {
     const root = await mkdtemp(join(tmpdir(), "subagents-v2-config-"));
     temporary.push(root);

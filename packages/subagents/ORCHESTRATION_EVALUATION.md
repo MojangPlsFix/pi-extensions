@@ -38,6 +38,14 @@ A code-review study found plausible but incorrect model explanations.[^review] E
 
 A passing check only supports behavior that the check covers. Record missing coverage and manual judgments.
 
+For a pending isolated patch, a trusted local validator can collect this evidence through an explicit `subagent_validate` call or Agent Hub action. It runs the exact stored patch once in a disposable detached worktree with bounded time and output. It does not run automatically, retry, rank, integrate, or call a provider. Record nonzero exits, spawn failures, timeout, cancellation, output overflow, and retained cleanup quarantine as outcomes rather than converting them into scores. Do not integrate while the validator is active or cleanup is unproven. The validator is not an OS sandbox, and a passing result does not establish correctness beyond the check's coverage.
+
+Evaluate this action with paired local candidates before claiming that it improves decisions or correctness. Predeclare the candidate set, validator command, defect oracle, integration decision metric, time budget, output cap, and cleanup guardrail. Compare the same candidates with and without the validation report while keeping the parent, prompt, and other evidence fixed. Report ordinary failures, unsupported candidates, and quarantines separately. Do not use validator exit status as the defect oracle.
+
+### Validator design screen (2026-08-23)
+
+The implementation review pinned [OpenCode v1.18.9](https://github.com/anomalyco/opencode/tree/v1.18.9), [OpenAI Codex `rust-v0.98.0`](https://github.com/openai/codex/tree/rust-v0.98.0), and [oh-my-pi `15b5c139`](https://github.com/can1357/oh-my-pi/tree/15b5c1397fc059673e3b0bcbc50b074e6dc1f9d8). OpenCode supplied conceptual process-group and no-sandbox precedents. Codex supplied an explicit review-action precedent. Oh-my-pi supplied the closest detached-worktree and interrupted-recovery precedent. No harness combined trusted checks, exact stored patches, report-only output, and the required cleanup lifecycle. The implementation is independent and uses these sources as design constraints, not as effectiveness evidence. No scholarly search was necessary for the deterministic conformance decisions in this feature.
+
 ## Compare five policies
 
 Compare these policies under matched aggregate budgets:

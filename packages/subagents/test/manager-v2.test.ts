@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -17,6 +17,7 @@ import type {
   NativeRunSpec,
 } from "../native-backend.js";
 import { type AgentDefinition, emptyUsage } from "../types.js";
+import type { ValidationRecord, ValidationRunnerInput } from "../validation.js";
 
 const temporary: string[] = [];
 afterEach(async () => {
@@ -88,6 +89,36 @@ function boundedTask(key: string, agent = "scout", owns = `topic:${key}`) {
   };
 }
 
+function completedValidation(
+  input: ValidationRunnerInput,
+  sequence: number,
+  outcome: ValidationRecord["outcome"] = "passed",
+): ValidationRecord {
+  const at = new Date().toISOString();
+  return {
+    id: `validation-${sequence}`,
+    target: input.target,
+    candidateId: input.candidate.candidateId,
+    validator: input.validatorName,
+    status: "completed",
+    outcome,
+    preparedAt: at,
+    startedAt: at,
+    finishedAt: at,
+    durationMs: 0,
+    exitCode: outcome === "passed" ? 0 : 1,
+    output: `validator-${sequence}`,
+    outputBytes: 11,
+    outputLimitBytes: input.validator.maxOutputBytes,
+    outputTruncated: false,
+    cleanup: "removed",
+    terminationProven: true,
+    intendedPath: `/discarded/validator-${sequence}`,
+    sourceRoot: input.worktree.sourceRoot,
+    baseCommit: input.worktree.baseCommit,
+  };
+}
+
 function harness(
   sessionRoot: string,
   options: {
@@ -98,6 +129,7 @@ function harness(
       close: (runId: string) => Promise<void>;
       shutdown: () => Promise<void>;
     };
+    runValidator?: (input: ValidationRunnerInput) => Promise<ValidationRecord>;
   } = {},
 ) {
   const bus = new Map<string, Array<(data: unknown) => void>>();
@@ -155,6 +187,7 @@ function harness(
       diagnostics: [],
     }),
     sessionRoot,
+    runValidator: options.runValidator,
   });
   let sessionId = "parent-session";
   const ctx = {
@@ -715,6 +748,510 @@ describe("SubagentManager v2", () => {
       ),
     ).toBe(true);
     await restored.manager.shutdown();
+  });
+
+  it("runs an explicit failed validator without resolving or blocking manual integration", async () => {
+    // Windows cannot prove descendant cleanup without Job Objects, so every started
+    // validator is quarantined there instead of remaining manually integrable.
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.validators = {
+      check: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "const fs=require('fs');if(fs.readFileSync('file.txt','utf8')!=='candidate under test\\n')process.exit(9);console.log('checked');process.exit(3)",
+        ],
+        timeoutMs: 2_000,
+        maxOutputBytes: 1_000,
+      },
+    };
+    const subject = harness(root, { config: configured });
+    subject.ctx.cwd = repository;
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          ...boundedTask("validate-run-candidate", "worker", "path:file.txt"),
+          workspace: "worktree",
+        },
+      ],
+      subject.ctx,
+    );
+    await writeFile(join(run!.worktree!.cwd, "file.txt"), "candidate under test\n");
+    subject.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+    await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+    const request = subject.manager.pendingRequests()[0]!;
+    const validation = await subject.manager.validate({ kind: "run", id: run!.id }, "check");
+    expect(validation).toMatchObject({ outcome: "failed", exitCode: 3, cleanup: "removed" });
+    const operationalTrace = JSON.stringify(subject.manager.evaluationTrace());
+    expect(operationalTrace).not.toContain("checked");
+    expect(operationalTrace).not.toContain(validation.intendedPath);
+    expect(subject.manager.pendingRequests()).toHaveLength(1);
+    expect(subject.manager.pendingRequests()[0]?.detail).toContain(
+      "Latest validation (report only)",
+    );
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("base\n");
+    await subject.manager.respondRequest(request.id, "integrate");
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("candidate under test\n");
+    await subject.manager.shutdown();
+  });
+
+  it("serializes validator calls and integration cancels an active check before applying", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const lock = join(root, "validator.lock");
+    const configured = config();
+    configured.validators = {
+      serialized: {
+        command: process.execPath,
+        args: [
+          "-e",
+          "const fs=require('fs');const p=process.argv[1];const fd=fs.openSync(p,'wx');setTimeout(()=>{fs.closeSync(fd);fs.unlinkSync(p)},80)",
+          lock,
+        ],
+        timeoutMs: 2_000,
+        maxOutputBytes: 1_000,
+      },
+      long: {
+        command: process.execPath,
+        args: ["-e", "setInterval(()=>{},1000)"],
+        timeoutMs: 5_000,
+        maxOutputBytes: 1_000,
+      },
+    };
+    const subject = harness(root, { config: configured });
+    subject.ctx.cwd = repository;
+    const [run] = await subject.manager.dispatch(
+      [
+        {
+          ...boundedTask("serialized-validation", "worker", "path:file.txt"),
+          workspace: "worktree",
+        },
+      ],
+      subject.ctx,
+    );
+    await writeFile(join(run!.worktree!.cwd, "file.txt"), "serialized candidate\n");
+    subject.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+    await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+    const target = { kind: "run" as const, id: run!.id };
+    const serial = await Promise.all([
+      subject.manager.validate(target, "serialized"),
+      subject.manager.validate(target, "serialized"),
+    ]);
+    expect(serial.map((record) => record.outcome)).toEqual(["passed", "passed"]);
+    expect(
+      subject.manager.validationSnapshots().filter((record) => record.validator === "serialized"),
+    ).toHaveLength(1);
+
+    const active = subject.manager.validate(target, "long");
+    await vi.waitFor(() =>
+      expect(
+        subject.manager.validationSnapshots().some((record) => record.status === "running"),
+      ).toBe(true),
+    );
+    const request = subject.manager.pendingRequests()[0]!;
+    await subject.manager.respondRequest(request.id, "integrate");
+    await expect(active).resolves.toMatchObject({ outcome: "aborted", cleanup: "removed" });
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("serialized candidate\n");
+    await subject.manager.shutdown();
+  });
+
+  it("closes admission synchronously, cancels queued validation, and serializes candidate decisions", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.validators = {
+      fake: { command: "fake", args: [], timeoutMs: 1_000, maxOutputBytes: 1_000 },
+    };
+    let invocation = 0;
+    let active = 0;
+    let maximumActive = 0;
+    const releases: Array<() => void> = [];
+    const runValidator = vi.fn(async (input: ValidationRunnerInput) => {
+      const sequence = ++invocation;
+      active += 1;
+      maximumActive = Math.max(maximumActive, active);
+      const running = {
+        ...completedValidation(input, sequence),
+        status: "running" as const,
+        outcome: undefined,
+        finishedAt: undefined,
+        cleanup: "pending" as const,
+        terminationProven: false,
+      };
+      await input.onRunning?.(running);
+      await new Promise<void>((resolve) => {
+        releases.push(resolve);
+        if (input.signal?.aborted) resolve();
+        else input.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      active -= 1;
+      return completedValidation(input, sequence, input.signal?.aborted ? "aborted" : "passed");
+    });
+    const subject = harness(root, { config: configured, runValidator });
+    subject.ctx.cwd = repository;
+    const [run] = await subject.manager.dispatch(
+      [{ ...boundedTask("admission-race", "worker", "path:file.txt"), workspace: "worktree" }],
+      subject.ctx,
+    );
+    await writeFile(join(run!.worktree!.cwd, "file.txt"), "admission candidate\n");
+    subject.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+    await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+    const target = { kind: "run" as const, id: run!.id };
+
+    const first = subject.manager.validate(target, "fake");
+    const queued = subject.manager.validate(target, "fake");
+    await vi.waitFor(() => expect(runValidator).toHaveBeenCalledTimes(1));
+    expect(maximumActive).toBe(1);
+    releases.shift()?.();
+    await expect(first).resolves.toMatchObject({ outcome: "passed" });
+    await vi.waitFor(() => expect(runValidator).toHaveBeenCalledTimes(2));
+    expect(maximumActive).toBe(1);
+
+    const request = subject.manager.pendingRequests()[0]!;
+    const integration = subject.manager.respondRequest(request.id, "integrate");
+    await expect(subject.manager.validate(target, "fake")).rejects.toThrow(/admission is closed/);
+    await expect(subject.manager.respondRequest(request.id, "keep")).rejects.toThrow(
+      /response in progress|decision .* in progress/,
+    );
+    await expect(queued).resolves.toMatchObject({ outcome: "aborted" });
+    await integration;
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("admission candidate\n");
+    expect(run!.candidate).toBeUndefined();
+    expect(run!.worktree).toBeUndefined();
+    expect(maximumActive).toBe(1);
+    await expect(subject.manager.validate(target, "fake")).rejects.toThrow(
+      /no pending isolated integration candidate|exact candidate/,
+    );
+    await subject.manager.shutdown();
+  });
+
+  it("Keep cancels active and queued validation and exact request eligibility disappears", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.validators = {
+      fake: { command: "fake", args: [], timeoutMs: 1_000, maxOutputBytes: 1_000 },
+    };
+    let sequence = 0;
+    const runValidator = vi.fn(async (input: ValidationRunnerInput) => {
+      const current = ++sequence;
+      await input.onRunning?.({
+        ...completedValidation(input, current),
+        status: "running",
+        outcome: undefined,
+        finishedAt: undefined,
+        cleanup: "pending",
+        terminationProven: false,
+      });
+      await new Promise<void>((resolve) => {
+        if (input.signal?.aborted) resolve();
+        else input.signal?.addEventListener("abort", () => resolve(), { once: true });
+      });
+      return completedValidation(input, current, "aborted");
+    });
+    const subject = harness(root, { config: configured, runValidator });
+    subject.ctx.cwd = repository;
+    const [run] = await subject.manager.dispatch(
+      [{ ...boundedTask("keep-race", "worker", "path:file.txt"), workspace: "worktree" }],
+      subject.ctx,
+    );
+    await writeFile(join(run!.worktree!.cwd, "file.txt"), "kept candidate\n");
+    subject.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+    await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+    const request = subject.manager.pendingRequests()[0]!;
+    expect(subject.manager.hubSnapshot().validatableRequestIds).toEqual([request.id]);
+    const target = { kind: "run" as const, id: run!.id };
+    const active = subject.manager.validate(target, "fake");
+    const queued = subject.manager.validate(target, "fake");
+    await vi.waitFor(() => expect(runValidator).toHaveBeenCalledTimes(1));
+    const keeping = subject.manager.respondRequest(request.id, "keep");
+    await expect(subject.manager.validate(target, "fake")).rejects.toThrow(/admission is closed/);
+    await expect(active).resolves.toMatchObject({ outcome: "aborted" });
+    await expect(queued).rejects.toThrow(/admission is closed/);
+    await keeping;
+    expect(subject.manager.hubSnapshot().validatableRequestIds).toEqual([]);
+    await expect(subject.manager.validate(target, "fake")).rejects.toThrow(/exact candidate/);
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("base\n");
+    const retainedWorktree = run!.worktree!.root;
+    await subject.manager.shutdown();
+    execFileSync("git", ["worktree", "remove", "--force", retainedWorktree], {
+      cwd: repository,
+      stdio: "ignore",
+    });
+  });
+
+  it.each(["shutdown", "session-switch"] as const)(
+    "%s closes validation, drains it, and rejects stale responses before lifecycle completion",
+    async (lifecycle) => {
+      const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+      temporary.push(root);
+      const repository = await cleanRepository();
+      const configured = config();
+      configured.validators = {
+        fake: { command: "fake", args: [], timeoutMs: 1_000, maxOutputBytes: 1_000 },
+      };
+      let releaseCleanup!: () => void;
+      const cleanupGate = new Promise<void>((resolve) => {
+        releaseCleanup = resolve;
+      });
+      let validatorFinished = false;
+      const runValidator = vi.fn(async (input: ValidationRunnerInput) => {
+        await input.onRunning?.({
+          ...completedValidation(input, 1),
+          status: "running",
+          outcome: undefined,
+          finishedAt: undefined,
+          cleanup: "pending",
+          terminationProven: false,
+        });
+        await new Promise<void>((resolve) => {
+          if (input.signal?.aborted) resolve();
+          else input.signal?.addEventListener("abort", () => resolve(), { once: true });
+        });
+        await cleanupGate;
+        validatorFinished = true;
+        return completedValidation(input, 1, "aborted");
+      });
+      const subject = harness(root, { config: configured, runValidator });
+      subject.ctx.cwd = repository;
+      subject.setSessionId(`parent-${lifecycle}`);
+      const [run] = await subject.manager.dispatch(
+        [
+          {
+            ...boundedTask(`lifecycle-drain-${lifecycle}`, "worker", "path:file.txt"),
+            workspace: "worktree",
+          },
+        ],
+        subject.ctx,
+      );
+      await writeFile(join(run!.worktree!.cwd, "file.txt"), "lifecycle candidate\n");
+      subject.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+      await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+      const request = subject.manager.pendingRequests()[0]!;
+      const retainedWorktree = run!.worktree!.root;
+      const validation = subject.manager.validate({ kind: "run", id: run!.id }, "fake");
+      await vi.waitFor(() => expect(runValidator).toHaveBeenCalledTimes(1));
+
+      let lifecycleSettled = false;
+      if (lifecycle === "session-switch") subject.setSessionId("next-parent");
+      const operation =
+        lifecycle === "shutdown" ? subject.manager.shutdown() : subject.manager.status(subject.ctx);
+      void operation.finally(() => {
+        lifecycleSettled = true;
+      });
+      await expect(subject.manager.respondRequest(request.id, "keep")).rejects.toThrow(
+        /shutting down|session is changing/,
+      );
+      await Promise.resolve();
+      expect(lifecycleSettled).toBe(false);
+      expect(validatorFinished).toBe(false);
+      releaseCleanup();
+      await expect(validation).resolves.toMatchObject({ outcome: "aborted" });
+      await operation;
+      expect(validatorFinished).toBe(true);
+
+      if (lifecycle === "session-switch") {
+        expect(subject.manager.snapshots()).toEqual([]);
+        subject.native.emit(run!.id, { type: "settled", report: "FORBIDDEN_STALE_EVENT" });
+        expect(JSON.stringify(subject.manager.hubSnapshot())).not.toContain(
+          "FORBIDDEN_STALE_EVENT",
+        );
+        await subject.manager.shutdown();
+      }
+      execFileSync("git", ["worktree", "remove", "--force", retainedWorktree], {
+        cwd: repository,
+        stdio: "ignore",
+      });
+    },
+  );
+
+  it("validates an exact mission candidate without resolving its handoff", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.validators = {
+      fake: { command: "fake", args: [], timeoutMs: 1_000, maxOutputBytes: 1_000 },
+    };
+    const runValidator = vi.fn(async (input: ValidationRunnerInput) =>
+      completedValidation(input, 1),
+    );
+    const subject = harness(root, { config: configured, runValidator });
+    subject.ctx.cwd = repository;
+    const mission = await subject.manager.startMission(
+      "Validate the mission candidate.",
+      ["path:file.txt"],
+      subject.ctx,
+      "worktree",
+    );
+    await writeFile(join(mission.worktree!.cwd, "file.txt"), "mission validation\n");
+    subject.native.emit(mission.orchestratorId, {
+      type: "settled",
+      report: "Mission candidate ready.",
+    });
+    await vi.waitFor(() => expect(subject.manager.missionSnapshots()[0]?.candidate).toBeDefined());
+    const request = subject.manager.pendingRequests()[0]!;
+    expect(subject.manager.hubSnapshot().validatableRequestIds).toEqual([request.id]);
+    await expect(
+      subject.manager.validate({ kind: "mission", id: mission.id }, "fake"),
+    ).resolves.toMatchObject({
+      target: { kind: "mission", id: mission.id },
+      outcome: "passed",
+    });
+    expect(runValidator).toHaveBeenCalledTimes(1);
+    expect(subject.manager.pendingRequests()[0]).toMatchObject({
+      id: request.id,
+      status: "pending",
+    });
+    await subject.manager.respondRequest(request.id, "integrate");
+    await subject.manager.shutdown();
+  });
+
+  it("restores interrupted schema-4 validation as sticky quarantine without executing it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.validators = {
+      fake: { command: "fake", args: [], timeoutMs: 1_000, maxOutputBytes: 1_000 },
+    };
+    const initial = harness(root, { config: configured });
+    initial.ctx.cwd = repository;
+    initial.setSessionId("schema-four-parent");
+    const [run] = await initial.manager.dispatch(
+      [{ ...boundedTask("schema-four", "worker", "path:file.txt"), workspace: "worktree" }],
+      initial.ctx,
+    );
+    await writeFile(join(run!.worktree!.cwd, "file.txt"), "quarantined candidate\n");
+    initial.native.emit(run!.id, { type: "settled", report: "Candidate ready." });
+    await vi.waitFor(() => expect(run!.candidate?.hasChanges).toBe(true));
+    const worktree = { ...run!.worktree! };
+    const candidateId = run!.candidate!.candidateId;
+    await initial.manager.shutdown();
+
+    const intendedPath = join(root, "retained-validator-workspace");
+    await mkdir(intendedPath);
+    const statePath = join(root, "schema-four-parent", "runs.json");
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      schemaVersion: number;
+      validations?: ValidationRecord[];
+    };
+    const at = "2026-01-01T00:00:00.000Z";
+    persisted.schemaVersion = 4;
+    persisted.validations = [
+      {
+        id: "interrupted-validation",
+        target: { kind: "run", id: run!.id },
+        candidateId,
+        validator: "fake",
+        status: "running",
+        preparedAt: at,
+        startedAt: at,
+        output: "PARTIAL_VALIDATOR_OUTPUT",
+        outputBytes: 24,
+        outputLimitBytes: 1_000,
+        outputTruncated: false,
+        cleanup: "pending",
+        terminationProven: false,
+        intendedPath,
+        sourceRoot: repository,
+        baseCommit: worktree.baseCommit,
+      },
+    ];
+    await writeFile(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const runValidator = vi.fn(async (input: ValidationRunnerInput) =>
+      completedValidation(input, 99),
+    );
+    const restored = harness(root, { config: configured, runValidator });
+    restored.ctx.cwd = repository;
+    restored.setSessionId("schema-four-parent");
+    await restored.manager.status(restored.ctx);
+    expect(runValidator).not.toHaveBeenCalled();
+    expect(restored.manager.validationSnapshots()).toEqual([
+      expect.objectContaining({
+        id: "interrupted-validation",
+        status: "interrupted",
+        outcome: "aborted",
+        cleanup: "retained",
+        terminationProven: false,
+        retainedPath: intendedPath,
+      }),
+    ]);
+    const request = restored.manager.pendingRequests()[0]!;
+    await expect(restored.manager.respondRequest(request.id, "integrate")).rejects.toThrow(
+      /cleanup is unproven/,
+    );
+    expect(runValidator).not.toHaveBeenCalled();
+    expect(restored.manager.validationSnapshots()[0]).toMatchObject({
+      cleanup: "retained",
+      retainedPath: intendedPath,
+      terminationProven: false,
+    });
+    expect(await readFile(join(repository, "file.txt"), "utf8")).toBe("base\n");
+    await restored.manager.shutdown();
+    execFileSync("git", ["worktree", "remove", "--force", worktree.root], {
+      cwd: repository,
+      stdio: "ignore",
+    });
+  });
+
+  it("retains a mission owner when strict retention cleanup cannot be proven", async () => {
+    if (process.platform === "win32") return;
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-"));
+    temporary.push(root);
+    const repository = await cleanRepository();
+    const configured = config();
+    configured.retention = { days: 1, entries: 1 };
+    const subject = harness(root, { config: configured });
+    subject.ctx.cwd = repository;
+    const mission = await subject.manager.startMission(
+      "Retain failed mission cleanup evidence.",
+      ["path:file.txt"],
+      subject.ctx,
+      "worktree",
+    );
+    await writeFile(join(mission.worktree!.cwd, "file.txt"), "retention candidate\n");
+    subject.native.emit(mission.orchestratorId, {
+      type: "settled",
+      report: "Mission candidate ready.",
+    });
+    await vi.waitFor(() => expect(subject.manager.missionSnapshots()[0]?.status).toBe("parked"));
+    const orchestrator = subject.manager.store.get(mission.orchestratorId)!;
+    orchestrator.startedAt = "2020-01-01T00:00:00.000Z";
+    orchestrator.finishedAt = "2020-01-01T00:00:01.000Z";
+    const sessionDir = orchestrator.sessionDir;
+    await mkdir(sessionDir, { recursive: true });
+    await writeFile(join(sessionDir, "retention-sentinel"), "retain\n");
+    const worktreeRoot = mission.worktree!.root;
+    const administration = join(repository, ".git", "worktrees");
+    await chmod(administration, 0o500);
+    try {
+      await subject.manager.status(subject.ctx);
+      expect(subject.manager.store.get(mission.orchestratorId)).toMatchObject({
+        cleanupFailure: { message: expect.stringContaining("Mission") },
+      });
+      expect(subject.manager.missionSnapshots()[0]).toMatchObject({
+        id: mission.id,
+        status: "failed",
+        cleanupFailure: { message: expect.any(String) },
+      });
+      expect((await stat(sessionDir)).isDirectory()).toBe(true);
+      expect(await readFile(join(sessionDir, "retention-sentinel"), "utf8")).toBe("retain\n");
+    } finally {
+      await chmod(administration, 0o700);
+    }
+    await subject.manager.shutdown();
+    await rm(worktreeRoot, { recursive: true, force: true });
+    execFileSync("git", ["worktree", "prune"], { cwd: repository, stdio: "ignore" });
   });
 
   it("retains invalid partial worktree metadata after restore", async () => {
@@ -2543,7 +3080,7 @@ describe("SubagentManager v2", () => {
     );
     await restored.manager.shutdown();
     const migrated = JSON.parse(await readFile(path, "utf8")) as { schemaVersion?: number };
-    expect(migrated.schemaVersion).toBe(3);
+    expect(migrated.schemaVersion).toBe(4);
   });
 
   it("derives schema v3 acknowledgement only from exact delivered terminal evidence", async () => {
@@ -2580,7 +3117,7 @@ describe("SubagentManager v2", () => {
         results: Array<{ runId: string; generation: number }>;
       }>;
     };
-    expect(persisted.schemaVersion).toBe(3);
+    expect(persisted.schemaVersion).toBe(4);
     for (const run of persisted.runs) {
       delete run.completionAcknowledgedGeneration;
       run.completionReported = true;

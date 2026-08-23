@@ -234,7 +234,7 @@ Test Session Summary with these active-provider cases:
 
 ## Workflow state files
 
-Workflow Finalization stores branch-local custom entries in the session tree. Plan Mode reads version-1 state and writes version 2 after the next state change. Hackler reads manager schema version 2 without replaying old completion messages. It writes new dispatch batches with schema version 3.
+Workflow Finalization stores branch-local custom entries in the session tree. Plan Mode reads version-1 state and writes version 2 after the next state change. Hackler reads manager schemas 2, 3, and 4 without replaying ambiguous old completion messages. It writes schema 4. Schema 4 retains schema-3 dispatch batches and adds the latest report-only validation state for each candidate and trusted validator. Restore marks unfinished validation interrupted, attempts only safe workspace recovery, and never executes or retries a validator.
 
 A continuation producer owns its stable request ID and persisted producer state. The coordinator owns message dispatch and the post-settlement receipt. Do not call `pi.sendMessage()` as a fallback for an automatic continuation.
 

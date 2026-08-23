@@ -8,9 +8,12 @@ import {
   captureWorktreeCandidate,
   checkCandidateApplies,
   createMissionWorktree,
+  deriveCandidateId,
   inspectGitRepository,
+  normalizeWorktreeCandidate,
   removeMissionWorktree,
   validateMissionWorktree,
+  validateWorktreeCandidate,
 } from "../worktrees.js";
 
 const cleanup: string[] = [];
@@ -64,6 +67,40 @@ describe("mission worktrees", () => {
     await removeMissionWorktree(worktree, { force: true });
   });
 
+  it("normalizes a legacy UTF-8 candidate into exact schema-4 bytes and identity", () => {
+    const baseCommit = "a".repeat(40);
+    const normalized = normalizeWorktreeCandidate(
+      { patch: "legacy patch bytes\n", files: ["file.txt"], hasChanges: true },
+      baseCommit,
+    );
+    expect(normalized).toMatchObject({
+      candidateId: deriveCandidateId(baseCommit, Buffer.from("legacy patch bytes\n")),
+      baseCommit,
+      patchBase64: Buffer.from("legacy patch bytes\n").toString("base64"),
+      files: ["file.txt"],
+      hasChanges: true,
+    });
+    expect(normalized.patch).toBeUndefined();
+  });
+
+  it("rejects inconsistent empty candidate metadata before no-op check or apply", async () => {
+    const root = await repository();
+    const baseCommit = git(root, "rev-parse", "HEAD").trim();
+    const empty = Buffer.alloc(0);
+    const inconsistent = {
+      candidateId: deriveCandidateId(baseCommit, empty),
+      baseCommit,
+      patchBase64: "",
+      files: ["file.txt"],
+      hasChanges: false,
+    };
+    expect(() => validateWorktreeCandidate(inconsistent)).toThrow("inconsistent");
+    await expect(checkCandidateApplies(root, inconsistent)).rejects.toThrow("inconsistent");
+    await expect(applyCandidate(root, inconsistent)).rejects.toThrow("inconsistent");
+    expect(await fs.readFile(join(root, "file.txt"), "utf8")).toBe("base\n");
+    expect(git(root, "status", "--porcelain")).toBe("");
+  });
+
   it("validates restored worktree ownership before reuse", async () => {
     const root = await repository();
     const other = await repository();
@@ -87,7 +124,13 @@ describe("mission worktrees", () => {
     const worktree = await createMissionWorktree(root, "cancel-all", base);
     const controller = new AbortController();
     controller.abort(new Error("mission cancelled"));
-    const candidate = { patch: "", hasChanges: false };
+    const candidate = {
+      candidateId: deriveCandidateId(worktree.baseCommit, Buffer.alloc(0)),
+      baseCommit: worktree.baseCommit,
+      patchBase64: "",
+      files: [],
+      hasChanges: false,
+    };
 
     await expect(inspectGitRepository(root, controller.signal)).rejects.toThrow(
       "mission cancelled",

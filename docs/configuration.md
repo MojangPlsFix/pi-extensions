@@ -115,6 +115,7 @@ The file requires `schemaVersion: 2`. Version 2 rejects version 1 keys.
   },
   "capabilities": {},
   "runners": {},
+  "validators": {},
   "herdr": {
     "enabled": false,
     "direction": "right",
@@ -125,6 +126,32 @@ The file requires `schemaVersion: 2`. Version 2 rejects version 1 keys.
 ```
 
 The manager checks the selected model and provider authentication before it allocates a session. Completed runs park automatically and release active capacity.
+
+### Trusted patch validators
+
+The optional global `validators` catalog defines report-only commands for pending isolated run or mission candidates:
+
+```json
+{
+  "schemaVersion": 2,
+  "validators": {
+    "unit-tests": {
+      "command": "node",
+      "args": ["--test", "test/unit.test.js"],
+      "timeoutMs": 300000,
+      "maxOutputBytes": 1000000
+    }
+  }
+}
+```
+
+Names are selected exactly by `subagent_validate` or the Agent Hub Validate action. `command` must contain a non-whitespace character and is preserved as one executable token. `args` is an array of literal string tokens; empty tokens and leading or trailing whitespace are preserved. `timeoutMs` accepts 1 through 600,000. `maxOutputBytes` accepts 1 through 1,048,576. Validator entries reject unknown keys and cannot configure environment variables. Project configuration cannot define validators.
+
+Hackler uses direct trusted argv execution with `shell: false` and closed stdin. It creates a disposable detached worktree at the candidate base, applies only the exact stored patch, and runs in the equivalent relative directory. Combined stdout and stderr are bounded and retained with the latest candidate-and-validator record for the normal run or mission retention period. A cleanup quarantine also protects its owning record from retention. The source checkout and original Worker worktree remain outside the validator workspace.
+
+Validation is explicit and report only. It never starts automatically, retries, ranks candidates, applies source changes, answers Integrate or Keep, or invokes a model provider. A nonzero exit or other ordinary check failure remains manually integrable after cleanup. Timeout, cancellation, session switch, shutdown, and restart do not retry the command. Active validation and unproven cleanup block integration. Unsafe workspaces are retained for manual inspection. This version has no Windows Job Object integration, so it cannot prove descendant termination after a Windows validator process starts. It quarantines that validation workspace even after the direct process exits normally.
+
+A validator is not an operating-system sandbox. It inherits the Pi process environment and the user's OS authority. On POSIX, Hackler owns the spawned process group; a command that deliberately daemonizes into another session escapes that lifecycle boundary. Configure only reviewed, non-daemonizing commands. A pass supports only the behavior covered by that command; Hackler makes no broader correctness claim.
 
 The runtime accepts 1 through 32 active runs and 0 through 8 shared writers. Nesting depth cannot exceed 2.
 

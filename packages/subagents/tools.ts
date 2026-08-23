@@ -11,6 +11,7 @@ import {
 import { formatDuration, safeDisplayText } from "./renderers.js";
 import type { SupervisorRequest } from "./supervisor.js";
 import type { RunSnapshot, Usage } from "./types.js";
+import { type ValidationRecord, validationSummary } from "./validation.js";
 
 function expandHint(): string {
   try {
@@ -133,11 +134,23 @@ function resultRenderer(
     return component;
   }
   const runs = runDetails(result.details);
+  const validation = (result.details as { validation?: ValidationRecord } | undefined)?.validation;
   const content =
     result.content
       ?.filter((part) => part.type === "text")
       .map((part) => part.text ?? "")
       .join("\n") ?? "";
+  if (!options.expanded && validation) {
+    const attention = validation.cleanup === "retained" || !validation.terminationProven;
+    const summary = `${validation.validator}: ${validation.outcome ?? validation.status} · cleanup ${validation.cleanup}`;
+    const component =
+      context.lastComponent instanceof CompactLines ? context.lastComponent : new CompactLines();
+    component.setBuilder(
+      (_width) =>
+        `${theme.fg(attention ? "warning" : "muted", safeDisplayText(summary))}\n${theme.fg("dim", expandHint())}`,
+    );
+    return component;
+  }
   if (!options.expanded) {
     const shown = runs.slice(0, 4);
     const omitted = Math.max(0, runs.length - shown.length);
@@ -185,6 +198,16 @@ function callRenderer(
   const component =
     context.lastComponent instanceof CompactLines ? context.lastComponent : new CompactLines();
   const tasks = Array.isArray(args.tasks) ? args.tasks.length : undefined;
+  const target =
+    args.target && typeof args.target === "object"
+      ? (args.target as { kind?: unknown; id?: unknown })
+      : undefined;
+  const validationPreview =
+    typeof target?.kind === "string" &&
+    typeof target.id === "string" &&
+    typeof args.validator === "string"
+      ? `${target.kind}:${target.id} · ${args.validator}`
+      : undefined;
   const preview =
     tasks !== undefined
       ? `${tasks} task${tasks === 1 ? "" : "s"}`
@@ -192,7 +215,7 @@ function callRenderer(
         ? args.ids.join(", ")
         : typeof args.id === "string"
           ? args.id
-          : "";
+          : (validationPreview ?? "");
   component.setBuilder(
     (_width) =>
       `${theme.fg("toolTitle", theme.bold(`${label} `))}${theme.fg("dim", safeDisplayText(preview).slice(0, 100))}${context.isPartial ? theme.fg("muted", " · working") : ""}`,
@@ -378,6 +401,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
               `- ${profile.name} (${profile.class}, ${profile.runner}): ${profile.description}`,
           ),
           "",
+          ...(hub.validators?.length
+            ? [`Trusted validators: ${hub.validators.join(", ")}`, ""]
+            : []),
           `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
           `Top-level active-branch batches: open ${hub.batchCounts.open} · ready ${hub.batchCounts.ready} · in-flight ${hub.batchCounts.inFlight}`,
           `Counts: running ${hub.runs.filter((run) => ["queued", "starting", "running"].includes(run.status)).length} · wrapping ${hub.runs.filter((run) => run.wrappingUp && ["queued", "starting", "running", "blocked"].includes(run.status)).length} · blocked ${hub.runs.filter((run) => run.status === "blocked").length} · failed ${hub.runs.filter((run) => run.status === "failed").length} · stopped ${hub.runs.filter((run) => run.status === "stopped").length}`,
@@ -513,6 +539,47 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
     },
     renderCall(args, theme, context) {
       return callRenderer("Hackler collect", args as Record<string, unknown>, theme, context);
+    },
+    renderResult: resultRenderer,
+  });
+
+  pi.registerTool({
+    name: "subagent_validate",
+    label: "Validate Hackler candidate",
+    description:
+      "Explicitly run one trusted configured validator against only a pending run or mission patch in a disposable detached worktree. This reports evidence and never applies, retries, ranks, or resolves integration.",
+    parameters: Type.Object({
+      target: Type.Union([
+        Type.Object({ kind: Type.Literal("run"), id: Type.String() }),
+        Type.Object({ kind: Type.Literal("mission"), id: Type.String() }),
+      ]),
+      validator: Type.String({
+        description: "Exact name from the trusted global validators catalog.",
+      }),
+    }),
+    async execute(_toolCallId, params, signal) {
+      try {
+        const record = await manager.validate(params.target, params.validator, signal);
+        return {
+          content: [
+            {
+              type: "text",
+              text: validationSummary(record),
+            },
+          ],
+          details: { validation: record },
+          isError: record.cleanup === "retained" || !record.terminationProven,
+        };
+      } catch (error) {
+        return {
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+          details: {},
+          isError: true,
+        };
+      }
+    },
+    renderCall(args, theme, context) {
+      return callRenderer("Hackler validate", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });

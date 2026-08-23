@@ -83,7 +83,7 @@ export {
   validateCapabilityCatalog,
   validateCapabilityDefinition,
 } from "./capabilities.js";
-export type { SubagentConfig } from "./config.js";
+export type { SubagentConfig, ValidatorDefinition } from "./config.js";
 export {
   AGENT_DIR,
   CONFIG_PATH,
@@ -134,3 +134,12 @@ export type {
   RunSnapshot,
   RunStatus,
 } from "./types.js";
+export type {
+  ValidationCleanup,
+  ValidationOutcome,
+  ValidationRecord,
+  ValidationRunnerInput,
+  ValidationStatus,
+  ValidationTarget,
+} from "./validation.js";
+export { deriveCandidateId, runPatchValidator, validationSummary } from "./validation.js";

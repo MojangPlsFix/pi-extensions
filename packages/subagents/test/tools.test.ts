@@ -70,6 +70,30 @@ describe("Subagent parent usage accounting", () => {
         answer,
         status: "answered",
       })),
+      validate: vi.fn(
+        async (target: { kind: "run" | "mission"; id: string }, validator: string) => ({
+          id: "validation-one",
+          target,
+          candidateId: "candidate-one",
+          validator,
+          status: "completed",
+          outcome: "failed",
+          preparedAt: "2026-01-01T00:00:00.000Z",
+          startedAt: "2026-01-01T00:00:00.000Z",
+          finishedAt: "2026-01-01T00:00:01.000Z",
+          durationMs: 1_000,
+          exitCode: 1,
+          output: "deterministic validator evidence",
+          outputBytes: 32,
+          outputLimitBytes: 1_000,
+          outputTruncated: false,
+          cleanup: "removed",
+          terminationProven: true,
+          intendedPath: "/discarded/validation-one",
+          sourceRoot: "/source",
+          baseCommit: "base",
+        }),
+      ),
     } as unknown as SubagentManager;
 
     registerSubagentTools(pi, manager);
@@ -78,6 +102,7 @@ describe("Subagent parent usage accounting", () => {
       "subagent_status",
       "subagent_respond",
       "subagent_collect",
+      "subagent_validate",
       "subagent_steer",
       "subagent_stop",
     ]);
@@ -86,6 +111,7 @@ describe("Subagent parent usage accounting", () => {
       "Hackler status",
       "Respond to Hackler",
       "Collect Hackler",
+      "Validate Hackler candidate",
       "Steer Hackler",
       "Stop Hackler",
     ]);
@@ -116,6 +142,71 @@ describe("Subagent parent usage accounting", () => {
 
     const timeoutSchema = tools.get("subagent_collect")!.parameters.properties.timeoutSeconds;
     expect(timeoutSchema).toMatchObject({ minimum: 10, maximum: 3600 });
+    expect(
+      tools
+        .get("subagent_validate")!
+        .parameters.properties.target.anyOf.map(
+          (entry: { properties: { kind: { const: string } } }) => entry.properties.kind.const,
+        ),
+    ).toEqual(["run", "mission"]);
+    const validation = await tools
+      .get("subagent_validate")!
+      .execute(
+        "tool-call",
+        { target: { kind: "run", id: "worker-one" }, validator: "check" },
+        new AbortController().signal,
+      );
+    expect(manager.validate).toHaveBeenCalledWith(
+      { kind: "run", id: "worker-one" },
+      "check",
+      expect.any(AbortSignal),
+    );
+    expect(validation).toMatchObject({
+      isError: false,
+      details: { validation: { outcome: "failed", cleanup: "removed" } },
+    });
+    expect(validation.content[0].text).toContain("deterministic validator evidence");
+    vi.mocked(manager.validate).mockResolvedValueOnce({
+      ...(validation.details.validation as any),
+      id: "validation-quarantine",
+      cleanup: "retained",
+      terminationProven: false,
+      retainedPath: "/retained/validation-quarantine",
+      cleanupError: "process tree unknown",
+    });
+    const quarantined = await tools
+      .get("subagent_validate")!
+      .execute(
+        "tool-call-quarantine",
+        { target: { kind: "run", id: "worker-one" }, validator: "check" },
+        new AbortController().signal,
+      );
+    expect(quarantined.isError).toBe(true);
+    expect(quarantined.content[0].text).toContain("process termination unproven");
+    expect(quarantined.content[0].text).toContain("/retained/validation-quarantine");
+    const validationTheme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    expect(
+      tools
+        .get("subagent_validate")!
+        .renderCall?.(
+          { target: { kind: "run", id: "worker-one" }, validator: "check" },
+          validationTheme,
+          {},
+        )
+        .render(120)
+        .join("\n"),
+    ).toContain("run:worker-one · check");
+    expect(
+      tools
+        .get("subagent_validate")!
+        .renderResult?.(validation, { expanded: false, isPartial: false }, validationTheme, {})
+        .render(120)
+        .join("\n"),
+    ).toContain("check: failed · cleanup removed");
+
     const result = await tools
       .get("subagent_collect")!
       .execute("tool-call", { ids: ["scout-1"], wait: "all", timeoutSeconds: 45 }, undefined);

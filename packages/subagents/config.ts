@@ -49,6 +49,13 @@ export type ExternalRunnerDefinition = {
   timeoutMs: number;
   maxOutputBytes: number;
 };
+/** A user-trusted, report-only command. Arguments are passed as literal argv tokens. */
+export type ValidatorDefinition = {
+  command: string;
+  args: string[];
+  timeoutMs: number;
+  maxOutputBytes: number;
+};
 export type HerdrInspectorSettings = {
   enabled: boolean;
   direction: "right" | "down";
@@ -67,6 +74,7 @@ export type SubagentConfig = {
   models: ModelDefaults;
   capabilities: Record<string, CapabilityDefinition>;
   runners: Record<string, ExternalRunnerDefinition>;
+  validators: Record<string, ValidatorDefinition>;
   herdr: HerdrInspectorSettings;
   profiles: Record<string, ProfileControl>;
 };
@@ -89,6 +97,7 @@ export const DEFAULT_SUBAGENT_CONFIG: SubagentConfig = {
   models: { overrides: {} },
   capabilities: {},
   runners: {},
+  validators: {},
   herdr: { enabled: herdrEnvironmentAvailable(), direction: "right", maxOutputBytes: 1_000_000 },
   profiles: {},
 };
@@ -101,6 +110,7 @@ function cloneDefault(): SubagentConfig {
     models: { overrides: {} },
     capabilities: {},
     runners: {},
+    validators: {},
     herdr: { ...DEFAULT_SUBAGENT_CONFIG.herdr },
     profiles: {},
   };
@@ -249,6 +259,47 @@ function parseRunners(value: unknown): Record<string, ExternalRunnerDefinition> 
   return result;
 }
 
+function validatorCommand(value: unknown, location: string): string {
+  if (typeof value !== "string" || !value.trim())
+    throw new Error(`${location} must be a non-empty string.`);
+  return value;
+}
+
+function validatorArgs(value: unknown, location: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string"))
+    throw new Error(`${location} must be an array of string tokens.`);
+  return [...value] as string[];
+}
+
+function parseValidators(value: unknown): Record<string, ValidatorDefinition> {
+  const result: Record<string, ValidatorDefinition> = {};
+  for (const [name, raw] of Object.entries(object(value, "validators"))) {
+    if (!name.trim()) throw new Error("validators names must be non-empty strings.");
+    const validator = object(raw, `validators.${name}`);
+    only(validator, ["command", "args", "timeoutMs", "maxOutputBytes"], `validators.${name}`);
+    result[name] = {
+      command: validatorCommand(validator.command, `validators.${name}.command`),
+      args:
+        validator.args === undefined
+          ? []
+          : validatorArgs(validator.args, `validators.${name}.args`),
+      timeoutMs: integer(
+        validator.timeoutMs ?? 300_000,
+        `validators.${name}.timeoutMs`,
+        1,
+        600_000,
+      ),
+      maxOutputBytes: integer(
+        validator.maxOutputBytes ?? 1_000_000,
+        `validators.${name}.maxOutputBytes`,
+        1,
+        1_048_576,
+      ),
+    };
+  }
+  return result;
+}
+
 function parseHerdr(value: unknown): HerdrInspectorSettings {
   const candidate = object(value, "herdr");
   only(candidate, ["enabled", "direction", "maxOutputBytes"], "herdr");
@@ -329,6 +380,7 @@ export async function loadSubagentConfig(
       "models",
       "capabilities",
       "runners",
+      "validators",
       "herdr",
       "profiles",
     ],
@@ -336,6 +388,11 @@ export async function loadSubagentConfig(
   );
   if (config.schemaVersion !== 2)
     throw new Error(`Invalid Hackler configuration at ${path}: schemaVersion must be 2.`);
+  const validators = config.validators === undefined ? {} : parseValidators(config.validators);
+  if (options.source === "project" && Object.keys(validators).length)
+    throw new Error(
+      `Invalid Hackler configuration at ${path}: project validators are not trusted.`,
+    );
   return {
     schemaVersion: 2,
     runtime:
@@ -354,6 +411,7 @@ export async function loadSubagentConfig(
             source: options.source === "project" ? "project" : "user",
           }),
     runners: config.runners === undefined ? {} : parseRunners(config.runners),
+    validators,
     herdr:
       config.herdr === undefined ? { ...DEFAULT_SUBAGENT_CONFIG.herdr } : parseHerdr(config.herdr),
     profiles: config.profiles === undefined ? {} : parseProfiles(config.profiles),

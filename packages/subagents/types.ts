@@ -154,7 +154,11 @@ export type RunWorktree = {
 };
 
 export type IntegrationCandidate = {
-  patch: string;
+  candidateId: string;
+  baseCommit: string;
+  patchBase64: string;
+  /** Legacy persisted UTF-8 patch; normalized during restore. */
+  patch?: string;
   files: string[];
   hasChanges: boolean;
 };
@@ -230,7 +234,7 @@ export type RunSnapshot = Omit<
   elapsedMs: number;
   latestActivity?: string;
   hidden: boolean;
-  candidate?: { files: string[]; hasChanges: boolean };
+  candidate?: { candidateId: string; files: string[]; hasChanges: boolean };
   capabilityPolicy: EffectiveCapabilityPolicy;
 };
 
@@ -393,7 +397,11 @@ export function runSnapshot(run: RunRecord, now = Date.now()): RunSnapshot {
     capabilityPolicy: capabilityPolicySnapshot(run.capabilityPolicy),
     worktree: run.worktree ? { ...run.worktree } : undefined,
     candidate: run.candidate
-      ? { files: [...run.candidate.files], hasChanges: run.candidate.hasChanges }
+      ? {
+          candidateId: run.candidate.candidateId,
+          files: [...run.candidate.files],
+          hasChanges: run.candidate.hasChanges,
+        }
       : undefined,
     integrationRequestId: run.integrationRequestId,
     completionAcknowledgedGeneration: run.completionAcknowledgedGeneration,

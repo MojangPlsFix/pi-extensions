@@ -112,6 +112,33 @@ async function openHub(
       } else if (action.kind === "inspect") {
         await manager.openInspector(action.id);
         ctx.ui.notify("Opened display-only Herdr transcript pane.", "info");
+      } else if (action.kind === "validate") {
+        const hub = manager.hubSnapshot();
+        const request = hub.requests.find((entry) => entry.id === action.id);
+        if (
+          request?.status !== "pending" ||
+          request.kind !== "integration-ready" ||
+          !(hub.validatableRequestIds ?? []).includes(request.id)
+        )
+          continue;
+        const selected = await ctx.ui.select("Validate candidate with", hub.validators ?? []);
+        if (!selected) continue;
+        const record = await manager.validate(
+          request.missionId
+            ? { kind: "mission", id: request.missionId }
+            : { kind: "run", id: request.fromRunId },
+          selected,
+        );
+        const unsafe = record.cleanup === "retained" || !record.terminationProven;
+        const quarantine = unsafe
+          ? ` Cleanup is unproven; workspace retained at ${record.retainedPath ?? record.intendedPath}.${record.cleanupError ? ` ${record.cleanupError}` : ""}`
+          : "";
+        ctx.ui.notify(
+          safeDisplayText(
+            `Validator ${selected}: ${record.outcome ?? record.status}.${quarantine}`,
+          ),
+          record.outcome === "passed" && !unsafe ? "info" : "warning",
+        );
       } else if (action.kind === "answer") {
         const request = manager.inbox.all().find((entry) => entry.id === action.id);
         if (request?.status !== "pending") continue;
