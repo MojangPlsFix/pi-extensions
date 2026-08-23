@@ -60,12 +60,6 @@ const revisionCorrection = [
   "Remain in Plan Mode. Return exactly one non-empty <proposed_plan> block with both tags on standalone lines, even if the reviewed plan needs no changes.",
   "Do not approve or implement the plan in this turn.",
 ].join("\n");
-const rtkProbeTimeoutMs = 2_000;
-
-export class PlanModeBashPolicyError extends Error {
-  override readonly name = "PlanModeBashPolicyError";
-}
-
 type ReviewResult = {
   reviewerId?: string;
   model?: string;
@@ -176,6 +170,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let editorInstalled = false;
   let activeWriters = 0;
   const pendingRevisionReceipts = new Map<string, ContinuationReceiptEvent>();
+  const invalidBashCommandSnapshot = Symbol("invalid Bash command snapshot");
+  const originalBashCommands = new Map<string, string | typeof invalidBashCommandSnapshot>();
   let loadedConfig: LoadedPlanModeConfig = {
     readOnlyTools: [],
     readOnlyCommands: {},
@@ -184,21 +180,12 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   };
 
   async function reloadPolicy(ctx: ExtensionContext): Promise<void> {
-    const [config, rtkVersion] = await Promise.all([
-      loadPlanModeConfig({
-        cwd: ctx.cwd,
-        trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
-      }),
-      pi
-        .exec("rtk", ["--version"], { timeout: rtkProbeTimeoutMs })
-        .then((result) =>
-          result.code === 0 && !result.killed && !result.stderr.trim() ? result.stdout : undefined,
-        )
-        .catch(() => undefined),
-    ]);
-    loadedConfig = config;
+    loadedConfig = await loadPlanModeConfig({
+      cwd: ctx.cwd,
+      trusted: typeof ctx.isProjectTrusted === "function" && ctx.isProjectTrusted(),
+    });
     configurePlanModePolicy(loadedConfig);
-    configureBashPolicy({ ...loadedConfig, ...(rtkVersion ? { rtkVersion } : {}) });
+    configureBashPolicy(loadedConfig);
     for (const warning of loadedConfig.warnings) {
       if (ctx.hasUI) ctx.ui.notify(warning, "warning");
       else console.error(`[plan-mode] ${warning}`);
@@ -928,49 +915,92 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 
   const guardedBashInputs = new WeakSet<object>();
 
-  function guardApprovedBashCommand(input: Record<string, unknown>): string | undefined {
+  function guardApprovedBashCommand(
+    input: Record<string, unknown>,
+    originalCommand: string,
+    initialCommand: string,
+  ): string | undefined {
     if (guardedBashInputs.has(input)) return undefined;
-    const initialCommand = input.command;
-    if (typeof initialCommand !== "string") return "Invalid Bash command in Plan Mode.";
-    const descriptor = Object.getOwnPropertyDescriptor(input, "command");
-    if (descriptor && descriptor.configurable === false) {
-      return "Plan Mode could not secure the approved Bash command against later rewrites.";
-    }
-    let approvedCommand = initialCommand;
     try {
+      const descriptor = Object.getOwnPropertyDescriptor(input, "command");
+      if (descriptor && descriptor.configurable === false) {
+        return "Plan Mode could not secure the approved Bash command against later rewrites.";
+      }
+      let approvedCommand = initialCommand;
       Object.defineProperty(input, "command", {
         enumerable: true,
         configurable: false,
         get: () => approvedCommand,
         set: (candidate: unknown) => {
-          if (typeof candidate !== "string") {
-            throw new PlanModeBashPolicyError(
-              "Plan Mode rejected a non-string Bash command rewrite.",
-            );
+          if (typeof candidate === "string" && !bashBlockReason(candidate)) {
+            approvedCommand = candidate;
+            return;
           }
-          const reason = bashBlockReason(candidate);
-          if (reason) {
-            throw new PlanModeBashPolicyError(
-              `Plan Mode rejected a Bash command rewrite: ${reason}`,
-            );
-          }
-          approvedCommand = candidate;
+          approvedCommand = originalCommand;
         },
       });
       guardedBashInputs.add(input);
       return undefined;
-    } catch (error) {
-      if (error instanceof PlanModeBashPolicyError) throw error;
+    } catch {
       return "Plan Mode could not secure the approved Bash command against later rewrites.";
     }
   }
 
+  pi.on("tool_execution_start", (event) => {
+    if (state.mode !== "plan" || (event.toolName.split(".").pop() ?? event.toolName) !== "bash")
+      return;
+    let command: unknown;
+    try {
+      command =
+        event.args && typeof event.args === "object"
+          ? (event.args as Record<string, unknown>).command
+          : undefined;
+    } catch {
+      command = undefined;
+    }
+    originalBashCommands.set(
+      event.toolCallId,
+      typeof command === "string" ? command : invalidBashCommandSnapshot,
+    );
+  });
+
+  pi.on("tool_execution_end", (event) => {
+    originalBashCommands.delete(event.toolCallId);
+  });
+
   pi.on("tool_call", (event) => {
     if (state.mode !== "plan") return;
-    const reason = planModeToolBlockReason(event.toolName, event.input);
-    if (reason) return { block: true, reason };
-    if ((event.toolName.split(".").pop() ?? event.toolName) !== "bash") return;
-    const guardReason = guardApprovedBashCommand(event.input as Record<string, unknown>);
+    const toolName = event.toolName.split(".").pop() ?? event.toolName;
+    if (toolName !== "bash") {
+      const reason = planModeToolBlockReason(event.toolName, event.input);
+      return reason ? { block: true, reason } : undefined;
+    }
+
+    const originalCommand = originalBashCommands.get(event.toolCallId);
+    originalBashCommands.delete(event.toolCallId);
+    if (typeof originalCommand !== "string") {
+      return {
+        block: true,
+        reason: "Plan Mode could not verify the original Bash command.",
+      };
+    }
+    const originalReason = bashBlockReason(originalCommand);
+    if (originalReason) return { block: true, reason: originalReason };
+    if (!event.input || typeof event.input !== "object") {
+      return { block: true, reason: "Invalid Bash command in Plan Mode." };
+    }
+
+    const input = event.input as Record<string, unknown>;
+    let initialCommand = originalCommand;
+    try {
+      const candidate = input.command;
+      if (typeof candidate === "string" && !bashBlockReason(candidate)) {
+        initialCommand = candidate;
+      }
+    } catch {
+      // A missing, throwing, non-string, or unsafe earlier rewrite falls back to the original.
+    }
+    const guardReason = guardApprovedBashCommand(input, originalCommand, initialCommand);
     return guardReason ? { block: true, reason: guardReason } : undefined;
   });
 
@@ -1223,17 +1253,20 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   }
 
   pi.on("session_start", async (_event, ctx) => {
+    originalBashCommands.clear();
     await reloadPolicy(ctx);
     synchronizeState(ctx);
     installEditorIndicator(ctx);
     await reconcileRestoredRevision(ctx);
   });
   pi.on("session_tree", async (_event, ctx) => {
+    originalBashCommands.clear();
     await reloadPolicy(ctx);
     synchronizeState(ctx);
     await reconcileRestoredRevision(ctx);
   });
   pi.on("session_shutdown", (_event, ctx) => {
+    originalBashCommands.clear();
     pendingRevisionReceipts.clear();
     restoreTools(state.disabledTools);
     if (editorInstalled && ctx.mode === "tui") ctx.ui.setEditorComponent(previousEditorFactory);

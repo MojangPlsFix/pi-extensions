@@ -1165,6 +1165,7 @@ function rtkReadBlockReason(args: readonly string[]): string | undefined {
       continue;
     }
     if (separatorIndex !== undefined) {
+      if (!token) return "RTK read file operands cannot be empty in Plan Mode.";
       files += 1;
       continue;
     }
@@ -1205,6 +1206,7 @@ function rtkReadBlockReason(args: readonly string[]): string | undefined {
     } else if (token.startsWith("-")) {
       return "Unknown RTK read options are blocked in Plan Mode.";
     } else {
+      if (!token) return "RTK read file operands cannot be empty in Plan Mode.";
       files += 1;
       continue;
     }
@@ -1245,6 +1247,7 @@ function rtkJsonBlockReason(args: readonly string[]): string | undefined {
       continue;
     }
     if (separatorIndex !== undefined) {
+      if (!token) return "RTK json file operands cannot be empty in Plan Mode.";
       files += 1;
       continue;
     }
@@ -1261,6 +1264,7 @@ function rtkJsonBlockReason(args: readonly string[]): string | undefined {
     } else if (token.startsWith("-")) {
       return "Unknown RTK json options are blocked in Plan Mode.";
     } else {
+      if (!token) return "RTK json file operands cannot be empty in Plan Mode.";
       files += 1;
       continue;
     }
