@@ -44,7 +44,7 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
     return new Text(
       theme.fg(
         "warning",
-        `Hackler ${taskLabel(data.runId, 80)} is wrapping up at its ${data.cause} threshold · deadline ${taskLabel(data.deadlineAt, 40)}`,
+        `◐ Hackler ${taskLabel(data.runId, 80)} is wrapping up at its ${data.cause} threshold · deadline ${taskLabel(data.deadlineAt, 40)}`,
       ),
       0,
       0,

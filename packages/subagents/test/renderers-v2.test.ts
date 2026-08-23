@@ -1,4 +1,5 @@
 import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SubagentActivitySnapshot, SubagentsStatusEvent } from "../../../shared/events.js";
 import { BUILTIN_PROFILES } from "../agents.js";
@@ -28,12 +29,11 @@ function activitySnapshot(
     name: "scout",
     profileClass: "read",
     status: "running",
+    taskKey: "follow-up-read-only-inspection",
     task: "Follow-up read-only inspection",
     elapsedMs: 3_631_000,
-    effectiveModel: "openai-codex/gpt-5.6-luna",
-    effectiveThinking: "low",
+    activeLeaseGeneration: 1,
     lastEventAt: "2025-01-01T00:00:59.000Z",
-    latestActivity: "grep finished",
     ...overrides,
   };
 }
@@ -44,6 +44,20 @@ function activityStatus(agents: SubagentActivitySnapshot[]): SubagentsStatusEven
   );
   return {
     active: active.length,
+    foreground: agents.filter(
+      (agent) =>
+        !(
+          ["parked", "failed", "stopped"].includes(agent.status) &&
+          agent.activeLeaseGeneration !== undefined &&
+          agent.completionAcknowledgedGeneration === agent.activeLeaseGeneration
+        ),
+    ).length,
+    history: agents.filter(
+      (agent) =>
+        ["parked", "failed", "stopped"].includes(agent.status) &&
+        agent.activeLeaseGeneration !== undefined &&
+        agent.completionAcknowledgedGeneration === agent.activeLeaseGeneration,
+    ).length,
     running: agents.filter((agent) => ["queued", "starting", "running"].includes(agent.status))
       .length,
     wrappingUp: active.filter((agent) => agent.wrappingUp).length,
@@ -90,6 +104,7 @@ function run(id: string, parentId?: string): RunSnapshot {
       wrapUpRatio: 0.8,
     },
     leaseHistory: [],
+    activeLeaseGeneration: 1,
     statusChangedAt: new Date().toISOString(),
     statusTransitions: [],
     terminationHistory: [],
@@ -141,188 +156,156 @@ function snapshot(overrides: Partial<HubSnapshot> = {}): HubSnapshot {
 afterEach(() => vi.useRealTimers());
 
 describe("activityViewLines", () => {
-  it("renders compact Hackler activity without any triangle glyph", () => {
-    const output = activityViewLines(
-      activityStatus([activitySnapshot()]),
-      theme(),
-      160,
-      Date.parse("2025-01-01T00:01:00.000Z"),
-    ).join("\n");
-    expect(output).toContain("Hackler · slots 1/6 used · 5 free · shared writer 0/1");
-    expect(output).toContain("running 1 · wrapping 0 · blocked 0 · failed 0 · stopped 0");
-    expect(output).toContain("└─ Follow-up read-only inspection");
-    expect(output).toContain("read · working · luna · 60:31 · grep finished");
-    expect(output).not.toMatch(/[△▵▴▲]/u);
+  it("renders one compact header and at most two lines per foreground run", () => {
+    const value = activityStatus([
+      activitySnapshot({
+        taskKey: "plan-mode-integration",
+        task: "FORBIDDEN full child prompt",
+        currentTool: "read",
+        lastAction: "grep finished",
+      }),
+    ]);
+    value.history = 12;
+    const lines = activityViewLines(value, theme(), 160);
+    const output = lines.join("\n");
+
+    expect(lines).toHaveLength(4);
+    expect(output).toContain("Hackler · ◐ 1/6 active");
+    expect(output).toContain("◐ Plan mode integration · working · 60:31");
+    expect(output).toContain("now: read · last: grep finished");
+    expect(output).toContain("○ 12 history");
+    expect(output).not.toContain("FORBIDDEN");
+    expect(output).not.toMatch(/[!●✗△▵▴▲]/u);
   });
 
-  it("sanitizes control sequences in task and activity text", () => {
+  it("sanitizes child-provided labels and activity", () => {
     const output = activityViewLines(
       activityStatus([
         activitySnapshot({
-          task: "Inspect \u001b]0;spoofed\u0007 auth",
-          latestActivity: "reading \u001b[31msecret\u001b[0m",
+          taskKey: "inspect-\u001b]0;spoofed\u0007-auth",
+          currentTool: "read\u001b[31m\u001b[0m",
+          lastAction: "grep \u001b[31msecret\u001b[0m finished",
         }),
       ]),
       theme(),
       160,
-      Date.parse("2025-01-01T00:01:00.000Z"),
     ).join("\n");
     expect(output).toContain("Inspect auth");
-    expect(output).toContain("reading secret");
+    expect(output).toContain("grep secret finished");
     expect(output).not.toContain("spoofed");
     expect(output).not.toContain("\u001b");
   });
 
-  it.each([
-    ["queued", {}, "starting"],
-    ["starting", {}, "starting"],
-    ["running", { wrappingUp: true }, "wrapping up"],
-    ["blocked", {}, "blocked"],
-    ["parked", {}, "done (parked)"],
-    ["failed", {}, "failed"],
-    ["stopped", {}, "stopped"],
-  ] as const)("labels %s from factual lifecycle data", (status, extra, label) => {
-    const output = activityViewLines(
-      activityStatus([activitySnapshot({ status, ...extra })]),
-      theme(),
-      160,
-      Date.parse("2025-01-01T00:01:00.000Z"),
-    ).join("\n");
-    expect(output).toContain(`read · ${label}`);
-  });
-
-  it("shows a quarantined cleanup failure without inferring a stall", () => {
-    const output = activityViewLines(
+  it("uses lifecycle operation fallback and hides a missing context line", () => {
+    const withOperation = activityViewLines(
       activityStatus([
         activitySnapshot({
-          status: "failed",
-          cleanupFailure: {
-            at: "2025-01-01T00:01:00.000Z",
-            message: "Safe cleanup cannot be proven; worktree retained.",
+          taskKey: "finalize-result",
+          latestActivity: undefined,
+          currentOperation: {
+            kind: "finalization",
+            name: "sensitive operation details",
+            startedAt: "2025-01-01T00:00:00.000Z",
+            generation: 1,
           },
         }),
       ]),
       theme(),
-      220,
-      Date.parse("2025-01-01T00:01:01.000Z"),
-    ).join("\n");
-    expect(output).toContain("cleanup retained: Safe cleanup cannot be proven; worktree retained.");
-    expect(output).not.toContain("stalled");
-  });
-
-  it("uses event age, not run age, to distinguish working from quiet", () => {
-    const now = Date.parse("2025-01-01T00:02:00.000Z");
-    const output = activityViewLines(
-      activityStatus([
-        activitySnapshot({
-          id: "fresh",
-          task: "Long but fresh",
-          elapsedMs: 7_200_000,
-          lastEventAt: "2025-01-01T00:01:59.000Z",
-        }),
-        activitySnapshot({
-          id: "quiet",
-          task: "Long and quiet",
-          elapsedMs: 7_200_000,
-          lastEventAt: "2025-01-01T00:01:20.000Z",
-        }),
-      ]),
-      theme(),
-      180,
-      now,
-    ).join("\n");
-
-    expect(output).toMatch(/Long but fresh[\s\S]*working/u);
-    expect(output).toMatch(/Long and quiet[\s\S]*quiet · no event for 00:40/u);
-    expect(output).not.toContain("stalled");
-  });
-
-  it("preserves mixed counts, capacity, leases, turns, operation, and oldest block", () => {
-    const now = Date.parse("2025-01-01T00:02:00.000Z");
-    const agents = [
-      activitySnapshot({
-        id: "writer",
-        profileClass: "write",
-        task: "Write implementation",
-        wrappingUp: true,
-        runner: "native",
-        turns: 7,
-        activeLeaseGeneration: 2,
-        originalEffectiveLimits: { maxWallSeconds: 600, maxTurns: 20, wrapUpRatio: 0.8 },
-        leaseHistory: [
-          {
-            id: "lease-2",
-            generation: 2,
-            startedAt: "2025-01-01T00:01:00.000Z",
-            wrapAt: "2025-01-01T00:09:00.000Z",
-            deadlineAt: "2025-01-01T00:11:00.000Z",
-            effectiveLimits: { maxWallSeconds: 600, maxTurns: 20, wrapUpRatio: 0.8 },
-          },
-        ],
-        currentOperation: {
-          kind: "tool",
-          name: "apply patch",
-          startedAt: "2025-01-01T00:01:50.000Z",
-          generation: 2,
-        },
-      }),
-      activitySnapshot({ id: "blocked", status: "blocked", task: "Need API choice" }),
-    ];
-    const value = activityStatus(agents);
-    value.blockingRequestCount = 3;
-    value.oldestBlockingRequest = {
-      id: "request-1",
-      title: "Choose API",
-      createdAt: "2025-01-01T00:01:30.000Z",
-      action: "open /agents inbox and answer",
-    };
-    const output = activityViewLines(value, theme(), 220, now).join("\n");
-
-    expect(output).toContain("slots 2/6 used · 4 free · shared writer 1/1");
-    expect(output).toContain("running 1 · wrapping 1 · blocked 1 · failed 0 · stopped 0");
-    expect(output).toContain(
-      "oldest block: Choose API · 00:30 ago · action: open /agents inbox and answer · +2 more request(s)",
+      120,
     );
-    expect(output).toContain("lease 01:00 elapsed / 09:00 remaining");
-    expect(output).toContain("turns 7 used / 13 remaining");
-    expect(output).toContain("last event 01:01 ago");
-    expect(output).toContain("operation tool: apply patch · 00:10");
+    expect(withOperation.join("\n")).toContain("now: finalization");
+    expect(withOperation.join("\n")).not.toContain("sensitive operation details");
+
+    const withoutActivity = activityViewLines(
+      activityStatus([activitySnapshot({ taskKey: "idle-context", latestActivity: undefined })]),
+      theme(),
+      120,
+    );
+    expect(withoutActivity).toHaveLength(2);
   });
 
-  it("prioritizes exceptions, preserves blocked and working rows, and reports overflow", () => {
+  it("prioritizes Attention, caps four entries, and reports overflow", () => {
     const agents = [
-      activitySnapshot({ id: "working", task: "Working row" }),
-      activitySnapshot({ id: "parked", task: "Done row", status: "parked" }),
-      activitySnapshot({ id: "stopped", task: "Stopped row", status: "stopped" }),
-      activitySnapshot({ id: "failed", task: "Failed row", status: "failed" }),
-      activitySnapshot({ id: "wrap", task: "Wrapping row", wrappingUp: true }),
-      activitySnapshot({ id: "blocked", task: "Blocked row", status: "blocked" }),
+      activitySnapshot({ id: "working", taskKey: "working-row" }),
+      activitySnapshot({ id: "queued", taskKey: "queued-row", status: "queued" }),
+      activitySnapshot({ id: "wrap", taskKey: "wrapping-row", wrappingUp: true }),
+      activitySnapshot({
+        id: "ready",
+        taskKey: "ready-row",
+        status: "parked",
+        activeLeaseGeneration: 1,
+      }),
+      activitySnapshot({ id: "blocked", taskKey: "blocked-row", status: "blocked" }),
     ];
-    const output = activityViewLines(
-      activityStatus(agents),
-      theme(),
-      180,
-      Date.parse("2025-01-01T00:01:00.000Z"),
-    ).join("\n");
+    const lines = activityViewLines(activityStatus(agents), theme(), 140);
+    const output = lines.join("\n");
+    expect(output.indexOf("Blocked row")).toBeLessThan(output.indexOf("Ready row"));
+    expect(output.indexOf("Ready row")).toBeLessThan(output.indexOf("Wrapping row"));
+    expect(output).toContain("+1 active");
+    expect(lines.length).toBeLessThanOrEqual(10);
+  });
 
-    expect(output.indexOf("Blocked row")).toBeLessThan(output.indexOf("Wrapping row"));
-    expect(output.indexOf("Wrapping row")).toBeLessThan(output.indexOf("Failed row"));
-    expect(output.indexOf("Failed row")).toBeLessThan(output.indexOf("Stopped row"));
-    expect(output).toContain("blocked 1");
-    expect(output).toContain("running 2");
-    expect(output).toContain("+2 more");
-    expect(output).not.toContain("Done row");
+  it("renders no widget lines when only acknowledged History remains", () => {
+    const value = activityStatus([
+      activitySnapshot({
+        status: "parked",
+        activeLeaseGeneration: 2,
+        completionAcknowledgedGeneration: 2,
+      }),
+    ]);
+    value.history = 1;
+    expect(activityViewLines(value, theme(), 120)).toEqual([]);
+  });
+
+  it("reserves state and elapsed time before the label at narrow widths", () => {
+    const lines = activityViewLines(
+      activityStatus([
+        activitySnapshot({
+          taskKey: "an-extremely-long-api-contract-review-label",
+          currentTool: "read",
+          lastAction: "grep finished after a long scan",
+        }),
+      ]),
+      theme(),
+      20,
+    );
+    expect(lines[1]).toContain("working");
+    expect(lines[1]).toContain("60:31");
+    expect(lines[2]).toMatch(/^ {2}now: read/u);
+  });
+
+  it.each([1, 8, 20, 40, 60, 120])("never exceeds width %i", (width) => {
+    const lines = activityViewLines(
+      activityStatus([
+        activitySnapshot({
+          taskKey: "api-界面-review-🧪-with-a-very-long-label",
+          currentTool: "read",
+          lastAction: "grep finished after a very long previous action",
+        }),
+      ]),
+      theme(),
+      width,
+    );
+    for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
   });
 });
 
 describe("completionMessageRenderer", () => {
   it("renders aggregate batches compactly and complete failure evidence when expanded", () => {
-    const successful = { ...run("successful"), report: "Implemented and validated." };
+    const successful = {
+      ...run("successful"),
+      status: "parked" as const,
+      completionAcknowledgedGeneration: 1,
+      report: "Implemented and validated.",
+    };
     const failed = {
       ...run("failed"),
       status: "failed" as const,
       error: "provider disconnected",
-      report: "Partial failure evidence.",
+      report: `Partial failure evidence.\n${Array.from(
+        { length: 12 },
+        (_, index) => `evidence line ${index + 1}`,
+      ).join("\n")}\nFINAL EXPANDED EVIDENCE`,
       terminationReason: {
         code: "runner_error" as const,
         at: "2025-01-01T00:01:00.000Z",
@@ -353,7 +336,7 @@ describe("completionMessageRenderer", () => {
     };
     const collapsed =
       aggregateCompletionMessageRenderer(details, false, theme())?.render(180).join("\n") ?? "";
-    expect(collapsed).toContain("Hackler batch · 2 results · 1 failed");
+    expect(collapsed).toContain("Hackler results · 2 · 1 failed");
     expect(collapsed).toContain("Implemented and validated.");
     expect(collapsed).toContain("runner_error");
 
@@ -363,6 +346,7 @@ describe("completionMessageRenderer", () => {
     expect(expanded.indexOf("provider disconnected")).toBeLessThan(
       expanded.indexOf("Partial failure evidence."),
     );
+    expect(expanded).toContain("FINAL EXPANDED EVIDENCE");
   });
 
   it("renders an exact failure reason before an available partial report", () => {
@@ -387,10 +371,110 @@ describe("completionMessageRenderer", () => {
     );
     const output = component?.render(180).join("\n") ?? "";
 
-    expect(output).toContain("Reason: wall_limit · phase execution · wall 601/600");
+    expect(output).toContain("wall_limit · phase execution · wall 601/600");
     expect(output.indexOf("wall clock expired")).toBeLessThan(
       output.indexOf("Partial report from cleanup"),
     );
+  });
+
+  it("prefers result snapshots, then matching runs, then a sanitized legacy id", () => {
+    const snapshotRun = {
+      ...run("snapshot-source"),
+      task: "FORBIDDEN snapshot prompt",
+      ownership: { ...run("snapshot-source").ownership, key: "api-snapshot-source" },
+      status: "parked" as const,
+    };
+    const matchingRun = {
+      ...run("matching-source"),
+      task: "FORBIDDEN matching prompt",
+      ownership: { ...run("matching-source").ownership, key: "ui-matching-source" },
+      status: "parked" as const,
+    };
+    const legacyId = "legacy-\u001b]0;spoofed\u0007-run";
+    const results = [
+      {
+        runId: snapshotRun.id,
+        generation: 1,
+        status: "parked" as const,
+        snapshot: snapshotRun,
+      },
+      { runId: matchingRun.id, generation: 1, status: "parked" as const },
+      { runId: legacyId, generation: 1, status: "parked" as const },
+    ];
+    const output =
+      aggregateCompletionMessageRenderer(
+        {
+          schemaVersion: 3,
+          batch: {
+            id: "batch-source-order",
+            sequence: 1,
+            members: results.map((result) => ({
+              runId: result.runId,
+              generation: result.generation,
+            })),
+            originSessionId: "session",
+            originEntryId: null,
+            dispatchMarkerId: null,
+            route: "pi",
+            codeChanging: false,
+            phase: "ready",
+            results,
+            createdAt: "2025-01-01T00:00:00.000Z",
+            updatedAt: "2025-01-01T00:01:00.000Z",
+          },
+          runs: [matchingRun],
+        },
+        false,
+        theme(),
+      )
+        ?.render(140)
+        .join("\n") ?? "";
+    expect(output).toContain("API snapshot source");
+    expect(output).toContain("UI matching source");
+    expect(output).toContain("legacy-run");
+    expect(output).not.toContain("spoofed");
+    expect(output).not.toContain("FORBIDDEN");
+  });
+
+  it("caps collapsed summaries, omits prompts, and reports omitted History", () => {
+    const runs = Array.from({ length: 6 }, (_, index) => ({
+      ...run(`history-${index}`),
+      task: `FORBIDDEN prompt ${index}`,
+      ownership: { ...run(`history-${index}`).ownership, key: `history-task-${index}` },
+      status: "parked" as const,
+      completionAcknowledgedGeneration: 1,
+      report: `report ${index}`,
+    }));
+    const component = aggregateCompletionMessageRenderer(
+      {
+        schemaVersion: 3,
+        batch: {
+          id: "batch-history",
+          sequence: 1,
+          members: runs.map((item) => ({ runId: item.id, generation: 1 })),
+          originSessionId: "session",
+          originEntryId: null,
+          dispatchMarkerId: null,
+          route: "pi",
+          codeChanging: false,
+          phase: "delivered",
+          results: [],
+          createdAt: "2025-01-01T00:00:00.000Z",
+          updatedAt: "2025-01-01T00:01:00.000Z",
+        },
+        runs,
+      },
+      false,
+      theme(),
+    );
+    const output = component?.render(100).join("\n") ?? "";
+    expect((output.match(/○ History/gu) ?? []).length).toBe(4);
+    expect(output).toContain("+2 omitted · ○ 6 History");
+    expect(output).toContain("to expand");
+    expect(output).not.toContain("FORBIDDEN");
+    for (const width of [1, 8, 20, 40, 60, 120])
+      for (const line of component?.render(width) ?? [])
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
   });
 });
 
@@ -418,8 +502,9 @@ describe("AgentsViewer", () => {
     expect(lines[0]).toMatch(/^┌─+┐$/);
     expect(lines.at(-1)).toMatch(/^└─+┘$/);
     expect(output).toContain("│ Agent Hub ");
+    expect(output).toContain("Active");
     expect(output).toContain("Coordinate mission");
-    expect(output).toContain("└─ Inspect child scope");
+    expect(output).toContain("└─ Scout · child");
     expect(tui.requestRender).toHaveBeenCalled();
 
     viewer.dispose();
@@ -427,6 +512,75 @@ describe("AgentsViewer", () => {
     const renders = tui.requestRender.mock.calls.length;
     vi.advanceTimersByTime(2_000);
     expect(tui.requestRender).toHaveBeenCalledTimes(renders);
+  });
+
+  it("preserves selection by run id when regrouping", () => {
+    let listener: ((value: HubSnapshot) => void) | undefined;
+    const selected = { ...run("selected"), task: "Selected task" };
+    const other = { ...run("other"), task: "Other task" };
+    const viewer = new AgentsViewer(
+      { terminal: { rows: 40 }, requestRender: vi.fn() },
+      theme(),
+      { matches: () => false } as unknown as KeybindingsManager,
+      (next) => {
+        listener = next;
+        return () => {};
+      },
+      vi.fn(),
+      snapshot({ runs: [selected, other] }),
+    );
+
+    listener?.(
+      snapshot({
+        runs: [
+          {
+            ...selected,
+            status: "parked",
+            completionAcknowledgedGeneration: 1,
+          },
+          other,
+        ],
+      }),
+    );
+    const output = viewer.render(120).join("\n");
+    expect(output).toContain("selected 2 of 2");
+    expect(output).toContain("Task: Selected task");
+    expect(output.indexOf(" Active")).toBeLessThan(output.indexOf(" History"));
+    viewer.dispose();
+  });
+
+  it("does not draw lineage connectors across groups and shows the parent id", () => {
+    const parent = {
+      ...run("parent"),
+      status: "parked" as const,
+      completionAcknowledgedGeneration: 1,
+    };
+    const child = run("child", "parent");
+    const viewer = new AgentsViewer(
+      { terminal: { rows: 40 }, requestRender: vi.fn() },
+      theme(),
+      { matches: () => false } as unknown as KeybindingsManager,
+      () => () => {},
+      vi.fn(),
+      snapshot({ runs: [parent, child] }),
+    );
+    const output = viewer.render(120).join("\n");
+    expect(output).not.toContain("└─ Scout · child");
+    expect(output).toContain("Parent: parent");
+    viewer.dispose();
+  });
+
+  it.each([1, 8, 20, 40, 60, 120])("keeps every Hub line within width %i", (width) => {
+    const viewer = new AgentsViewer(
+      { terminal: { rows: 24 }, requestRender: vi.fn() },
+      theme(),
+      { matches: () => false } as unknown as KeybindingsManager,
+      () => () => {},
+      vi.fn(),
+      snapshot({ runs: [run("api-界面-🧪")] }),
+    );
+    for (const line of viewer.render(width)) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+    viewer.dispose();
   });
 
   it("supports bounded keyboard navigation and strips terminal controls", () => {
@@ -447,7 +601,9 @@ describe("AgentsViewer", () => {
       snapshot({ runs }),
     );
     viewer.handleInput("\u001b[F");
-    const output = viewer.render(72).join("\n");
+    const rendered = viewer.render(72);
+    const output = rendered.join("\n");
+    expect(rendered.every((line) => visibleWidth(line) <= 72)).toBe(true);
     expect(output).toContain("selected 10 of 10");
     expect(output).toContain("Last task");
     expect(output).toContain("safe red");
@@ -565,8 +721,8 @@ describe("AgentsViewer", () => {
     );
     const output = viewer.render(180).join("\n");
 
-    expect(output).toContain("Slots 1/3 used · 2 free · shared writer 1/1");
-    expect(output).toContain("Running 0 · wrapping 0 · blocked 0 · failed 1 · stopped 0");
+    expect(output).toContain("Slots 1/3 · 2 free");
+    expect(output).toContain("Attention 1 · Active 0 · History 0");
     expect(output).toContain("Termination: runner_error · phase execution");
     expect(output.indexOf("Termination:")).toBeLessThan(output.indexOf("Partial evidence only"));
     expect(output.indexOf("Error: runner disconnected")).toBeLessThan(

@@ -189,10 +189,14 @@ export type SubagentTerminationSnapshot = {
 
 export type SubagentActivitySnapshot = {
   id: string;
-  name: string;
+  /** Legacy fallback only; new live projections use taskKey. */
+  name?: string;
   profileClass?: "read" | "write" | "review" | "advisory" | "orchestrator";
   status: "queued" | "starting" | "running" | "blocked" | "parked" | "failed" | "stopped";
-  task: string;
+  /** Stable compact label source. Child prompts must not be used as quickview labels. */
+  taskKey?: string;
+  /** Retained for compatibility; new live projections omit child prompts. */
+  task?: string;
   runner?: "native" | "rpc" | "external";
   startedAt?: string;
   finishedAt?: string;
@@ -239,6 +243,7 @@ export type SubagentActivitySnapshot = {
     };
   }>;
   activeLeaseGeneration?: number;
+  completionAcknowledgedGeneration?: number;
   turns?: number;
   wrappingUp?: boolean;
   blockedSince?: string;
@@ -249,10 +254,21 @@ export type SubagentActivitySnapshot = {
   effectiveModel?: string;
   effectiveThinking?: string;
   latestActivity?: string;
+  /** Tool name only. Tool arguments and input are never projected. */
+  currentTool?: string;
+  /** Most recent meaningful activity distinct from the current operation. */
+  lastAction?: string;
+  attentionReason?: string;
+  group?: "Attention" | "Active";
 };
 
 export type SubagentsStatusEvent = {
   active: number;
+  /** Non-hidden Attention and Active runs represented by the live projection. */
+  foreground?: number;
+  attention?: number;
+  /** Acknowledged terminal generations, shown only as an aggregate during foreground work. */
+  history?: number;
   running: number;
   wrappingUp: number;
   blocked: number;

@@ -1,4 +1,4 @@
-import type { KeybindingsManager, Theme } from "@earendil-works/pi-coding-agent";
+import { type KeybindingsManager, keyHint, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   Box,
   type Component,
@@ -10,71 +10,40 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentsStatusEvent } from "../../shared/events.js";
 import type { HubSnapshot } from "./manager.js";
-import type { DispatchBatch, RunSnapshot, RunStatus } from "./types.js";
+import {
+  activityContextLine,
+  cleanDisplayLine,
+  deriveActivityContext,
+  displayLines,
+  type PresentationGroup,
+  presentationGroup,
+  presentRun,
+  rowWithReservedSuffix,
+  runDisplayLabel,
+  safeDisplayText,
+  styleHerdrStatus,
+  truncateStyledLine,
+} from "./presentation.js";
+import type { DispatchBatch, RunSnapshot } from "./types.js";
+
+export { safeDisplayText } from "./presentation.js";
 
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
   return `${String(Math.floor(seconds / 60)).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
-const TERMINAL_ESCAPE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)?)/gu;
-
-function cleanDisplayLine(value: string): string {
-  return value
-    .replace(TERMINAL_ESCAPE, "")
-    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-}
-
-function displayLines(value: string): string[] {
-  return value.split(/\r\n|[\n\r\u2028\u2029]/u).map(cleanDisplayLine);
-}
-
-export function safeDisplayText(value: string): string {
-  return displayLines(value).join("\n");
-}
-
 export function taskLabel(value: string, max = 120): string {
-  const first = displayLines(value).find(Boolean);
-  return (first || "Untitled task").slice(0, max);
-}
-
-export function shortModel(value: string | undefined): string {
-  const model = cleanDisplayLine(value?.split("/").at(-1) ?? "inherit");
-  if (/luna/iu.test(model)) return "luna";
-  if (/\bsol\b/iu.test(model) || /-sol(?:-|$)/iu.test(model)) return "sol";
-  return model;
+  const first = displayLines(value).find(Boolean) || "Untitled task";
+  return truncateToWidth(first, Math.max(1, max), "");
 }
 
 const HACKLER_LABEL = "Hackler";
-export const QUIET_EVENT_AGE_MS = 30_000;
-
-function colorForStatus(status: RunStatus): "muted" | "success" | "warning" | "error" | "dim" {
-  if (status === "running" || status === "starting" || status === "queued") return "muted";
-  if (status === "parked") return "success";
-  if (status === "blocked") return "warning";
-  if (status === "failed") return "error";
-  return "dim";
-}
 
 function timestampAge(value: string | undefined, now: number): number | undefined {
   if (!value) return undefined;
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? Math.max(0, now - parsed) : undefined;
-}
-
-function operationalState(run: SubagentsStatusEvent["agents"][number], now: number): string {
-  if (run.status === "blocked") return "blocked";
-  if (run.status === "failed") return "failed";
-  if (run.status === "stopped") return "stopped";
-  if (run.status === "parked") return "done (parked)";
-  if (run.status === "queued" || run.status === "starting") return "starting";
-  if (run.wrappingUp) return "wrapping up";
-  const age = timestampAge(run.lastEventAt, now);
-  return age !== undefined && age >= QUIET_EVENT_AGE_MS
-    ? `quiet · no event for ${formatDuration(age)}`
-    : "working";
 }
 
 function terminationText(
@@ -146,74 +115,66 @@ export function activityViewLines(
   status: SubagentsStatusEvent,
   theme: Theme,
   width: number,
-  now = Date.now(),
+  _now = Date.now(),
 ): string[] {
-  if (width <= 0 || status.agents.length === 0) return [];
-  const safe = (line: string) => truncateToWidth(line, width, "");
-  const priority = (agent: SubagentsStatusEvent["agents"][number]): number =>
-    agent.status === "blocked"
-      ? 0
-      : agent.wrappingUp
-        ? 1
-        : agent.status === "failed"
-          ? 2
-          : agent.status === "stopped"
-            ? 3
-            : agent.status === "starting" || agent.status === "queued"
-              ? 4
-              : agent.status === "running"
-                ? 5
-                : 6;
-  const ordered = status.agents
-    .map((agent, index) => ({ agent, index }))
-    .sort((left, right) => priority(left.agent) - priority(right.agent) || left.index - right.index)
-    .map(({ agent }) => agent);
-  const shown = ordered.slice(0, 4);
-  const lines = [
-    safe(
-      theme.fg(
-        "muted",
-        `${HACKLER_LABEL} · slots ${status.capacity.used}/${status.capacity.limit} used · ${status.capacity.free} free · shared writer ${status.capacity.sharedWritersUsed}/${status.capacity.sharedWritersLimit}`,
-      ),
-    ),
-    safe(
-      theme.fg(
-        "dim",
-        `  running ${status.running} · wrapping ${status.wrappingUp} · blocked ${status.blocked} · failed ${status.failed} · stopped ${status.stopped}`,
-      ),
-    ),
-  ];
-  if (status.oldestBlockingRequest) {
-    const requestAge = timestampAge(status.oldestBlockingRequest.createdAt, now) ?? 0;
-    lines.push(
-      safe(
-        theme.fg(
-          "warning",
-          `  oldest block: ${taskLabel(status.oldestBlockingRequest.title, 80)} · ${formatDuration(requestAge)} ago · action: ${cleanDisplayLine(status.oldestBlockingRequest.action)}${(status.blockingRequestCount ?? 1) > 1 ? ` · +${(status.blockingRequestCount ?? 1) - 1} more request(s)` : ""}`,
-        ),
-      ),
+  if (width <= 0) return [];
+  const foreground = status.agents
+    .map((agent, index) => ({ agent, index, presentation: presentRun(agent) }))
+    .filter(
+      ({ agent, presentation }) => agent.group !== undefined || presentation.group !== "History",
+    )
+    .sort(
+      (left, right) =>
+        left.presentation.priority - right.presentation.priority || left.index - right.index,
     );
+  if (foreground.length === 0) return [];
+  const shown = foreground.slice(0, 4);
+  const failureAttention = foreground.filter(
+    ({ presentation }) => presentation.group === "Attention" && presentation.icon === "×",
+  ).length;
+  const readyAttention = foreground.filter(
+    ({ presentation }) => presentation.group === "Attention" && presentation.icon === "✓",
+  ).length;
+  const headerParts = [
+    theme.fg("muted", HACKLER_LABEL),
+    `${theme.fg("warning", "◐")} ${theme.fg("muted", `${status.active}/${status.capacity.limit} active`)}`,
+    ...(failureAttention
+      ? [
+          `${theme.fg("error", "×")} ${theme.fg(
+            "muted",
+            `${failureAttention} ${failureAttention === status.blocked ? "blocked" : "attention"}`,
+          )}`,
+        ]
+      : []),
+    ...(readyAttention
+      ? [`${theme.fg("success", "✓")} ${theme.fg("muted", `${readyAttention} ready`)}`]
+      : []),
+  ];
+  const lines = [truncateStyledLine(headerParts.join(theme.fg("dim", " · ")), width)];
+  for (const { agent, presentation } of shown) {
+    const prefix = `${styleHerdrStatus(theme, presentation, presentation.icon)} `;
+    const critical =
+      styleHerdrStatus(theme, presentation, presentation.state) +
+      theme.fg("dim", ` · ${formatDuration(agent.elapsedMs)}`);
+    const suffix = theme.fg("dim", " · ") + critical;
+    lines.push(
+      visibleWidth(prefix + suffix) >= width
+        ? truncateStyledLine(prefix + critical, width)
+        : rowWithReservedSuffix(prefix, theme.fg("text", presentation.label), suffix, width),
+    );
+    const context = deriveActivityContext(agent);
+    const contextLine = activityContextLine(context, theme, width);
+    if (contextLine) lines.push(contextLine);
   }
-  for (const [index, agent] of shown.entries()) {
-    const isLastShown = index === shown.length - 1;
-    const connector = theme.fg("dim", isLastShown ? "  └─ " : "  ├─ ");
-    const continuation = theme.fg("dim", isLastShown ? "     " : "  │  ");
-    lines.push(safe(connector + theme.fg("text", taskLabel(agent.task))));
-    const state = operationalState(agent, now);
-    const metadata = styledJoin(theme, [
-      { value: agent.profileClass ?? "agent", color: "dim" },
-      { value: state, color: colorForStatus(agent.status) },
-      { value: shortModel(agent.effectiveModel), color: "dim" },
-      { value: formatDuration(agent.elapsedMs), color: "dim" },
-      ...(agent.latestActivity
-        ? [{ value: taskLabel(agent.latestActivity, 80), color: colorForStatus(agent.status) }]
-        : []),
-    ]);
-    lines.push(safe(continuation + metadata));
-    lines.push(safe(continuation + theme.fg("dim", operationalFacts(agent, now).join(" · "))));
+  const omitted = Math.max(0, foreground.length - shown.length);
+  const history = Math.max(0, status.history ?? 0);
+  if (omitted || history) {
+    const parts = [
+      ...(omitted ? [`+${omitted} active`] : []),
+      ...(history ? [`${theme.fg("success", "○")} ${history} history`] : []),
+    ];
+    lines.push(truncateStyledLine(theme.fg("dim", `  ${parts.join(" · ")}`), width));
   }
-  const overflow = Math.max(0, status.total - shown.length);
-  if (overflow) lines.push(safe(theme.fg("dim", `  +${overflow} more`)));
   return lines;
 }
 
@@ -252,12 +213,15 @@ export type AgentsOverlayAction = {
 };
 
 type HubSection = "runs" | "inbox" | "profiles";
+const ACTIVE_HUB_STATUSES = new Set(["queued", "starting", "running", "blocked"]);
 
 /** Event-driven native Agent Hub. */
 export class AgentsViewer {
   private snapshot: HubSnapshot;
   private section: HubSection = "runs";
   private selected = 0;
+  private selectedRunId: string | undefined;
+  private snapshotAt = Date.now();
   private disposed = false;
   private readonly unsubscribe: () => void;
   private clock: ReturnType<typeof setInterval> | undefined;
@@ -271,37 +235,71 @@ export class AgentsViewer {
     initial: HubSnapshot,
   ) {
     this.snapshot = initial;
-    const activeIndex = this.runRows().findIndex(({ run }) =>
-      ["queued", "starting", "running", "blocked"].includes(run.status),
-    );
-    this.selected = activeIndex >= 0 ? activeIndex : Math.max(0, this.runRows().length - 1);
+    const rows = this.runRows();
+    const foregroundIndex = rows.findIndex(({ group }) => group !== "History");
+    this.selected = foregroundIndex >= 0 ? foregroundIndex : Math.max(0, rows.length - 1);
+    this.selectedRunId = rows[this.selected]?.run.id;
     this.unsubscribe = subscribe((snapshot) => {
       if (this.disposed) return;
+      const selectedRunId = this.section === "runs" ? this.selectedRunId : undefined;
       this.snapshot = snapshot;
+      this.snapshotAt = Date.now();
+      if (selectedRunId) {
+        const nextIndex = this.runRows().findIndex(({ run }) => run.id === selectedRunId);
+        if (nextIndex >= 0) this.selected = nextIndex;
+      }
       this.clampSelection();
+      this.syncSelectedRunId();
       this.syncClock();
       this.tui.requestRender();
     });
     this.syncClock();
   }
 
-  private runRows(): Array<{ run: RunSnapshot; depth: number }> {
-    const byParent = new Map<string | undefined, RunSnapshot[]>();
-    const ids = new Set(this.snapshot.runs.map((run) => run.id));
-    for (const run of this.snapshot.runs) {
-      const parent = run.parentId && ids.has(run.parentId) ? run.parentId : undefined;
-      byParent.set(parent, [...(byParent.get(parent) ?? []), run]);
+  private hasPendingRequest(runId: string): boolean {
+    return this.snapshot.requests.some(
+      (request) => request.fromRunId === runId && request.status === "pending",
+    );
+  }
+
+  private runRows(): Array<{
+    run: RunSnapshot;
+    depth: number;
+    group: PresentationGroup;
+    presentation: ReturnType<typeof presentRun>;
+  }> {
+    const groups: PresentationGroup[] = ["Attention", "Active", "History"];
+    const presentations = new Map(
+      this.snapshot.runs.map((run) => [
+        run.id,
+        presentRun(run, { hasPendingRequest: this.hasPendingRequest(run.id) }),
+      ]),
+    );
+    const rows: Array<{
+      run: RunSnapshot;
+      depth: number;
+      group: PresentationGroup;
+      presentation: ReturnType<typeof presentRun>;
+    }> = [];
+    for (const group of groups) {
+      const runs = this.snapshot.runs.filter((run) => presentations.get(run.id)?.group === group);
+      const ids = new Set(runs.map((run) => run.id));
+      const byParent = new Map<string | undefined, RunSnapshot[]>();
+      for (const run of runs) {
+        const parent = run.parentId && ids.has(run.parentId) ? run.parentId : undefined;
+        byParent.set(parent, [...(byParent.get(parent) ?? []), run]);
+      }
+      const seen = new Set<string>();
+      const visit = (run: RunSnapshot, depth: number) => {
+        if (seen.has(run.id)) return;
+        seen.add(run.id);
+        const presentation = presentations.get(run.id)!;
+        rows.push({ run, depth, group, presentation });
+        for (const child of byParent.get(run.id) ?? []) visit(child, depth + 1);
+      };
+      for (const root of byParent.get(undefined) ?? []) visit(root, 0);
+      for (const run of runs) visit(run, 0);
     }
-    const rows: Array<{ run: RunSnapshot; depth: number }> = [];
-    const seen = new Set<string>();
-    const visit = (run: RunSnapshot, depth: number) => {
-      if (seen.has(run.id)) return;
-      seen.add(run.id);
-      rows.push({ run, depth });
-      for (const child of byParent.get(run.id) ?? []) visit(child, depth + 1);
-    };
-    for (const root of byParent.get(undefined) ?? []) visit(root, 0);
-    for (const run of this.snapshot.runs) visit(run, 0);
     return rows;
   }
 
@@ -315,16 +313,30 @@ export class AgentsViewer {
     this.selected = Math.min(this.selected, Math.max(0, this.itemsLength() - 1));
   }
 
+  private syncSelectedRunId(): void {
+    this.selectedRunId =
+      this.section === "runs" ? this.runRows()[this.selected]?.run.id : undefined;
+  }
+
+  private setSelected(index: number): void {
+    this.selected = Math.max(0, Math.min(index, Math.max(0, this.itemsLength() - 1)));
+    this.syncSelectedRunId();
+  }
+
   private visibleWindow(length: number): { start: number; end: number } {
     const maximum = Math.max(4, Math.min(7, Math.floor(this.tui.terminal.rows / 4)));
     const start = Math.max(0, Math.min(this.selected - Math.floor(maximum / 2), length - maximum));
     return { start, end: Math.min(length, start + maximum) };
   }
 
+  private elapsedMs(run: RunSnapshot, now: number): number {
+    return ACTIVE_HUB_STATUSES.has(run.status)
+      ? run.elapsedMs + Math.max(0, now - this.snapshotAt)
+      : run.elapsedMs;
+  }
+
   private syncClock(): void {
-    const active = this.snapshot.runs.some((run) =>
-      ["queued", "starting", "running", "blocked"].includes(run.status),
-    );
+    const active = this.snapshot.runs.some((run) => ACTIVE_HUB_STATUSES.has(run.status));
     if (active && !this.clock) {
       this.clock = setInterval(() => this.tui.requestRender(), 1_000);
       this.clock.unref?.();
@@ -354,35 +366,35 @@ export class AgentsViewer {
     if (matchesKey(data, Key.tab)) {
       this.section =
         this.section === "runs" ? "inbox" : this.section === "inbox" ? "profiles" : "runs";
-      this.selected = 0;
+      this.setSelected(0);
       this.tui.requestRender();
       return;
     }
     if (matchesKey(data, Key.home)) {
-      this.selected = 0;
+      this.setSelected(0);
       this.tui.requestRender();
       return;
     }
     if (matchesKey(data, Key.end)) {
-      this.selected = Math.max(0, this.itemsLength() - 1);
+      this.setSelected(this.itemsLength() - 1);
       this.tui.requestRender();
       return;
     }
     const page = Math.max(4, Math.min(7, Math.floor(this.tui.terminal.rows / 4)));
     if (matchesKey(data, Key.pageUp)) {
-      this.selected = Math.max(0, this.selected - page);
+      this.setSelected(this.selected - page);
       this.tui.requestRender();
       return;
     }
     if (matchesKey(data, Key.pageDown)) {
-      this.selected = Math.min(Math.max(0, this.itemsLength() - 1), this.selected + page);
+      this.setSelected(this.selected + page);
       this.tui.requestRender();
       return;
     }
     if (this.keybindings.matches(data, "tui.select.up") || matchesKey(data, Key.up))
-      this.selected = Math.max(0, this.selected - 1);
+      this.setSelected(this.selected - 1);
     else if (this.keybindings.matches(data, "tui.select.down") || matchesKey(data, Key.down))
-      this.selected = Math.min(Math.max(0, this.itemsLength() - 1), this.selected + 1);
+      this.setSelected(this.selected + 1);
     else if (this.section === "runs") {
       const run = this.runRows()[this.selected]?.run;
       if (!run) return;
@@ -453,7 +465,7 @@ export class AgentsViewer {
       ),
       "",
     ];
-    if (this.section === "runs") this.renderRuns(body);
+    if (this.section === "runs") this.renderRuns(body, innerWidth);
     else if (this.section === "inbox") this.renderInbox(body);
     else this.renderProfiles(body);
     const transcriptHint =
@@ -483,42 +495,22 @@ export class AgentsViewer {
     return [top, ...body.map(frame), bottom].map((line) => truncateToWidth(line, width, ""));
   }
 
-  private renderRuns(body: string[]): void {
+  private renderRuns(body: string[], width: number): void {
     const now = Date.now();
-    const running = this.snapshot.runs.filter((run) =>
-      ["queued", "starting", "running"].includes(run.status),
-    ).length;
-    const wrapping = this.snapshot.runs.filter(
-      (run) => ["queued", "starting", "running", "blocked"].includes(run.status) && run.wrappingUp,
-    ).length;
-    const blocked = this.snapshot.runs.filter((run) => run.status === "blocked").length;
-    const failed = this.snapshot.runs.filter((run) => run.status === "failed").length;
-    const stopped = this.snapshot.runs.filter((run) => run.status === "stopped").length;
+    const rows = this.runRows();
+    const counts = (group: PresentationGroup) => rows.filter((row) => row.group === group).length;
     body.push(
       this.theme.fg(
         "muted",
-        ` Slots ${this.snapshot.capacity.used}/${this.snapshot.capacity.limit} used · ${this.snapshot.capacity.free} free · shared writer ${this.snapshot.capacity.sharedWritersUsed}/${this.snapshot.capacity.sharedWritersLimit}`,
+        ` Slots ${this.snapshot.capacity.used}/${this.snapshot.capacity.limit} · ${this.snapshot.capacity.free} free`,
       ),
-      this.theme.fg(
-        "dim",
-        ` Running ${running} · wrapping ${wrapping} · blocked ${blocked} · failed ${failed} · stopped ${stopped}`,
-      ),
-      this.theme.fg(
-        "dim",
-        ` Top-level batches ${this.snapshot.batchCounts.open} open · ${this.snapshot.batchCounts.ready} ready · ${this.snapshot.batchCounts.inFlight} in-flight`,
-      ),
+      styledJoin(this.theme, [
+        { value: `Attention ${counts("Attention")}`, color: "error" },
+        { value: `Active ${counts("Active")}`, color: "warning" },
+        { value: `History ${counts("History")}`, color: "success" },
+      ]),
     );
-    const oldestBlock = this.snapshot.requests
-      .filter((request) => request.blocking && request.status === "pending")
-      .sort((left, right) => Date.parse(left.createdAt) - Date.parse(right.createdAt))[0];
-    if (oldestBlock)
-      body.push(
-        this.theme.fg(
-          "warning",
-          ` Oldest block: ${cleanDisplayLine(oldestBlock.title)} · ${formatDuration(timestampAge(oldestBlock.createdAt, now) ?? 0)} ago · action: tab to inbox, enter to answer`,
-        ),
-      );
-    if (!this.snapshot.runs.length) {
+    if (!rows.length) {
       body.push(
         this.theme.fg(
           "muted",
@@ -527,48 +519,84 @@ export class AgentsViewer {
       );
       return;
     }
-    const rows = this.runRows();
     const { start, end } = this.visibleWindow(rows.length);
     if (start > 0) body.push(this.theme.fg("dim", ` … ${start} earlier run(s)`));
+    let previousGroup: PresentationGroup | undefined;
     for (let index = start; index < end; index += 1) {
-      const { run, depth } = rows[index]!;
+      const { run, depth, group, presentation } = rows[index]!;
+      if (group !== previousGroup) {
+        body.push(this.theme.fg(presentation.token, ` ${group}`));
+        previousGroup = group;
+      }
       const selected = index === this.selected;
       const branch = depth > 0 ? `${"  ".repeat(Math.min(depth - 1, 4))}└─ ` : "";
-      const row = `${selected ? "›" : " "} ${branch}${taskLabel(run.task)}  ${run.profileClass} · ${operationalState(run, now)} · ${formatDuration(run.elapsedMs)}`;
-      body.push(
-        selected
-          ? this.theme.bg("selectedBg", this.theme.fg("text", row))
-          : this.theme.fg("text", row),
+      const prefix = `${selected ? "›" : " "} ${styleHerdrStatus(
+        this.theme,
+        presentation,
+        presentation.icon,
+      )} ${branch}`;
+      const critical = this.theme.fg(
+        "dim",
+        `${presentation.state} · ${formatDuration(this.elapsedMs(run, now))}`,
       );
+      const suffix = this.theme.fg("dim", " · ") + critical;
+      const row =
+        visibleWidth(prefix + suffix) >= width
+          ? truncateStyledLine(prefix + critical, width)
+          : rowWithReservedSuffix(prefix, this.theme.fg("text", presentation.label), suffix, width);
+      body.push(selected ? this.theme.bg("selectedBg", row) : row);
     }
     if (end < rows.length) body.push(this.theme.fg("dim", ` … ${rows.length - end} later run(s)`));
-    const run = rows[this.selected]?.run;
-    if (!run) return;
+    const selectedRow = rows[this.selected];
+    if (!selectedRow) return;
+    const { run, group, presentation } = selectedRow;
+    const pendingRequests = this.snapshot.requests
+      .filter((request) => request.fromRunId === run.id && request.status === "pending")
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    const pendingRequest = pendingRequests[0];
+    const generation = run.terminationReason?.generation ?? run.activeLeaseGeneration;
+    const requiredAction = pendingRequest
+      ? `Required action: answer ${cleanDisplayLine(pendingRequest.title)} · enter`
+      : run.cleanupFailure
+        ? "Required action: review cleanup quarantine"
+        : group === "Attention"
+          ? `Required action: collect${generation ? ` generation ${generation}` : " this result"}`
+          : undefined;
+    const context = deriveActivityContext(run);
+    body.push("");
+    if (requiredAction) body.push(this.theme.fg(presentation.token, requiredAction));
     body.push(
-      "",
-      this.theme.fg("muted", `${run.id} · ${formatRun(run)}`),
+      this.theme.fg(
+        "muted",
+        `${cleanDisplayLine(run.id)} · ${cleanDisplayLine(run.name)} · ${run.profileClass}`,
+      ),
+      ...(run.parentId ? [this.theme.fg("dim", `Parent: ${cleanDisplayLine(run.parentId)}`)] : []),
+      this.theme.fg("text", `Task: ${taskLabel(run.task, 240)}`),
       this.theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`),
       this.theme.fg("dim", `Deliverable: ${cleanDisplayLine(run.ownership.deliverable)}`),
       this.theme.fg("dim", `Transcript: ${cleanDisplayLine(run.sessionFile ?? "pending")}`),
-      this.theme.fg("muted", `State: ${operationalState(run, now)}`),
-      ...operationalFacts(run, now).map((fact) => this.theme.fg("dim", fact)),
-      this.theme.fg("muted", `Activity: ${cleanDisplayLine(run.latestActivity ?? "not recorded")}`),
+      this.theme.fg(presentation.token, `State: ${presentation.state}`),
+      ...(context.now ? [this.theme.fg("muted", `Now: ${cleanDisplayLine(context.now)}`)] : []),
+      ...(context.lastAction
+        ? [this.theme.fg("dim", `Last action: ${cleanDisplayLine(context.lastAction)}`)]
+        : []),
+      ...(group === "Active"
+        ? [
+            this.theme.fg("dim", formatRun(run)),
+            ...operationalFacts(run, now).map((fact) => this.theme.fg("dim", fact)),
+          ]
+        : []),
     );
-    const blockingRequests = this.snapshot.requests
-      .filter(
-        (request) =>
-          request.fromRunId === run.id && request.blocking && request.status === "pending",
-      )
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-    const blockingRequest = blockingRequests[0];
-    if (blockingRequest)
+    if (pendingRequest)
       body.push(
         this.theme.fg(
           "warning",
-          `Blocking request: ${cleanDisplayLine(blockingRequest.title)} · ${formatDuration(timestampAge(blockingRequest.createdAt, now) ?? 0)} ago · action: enter to answer`,
+          `Request: ${cleanDisplayLine(pendingRequest.title)} · ${formatDuration(
+            timestampAge(pendingRequest.createdAt, now) ?? 0,
+          )} ago`,
         ),
-        ...(blockingRequests.length > 1
-          ? [this.theme.fg("dim", `+${blockingRequests.length - 1} more request(s)`)]
+        ...(pendingRequests.length > 1
+          ? [this.theme.fg("dim", `+${pendingRequests.length - 1} more request(s)`)]
           : []),
       );
     const mission = run.missionId
@@ -590,25 +618,28 @@ export class AgentsViewer {
             ]
           : []),
       );
-    if (run.activity.length)
-      body.push(
-        this.theme.fg("dim", "Recent activity"),
-        ...run.activity
-          .slice(-4)
-          .map((entry) =>
-            this.theme.fg("dim", `  ${entry.kind} · ${cleanDisplayLine(entry.text)}`),
-          ),
-      );
     if (run.terminationReason)
       body.push(this.theme.fg("error", `Termination: ${terminationText(run.terminationReason)}`));
     if (run.error) body.push(this.theme.fg("error", `Error: ${cleanDisplayLine(run.error)}`));
-    if (run.report)
+    if (run.cleanupFailure)
       body.push(
-        this.theme.fg("success", "Report"),
-        ...displayLines(run.report)
-          .slice(0, 8)
-          .map((line) => this.theme.fg("text", `  ${line}`)),
+        this.theme.fg("error", `Cleanup retained: ${cleanDisplayLine(run.cleanupFailure.message)}`),
       );
+    if (run.report) {
+      const reportLines = displayLines(run.report);
+      body.push(
+        this.theme.fg(run.status === "parked" ? "success" : "warning", "Report"),
+        ...reportLines.slice(0, 8).map((line) => this.theme.fg("text", `  ${line}`)),
+        ...(reportLines.length > 8
+          ? [
+              this.theme.fg(
+                "dim",
+                `  … ${reportLines.length - 8} more line(s) · open transcript for complete report`,
+              ),
+            ]
+          : []),
+      );
+    }
   }
 
   private renderInbox(body: string[]): void {
@@ -711,6 +742,87 @@ export class AgentsViewer {
   }
 }
 
+function expandHint(): string {
+  try {
+    return keyHint("app.tools.expand", "to expand");
+  } catch {
+    return "Ctrl+O to expand";
+  }
+}
+
+function expandedShell(content: string, theme: Theme, outputPad: number): Component {
+  const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+  box.addChild(new Text(content, 0, 0));
+  return box;
+}
+
+function compactShell(
+  buildLines: (width: number) => string[],
+  theme: Theme,
+  outputPad: number,
+): Component {
+  return {
+    render(width: number): string[] {
+      if (width <= 0) return [];
+      const padding = Math.min(Math.max(0, outputPad), Math.floor(width / 2));
+      const innerWidth = Math.max(0, width - padding * 2);
+      const blank = theme.bg("customMessageBg", " ".repeat(width));
+      const lines = buildLines(innerWidth).map((line) => {
+        const content = truncateToWidth(line, innerWidth, "");
+        const padded =
+          " ".repeat(padding) +
+          content +
+          " ".repeat(Math.max(0, width - padding - visibleWidth(content)));
+        return theme.bg("customMessageBg", truncateToWidth(padded, width, ""));
+      });
+      return [blank, ...lines, blank];
+    },
+    invalidate(): void {
+      // buildLines reapplies the current theme callbacks on the next render.
+    },
+  };
+}
+
+type CompletionRun = {
+  id: string;
+  name: string;
+  profileClass?: RunSnapshot["profileClass"];
+  task: string;
+  ownership: { key?: string; owns: string[] };
+  status: RunSnapshot["status"];
+  elapsedMs?: number;
+  activeLeaseGeneration?: number;
+  completionAcknowledgedGeneration?: number;
+  terminationReason?: RunSnapshot["terminationReason"];
+  report?: string;
+  error?: string;
+  cleanupFailure?: RunSnapshot["cleanupFailure"];
+  sessionFile?: string;
+  sessionDir?: string;
+  activity?: RunSnapshot["activity"];
+  effectiveModel?: string;
+  usage?: RunSnapshot["usage"];
+};
+
+function completionSummary(run: CompletionRun, theme: Theme, width: number): string {
+  const presentation = presentRun(run);
+  const reason = terminationText(run.terminationReason);
+  const evidence = [
+    ...(reason ? [reason] : []),
+    ...(run.error ? [cleanDisplayLine(run.error)] : []),
+    ...(run.report ? [taskLabel(run.report, 180)] : []),
+  ];
+  return rowWithReservedSuffix(
+    `${styleHerdrStatus(theme, presentation, presentation.icon)} `,
+    theme.fg("text", runDisplayLabel(run)),
+    theme.fg(
+      "dim",
+      ` · ${presentation.state}${evidence.length ? ` · ${evidence.join(" · ")}` : ""}`,
+    ),
+    width,
+  );
+}
+
 export function aggregateCompletionMessageRenderer(
   details: unknown,
   expanded: boolean,
@@ -722,55 +834,116 @@ export function aggregateCompletionMessageRenderer(
     | undefined;
   if (value?.schemaVersion !== 3 || !value.batch) return undefined;
   const batch = value.batch;
-  const runs = batch.results.length
-    ? batch.results.map(
-        (result) =>
-          result.snapshot ?? {
-            name: result.runId,
+  const fallbackRuns = value.runs ?? [];
+  const runs: CompletionRun[] = batch.results.length
+    ? batch.results.map((result) => {
+        const matching = fallbackRuns.find((run) => {
+          if (run.id !== result.runId) return false;
+          const generation = run.terminationReason?.generation ?? run.activeLeaseGeneration;
+          return generation === undefined || generation === result.generation;
+        });
+        return (
+          result.snapshot ??
+          matching ?? {
+            id: cleanDisplayLine(result.runId) || "unknown-run",
+            name: cleanDisplayLine(result.runId) || "Hackler",
             task: `Generation ${result.generation}`,
-            ownership: { owns: [] },
+            ownership: { key: cleanDisplayLine(result.runId), owns: [] },
             status: result.status,
+            activeLeaseGeneration: result.generation,
             terminationReason: result.terminationReason,
             report: result.report,
             error: result.error,
             cleanupFailure: result.cleanupFailure,
-          },
-      )
-    : (value.runs ?? []);
-  const shell = (content: string): Component => {
-    const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(content, 0, 0));
-    return box;
-  };
+          }
+        );
+      })
+    : fallbackRuns;
   const failures = runs.filter((run) => run.status === "failed").length;
   const stopped = runs.filter((run) => run.status === "stopped").length;
-  const heading = theme.fg(
-    failures ? "error" : stopped ? "warning" : "success",
-    `Hackler batch · ${runs.length} result${runs.length === 1 ? "" : "s"}${failures ? ` · ${failures} failed` : ""}${stopped ? ` · ${stopped} stopped` : ""}`,
-  );
+  const headingToken = failures || stopped ? "error" : "success";
+  const headingText = `Hackler results · ${runs.length}${failures ? ` · ${failures} failed` : ""}${stopped ? ` · ${stopped} stopped` : ""}`;
   if (!expanded) {
-    const lines = runs.map((run) => {
-      const reason = run.terminationReason?.code;
-      const evidence = run.status === "failed" ? run.error || run.report : run.report || run.error;
-      return `${run.status === "parked" ? "✓" : run.status === "failed" ? "!" : "○"} ${cleanDisplayLine(run.name)} · ${run.status}${reason ? ` · ${reason}` : ""}${evidence ? ` · ${taskLabel(evidence, 140)}` : ""}`;
-    });
-    return shell([heading, ...lines].join("\n"));
+    return compactShell(
+      (width) => {
+        const shown = runs.slice(0, 4);
+        const omitted = Math.max(0, runs.length - shown.length);
+        const history = runs.filter((run) => presentationGroup(run) === "History").length;
+        return [
+          theme.fg(headingToken, headingText),
+          ...shown.map((run) => completionSummary(run, theme, width)),
+          ...(omitted || history
+            ? [
+                theme.fg(
+                  "dim",
+                  [
+                    ...(omitted ? [`+${omitted} omitted`] : []),
+                    ...(history ? [`○ ${history} History`] : []),
+                  ].join(" · "),
+                ),
+              ]
+            : []),
+          theme.fg("dim", expandHint()),
+        ];
+      },
+      theme,
+      outputPad,
+    );
   }
-  return shell(
+  return expandedShell(
     [
-      heading,
+      theme.fg(headingToken, headingText),
       theme.fg("dim", `${batch.id} · sequence ${batch.sequence} · route ${batch.route}`),
       ...runs.map((run) => {
+        const presentation = presentRun(run);
         const reason = terminationText(run.terminationReason);
-        const report =
-          run.status === "failed"
-            ? `${theme.fg("error", `Failure${reason ? ` · ${reason}` : ""}${run.error ? ` · ${safeDisplayText(run.error)}` : ""}`)}${run.report ? `\n\n${theme.fg("warning", "Partial report")}\n${safeDisplayText(run.report)}` : ""}`
-            : run.status === "stopped"
-              ? `${theme.fg("warning", `Stopped${reason ? ` · ${reason}` : ""}`)}${run.report ? `\n\n${theme.fg("warning", "Partial report")}\n${safeDisplayText(run.report)}` : ""}`
-              : safeDisplayText(run.report || run.error || "(no report)");
-        return `${theme.fg("text", `${safeDisplayText(run.task)}\n${run.name} · ${run.status}`)}\n${theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`)}\n${report}${run.cleanupFailure ? `\n${theme.fg("error", `Cleanup retained: ${safeDisplayText(run.cleanupFailure.message)}`)}` : ""}`;
+        const failureEvidence =
+          run.status === "failed" || run.status === "stopped"
+            ? [
+                theme.fg(
+                  "error",
+                  `${run.status === "failed" ? "Failure" : "Stopped"}${reason ? ` · ${reason}` : ""}`,
+                ),
+                ...(run.error ? [theme.fg("error", `Error\n${safeDisplayText(run.error)}`)] : []),
+                ...(run.cleanupFailure
+                  ? [
+                      theme.fg(
+                        "error",
+                        `Cleanup retained\n${safeDisplayText(run.cleanupFailure.message)}`,
+                      ),
+                    ]
+                  : []),
+                ...(run.report
+                  ? [`${theme.fg("warning", "Partial report")}\n${safeDisplayText(run.report)}`]
+                  : []),
+              ]
+            : [
+                ...(run.cleanupFailure
+                  ? [
+                      theme.fg(
+                        "error",
+                        `Cleanup retained\n${safeDisplayText(run.cleanupFailure.message)}`,
+                      ),
+                    ]
+                  : []),
+                run.report
+                  ? `${theme.fg("success", "Report")}\n${safeDisplayText(run.report)}`
+                  : safeDisplayText(run.error || "(no report)"),
+              ];
+        return [
+          theme.fg("text", safeDisplayText(run.task)),
+          `${styleHerdrStatus(theme, presentation, presentation.icon)} ${theme.fg(
+            presentation.token,
+            `${run.name} · ${presentation.state}`,
+          )}`,
+          theme.fg("dim", `Run: ${cleanDisplayLine(run.id)}`),
+          theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`),
+          ...failureEvidence,
+        ].join("\n");
       }),
     ].join("\n\n"),
+    theme,
+    outputPad,
   );
 }
 
@@ -782,43 +955,41 @@ export function completionMessageRenderer(
 ): Component | undefined {
   const run = (details as { run?: RunSnapshot } | undefined)?.run;
   if (!run) return undefined;
-  const shell = (content: string): Component => {
-    const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
-    box.addChild(new Text(content, 0, 0));
-    return box;
-  };
-  const title = theme.fg("text", taskLabel(run.task));
-  const state = theme.fg(
-    colorForStatus(run.status),
-    `${run.profileClass} · ${operationalState(run, Date.now())}`,
-  );
+  const presentation = presentRun(run);
   const reason = terminationText(run.terminationReason);
   const usage = theme.fg(
     "dim",
     `${cleanDisplayLine(run.effectiveModel ?? "inherited model")} · ${formatDuration(run.elapsedMs)} · ${run.usage.total.toLocaleString()} tokens${run.usage.cost ? ` · $${run.usage.cost.toFixed(4)}` : ""}`,
   );
   if (!expanded)
-    return shell(
-      [
-        title,
-        state,
-        usage,
-        reason ? theme.fg(run.status === "parked" ? "success" : "error", `Reason: ${reason}`) : "",
-        run.error ? theme.fg("error", taskLabel(run.error, 240)) : "",
-        run.report ? theme.fg("muted", taskLabel(run.report, 240)) : theme.fg("muted", "No report"),
-      ]
-        .filter(Boolean)
-        .join("\n"),
+    return compactShell(
+      (width) => [
+        theme.fg(presentation.token, "Hackler result"),
+        completionSummary(run, theme, width),
+        theme.fg("dim", expandHint()),
+      ],
+      theme,
+      outputPad,
     );
-  return shell(
+  const failureEvidence = [
+    ...(reason ? [theme.fg("error", `Reason: ${reason}`)] : []),
+    ...(run.error ? [theme.fg("error", `Error\n${safeDisplayText(run.error)}`)] : []),
+    ...(run.cleanupFailure
+      ? [theme.fg("error", `Cleanup retained\n${safeDisplayText(run.cleanupFailure.message)}`)]
+      : []),
+  ];
+  return expandedShell(
     [
       theme.fg("text", safeDisplayText(run.task)),
-      state,
+      `${styleHerdrStatus(theme, presentation, presentation.icon)} ${theme.fg(
+        presentation.token,
+        `${run.profileClass} · ${presentation.state}`,
+      )}`,
+      theme.fg("dim", `Run: ${cleanDisplayLine(run.id)}`),
       theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`),
       theme.fg("dim", `Transcript: ${cleanDisplayLine(run.sessionFile ?? run.sessionDir)}`),
       usage,
-      reason ? theme.fg(run.status === "parked" ? "success" : "error", `Reason: ${reason}`) : "",
-      run.error ? theme.fg("error", `Error\n${safeDisplayText(run.error)}`) : "",
+      ...failureEvidence,
       run.activity.length
         ? theme.fg(
             "dim",
@@ -830,10 +1001,17 @@ export function completionMessageRenderer(
               .join("\n")}`,
           )
         : "",
-      run.report ? `${theme.fg("success", "Report")}\n${safeDisplayText(run.report)}` : "",
+      run.report
+        ? `${theme.fg(
+            run.status === "parked" ? "success" : "warning",
+            run.status === "parked" ? "Report" : "Partial report",
+          )}\n${safeDisplayText(run.report)}`
+        : "",
     ]
       .filter(Boolean)
       .join("\n\n"),
+    theme,
+    outputPad,
   );
 }
 

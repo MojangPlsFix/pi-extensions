@@ -39,8 +39,8 @@ function traceSummary(trace: EvaluationTraceV1): string {
 }
 
 const help = [
-  "Agent Hub is the authoritative view of active, blocked, parked, and failed Hackler runs.",
-  "Completed sessions park automatically and consume no active capacity.",
+  "Agent Hub groups every Hackler run under Attention, Active, or History.",
+  "Completed sessions park automatically; acknowledged results move to History and use no capacity.",
   "Herdr transcript panes are display-only and never execute or prompt child Pi sessions.",
   "",
   "Tab  Switch Runs / Inbox / Profiles",

@@ -61,6 +61,7 @@ import {
   TaskClaimRegistry,
   validateDispatchBatch,
 } from "./orchestration.js";
+import { deriveActivityContext, lifecycleOperationLabel, presentRun } from "./presentation.js";
 import { ExternalProcessBackend, RpcProcessBackend } from "./process-backends.js";
 import { RunStore } from "./run-store.js";
 import {
@@ -725,40 +726,70 @@ export class SubagentManager {
     const snapshot = this.hubSnapshot();
     if (this.restoredParent) this.updateEvaluationLedger(snapshot);
     const summary = this.store.summary();
-    const blockingRequests = snapshot.requests.filter(
-      (request) => request.blocking && request.status === "pending",
-    );
-    const oldestBlockingRequest = blockingRequests[0];
+    const visibleRuns = snapshot.runs.filter((run) => !run.hidden);
+    const projected = visibleRuns.map((run, index) => {
+      const pendingRequest = snapshot.requests
+        .filter((request) => request.fromRunId === run.id && request.status === "pending")
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+      const presentation = presentRun(run, { hasPendingRequest: Boolean(pendingRequest) });
+      const activity = deriveActivityContext(run);
+      const operationLabel = lifecycleOperationLabel(run.currentOperation);
+      return {
+        run,
+        index,
+        presentation,
+        activity,
+        pendingRequest,
+        currentOperation:
+          run.currentOperation && operationLabel
+            ? { ...run.currentOperation, name: operationLabel }
+            : undefined,
+      };
+    });
+    const foreground = projected
+      .filter(({ presentation }) => presentation.group !== "History")
+      .sort(
+        (left, right) =>
+          left.presentation.priority - right.presentation.priority || left.index - right.index,
+      );
+    const history = projected.length - foreground.length;
+    const activeForeground = foreground.filter(({ run }) => ACTIVE_STATUSES.has(run.status));
     this.pi.events.emit(events.subagentsStatus, {
-      ...summary,
+      active: activeForeground.length,
+      foreground: foreground.length,
+      attention: foreground.filter(({ presentation }) => presentation.group === "Attention").length,
+      history,
+      running: activeForeground.filter(({ run }) =>
+        ["queued", "starting", "running"].includes(run.status),
+      ).length,
+      wrappingUp: activeForeground.filter(({ run }) => run.wrappingUp).length,
+      blocked: foreground.filter(({ run }) => run.status === "blocked").length,
+      parked: visibleRuns.filter((run) => run.status === "parked").length,
+      failed: visibleRuns.filter((run) => run.status === "failed").length,
+      stopped: visibleRuns.filter((run) => run.status === "stopped").length,
+      writers: activeForeground.filter(({ run }) =>
+        ["write", "orchestrator"].includes(run.profileClass),
+      ).length,
+      total: foreground.length,
       capacity: snapshot.capacity,
-      batches: snapshot.batchCounts,
-      blockingRequestCount: blockingRequests.length,
-      ...(oldestBlockingRequest
-        ? {
-            oldestBlockingRequest: {
-              id: oldestBlockingRequest.id,
-              title: oldestBlockingRequest.title,
-              createdAt: oldestBlockingRequest.createdAt,
-              action: "open /agents inbox and answer",
-            },
-          }
-        : {}),
-      agents: snapshot.runs.sort((left, right) => {
-        const priority = (value: RunSnapshot) =>
-          value.status === "blocked"
-            ? 0
-            : value.wrappingUp
-              ? 1
-              : value.status === "failed"
-                ? 2
-                : value.status === "stopped"
-                  ? 3
-                  : ACTIVE_STATUSES.has(value.status)
-                    ? 4
-                    : 5;
-        return priority(left) - priority(right);
-      }),
+      agents: foreground.map(
+        ({ run, presentation, activity, pendingRequest, currentOperation }) => ({
+          id: run.id,
+          status: run.status,
+          taskKey: run.ownership.key,
+          elapsedMs: run.elapsedMs,
+          wrappingUp: run.wrappingUp,
+          activeLeaseGeneration: run.activeLeaseGeneration,
+          completionAcknowledgedGeneration: run.completionAcknowledgedGeneration,
+          currentOperation,
+          currentTool: activity.currentTool,
+          lastAction: pendingRequest ? `requested ${pendingRequest.title}` : activity.lastAction,
+          cleanupFailure: run.cleanupFailure,
+          terminationReason: run.terminationReason,
+          attentionReason: pendingRequest?.title ?? presentation.attentionReason,
+          group: presentation.group,
+        }),
+      ),
     });
     const activeWriterRunIds = new Set(
       snapshot.batches
@@ -1021,6 +1052,37 @@ export class SubagentManager {
     return [...this.batches.values()].find((batch) =>
       batch.members.some((member) => member.runId === runId && member.generation === generation),
     );
+  }
+
+  private terminalGeneration(run: RunRecord): number | undefined {
+    if (ACTIVE_STATUSES.has(run.status)) return undefined;
+    const generation = run.terminationReason?.generation;
+    return Number.isSafeInteger(generation) && generation !== undefined && generation >= 0
+      ? generation
+      : undefined;
+  }
+
+  private acknowledgeTerminalGeneration(runId: string, generation: number): boolean {
+    const run = this.store.get(runId);
+    if (!run || this.terminalGeneration(run) !== generation) return false;
+    const acknowledged = run.completionAcknowledgedGeneration;
+    if (acknowledged !== undefined && acknowledged >= generation) return false;
+    run.completionAcknowledgedGeneration = generation;
+    return true;
+  }
+
+  private acknowledgeDeliveredBatch(batch: DispatchBatch): boolean {
+    if (batch.phase !== "delivered") return false;
+    let changed = false;
+    for (const member of batch.members) {
+      const result = batch.results.find(
+        (candidate) =>
+          candidate.runId === member.runId && candidate.generation === member.generation,
+      );
+      if (result && this.acknowledgeTerminalGeneration(member.runId, member.generation))
+        changed = true;
+    }
+    return changed;
   }
 
   private batchContent(batch: DispatchBatch): string {
@@ -1349,6 +1411,7 @@ export class SubagentManager {
     batch.phase = "delivered";
     batch.deliveredAt = iso();
     batch.updatedAt = batch.deliveredAt;
+    const acknowledgementChanged = this.acknowledgeDeliveredBatch(batch);
     if (batch.codeChanging || (batch.route === "pi" && batch.reviewing))
       this.pi.events.emit(events.implementationWaveAdvance, {
         producerId: COMPLETION_PRODUCER_ID,
@@ -1357,7 +1420,8 @@ export class SubagentManager {
         ...(batch.reviewing && !batch.codeChanging ? { requiresArmed: true } : {}),
       });
     this.emitBatchGate(batch, false);
-    this.publish();
+    if (acknowledgementChanged) this.store.changed();
+    else this.publish();
   }
 
   private hasOpenOwnedBatches(ownerRunId: string): boolean {
@@ -1728,6 +1792,7 @@ export class SubagentManager {
     };
     run.leaseHistory.push(lease);
     run.activeLeaseGeneration = generation;
+    run.currentTool = undefined;
     run.wrappingUp = false;
     run.blockedSince = undefined;
     run.terminationReason = undefined;
@@ -1976,6 +2041,7 @@ export class SubagentManager {
       if (this.leaseRuntimes.get(run.id) === runtime) {
         runtime.phase = "closed";
         run.activeLeaseGeneration = undefined;
+        run.currentTool = undefined;
         run.currentOperation = undefined;
         runtime.resolveDone();
       }
@@ -2082,6 +2148,7 @@ export class SubagentManager {
           );
         runtime.phase = "closed";
         run.activeLeaseGeneration = undefined;
+        run.currentTool = undefined;
         run.currentOperation = undefined;
         runtime.resolveDone();
         this.settleBatchMember(run, generation);
@@ -3001,7 +3068,17 @@ export class SubagentManager {
     if (!Number.isInteger(timeoutSeconds) || timeoutSeconds < 10 || timeoutSeconds > 3600)
       throw new Error("Collect timeoutSeconds must be an integer from 10 through 3600.");
     const selected = this.selectRuns(ids);
-    if (wait === "none") return { runs: selected.map((run) => runSnapshot(run)) };
+    const collectedSnapshots = (): RunSnapshot[] => {
+      let changed = false;
+      for (const run of selected) {
+        const generation = this.terminalGeneration(run);
+        if (generation !== undefined && this.acknowledgeTerminalGeneration(run.id, generation))
+          changed = true;
+      }
+      if (changed) this.store.changed();
+      return selected.map((run) => runSnapshot(run));
+    };
+    if (wait === "none") return { runs: collectedSnapshots() };
     if (!selected.length) return { runs: [], waitReason: signal?.aborted ? "aborted" : "settled" };
     let waitReason: CollectWaitReason | undefined;
     await new Promise<void>((resolve) => {
@@ -3034,7 +3111,7 @@ export class SubagentManager {
       timer.unref?.();
       inspect();
     });
-    return { runs: selected.map((run) => runSnapshot(run)), waitReason };
+    return { runs: collectedSnapshots(), waitReason };
   }
 
   /**
@@ -3762,6 +3839,13 @@ export class SubagentManager {
         );
       }
       for (const run of parsed.runs ?? []) {
+        const wasTerminal = !ACTIVE_STATUSES.has(run.status);
+        if (
+          run.completionAcknowledgedGeneration !== undefined &&
+          (!Number.isSafeInteger(run.completionAcknowledgedGeneration) ||
+            run.completionAcknowledgedGeneration < 0)
+        )
+          delete run.completionAcknowledgedGeneration;
         run.turns ??= 0;
         run.ownership.acceptance ??= run.ownership.deliverable;
         run.ownership.stopConditions ??= [
@@ -3861,6 +3945,10 @@ export class SubagentManager {
               : "restored after parent shutdown; manual revival required",
           );
         }
+        if (!ACTIVE_STATUSES.has(run.status)) {
+          run.currentTool = undefined;
+          run.currentOperation = undefined;
+        }
         if (run.worktree) {
           try {
             run.worktree = await validateMissionWorktree(
@@ -3910,6 +3998,10 @@ export class SubagentManager {
             });
           }
         }
+        if (parsed.schemaVersion === 2 && wasTerminal) {
+          run.completionAcknowledgedGeneration =
+            this.terminalGeneration(run) ?? run.leaseHistory.at(-1)?.generation ?? 0;
+        }
         await this.recoverPersistedCost(run);
         this.store.add(run);
       }
@@ -3940,6 +4032,10 @@ export class SubagentManager {
       }
       this.restoreIntegrationRequests();
       if (parsed.schemaVersion === 3) {
+        let acknowledgementChanged = false;
+        for (const batch of this.batches.values())
+          if (this.acknowledgeDeliveredBatch(batch)) acknowledgementChanged = true;
+        if (acknowledgementChanged) this.store.changed();
         for (const batch of this.batches.values()) {
           this.settleMissingBatchMembers(
             batch,

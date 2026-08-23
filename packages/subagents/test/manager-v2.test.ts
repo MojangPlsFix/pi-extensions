@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { events } from "../../../shared/events.js";
+import { events, type SubagentsStatusEvent } from "../../../shared/events.js";
 import { BUILTIN_PROFILES } from "../agents.js";
 import { selectEffectiveCapabilities } from "../capabilities.js";
 import { DEFAULT_SUBAGENT_CONFIG, type SubagentConfig } from "../config.js";
@@ -247,6 +247,71 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
     expect(subject.native.aborted).toContain(runs[1]!.id);
     expect(subject.manager.store.get(runs[1]!.id)?.status).toBe("parked");
+  });
+
+  it("projects only safe foreground activity with current and distinct previous tools", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-activity-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch([boundedTask("api-contract-review")], subject.ctx);
+
+    subject.native.emit(run!.id, { type: "tool_start", toolName: "grep" });
+    subject.native.emit(run!.id, { type: "tool_end", toolName: "grep", isError: false });
+    subject.native.emit(run!.id, { type: "tool_start", toolName: "read" });
+
+    const status = [...subject.emitted]
+      .reverse()
+      .find((event) => event.name === events.subagentsStatus)?.data as SubagentsStatusEvent;
+    expect(status).toMatchObject({ active: 1, foreground: 1, history: 0 });
+    expect(status.agents).toEqual([
+      expect.objectContaining({
+        id: run!.id,
+        taskKey: "api-contract-review",
+        currentTool: "read",
+        lastAction: "grep finished",
+        group: "Active",
+      }),
+    ]);
+    expect(status.agents[0]).not.toHaveProperty("task");
+    expect(status.agents[0]).not.toHaveProperty("profileClass");
+    expect(status.agents[0]).not.toHaveProperty("effectiveModel");
+    expect(status.agents[0]).not.toHaveProperty("leaseHistory");
+    expect(status.agents[0]).not.toHaveProperty("turns");
+    expect(status.agents[0]).not.toHaveProperty("report");
+
+    await subject.manager.shutdown();
+  });
+
+  it("redacts steering guidance from projected activity", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-steer-activity-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch([boundedTask("safe-steering")], subject.ctx);
+
+    await subject.manager.steer(run!.id, "FORBIDDEN follow-up instruction");
+
+    const status = [...subject.emitted]
+      .reverse()
+      .find((event) => event.name === events.subagentsStatus)?.data as SubagentsStatusEvent;
+    expect(status.agents[0]?.lastAction).toBe("steering guidance sent");
+    expect(JSON.stringify(status)).not.toContain("FORBIDDEN");
+    await subject.manager.shutdown();
+  });
+
+  it("omits hidden runs from the live projection", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-hidden-"));
+    temporary.push(root);
+    const subject = harness(root);
+    await subject.manager.dispatch(
+      [boundedTask("hidden-plan-review", "plan-reviewer")],
+      subject.ctx,
+    );
+
+    const status = [...subject.emitted]
+      .reverse()
+      .find((event) => event.name === events.subagentsStatus)?.data as SubagentsStatusEvent;
+    expect(status).toMatchObject({ active: 0, foreground: 0, history: 0, agents: [] });
+    await subject.manager.shutdown();
   });
 
   it("queues one aggregate continuation without a direct top-level send once a batch parks", async () => {
@@ -530,6 +595,41 @@ describe("SubagentManager v2", () => {
     subject.setSessionId("parent-session");
     await subject.manager.status(subject.ctx);
     expect(subject.manager.store.get(run!.id)?.status).toBe("parked");
+    await subject.manager.shutdown();
+  });
+
+  it("clears stale persisted tool activity before revival", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-stale-tool-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch([boundedTask("stale-tool")], subject.ctx);
+    subject.native.emit(run!.id, { type: "tool_start", toolName: "read" });
+
+    subject.setSessionId("second-parent");
+    await subject.manager.status(subject.ctx);
+    const statePath = join(root, "parent-session", "runs.json");
+    const persisted = JSON.parse(await readFile(statePath, "utf8")) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    const persistedRun = persisted.runs.find((candidate) => candidate.id === run!.id)!;
+    persistedRun.currentTool = "read";
+    persistedRun.currentOperation = {
+      kind: "tool",
+      name: "read",
+      startedAt: new Date().toISOString(),
+      generation: 1,
+    };
+    await writeFile(statePath, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    subject.setSessionId("parent-session");
+    await subject.manager.status(subject.ctx);
+    const restored = subject.manager.store.get(run!.id)!;
+    expect(restored).toMatchObject({ status: "parked" });
+    expect(restored.currentTool).toBeUndefined();
+    expect(restored.currentOperation).toBeUndefined();
+
+    await subject.manager.steer(run!.id, "Continue without stale tool state.");
+    expect(restored.currentTool).toBeUndefined();
     await subject.manager.shutdown();
   });
 
@@ -1252,6 +1352,14 @@ describe("SubagentManager v2", () => {
       {} as never,
     );
     await vi.waitFor(() => expect(subject.manager.store.get(run!.id)?.status).toBe("blocked"));
+    const live = [...subject.emitted]
+      .reverse()
+      .find((event) => event.name === events.subagentsStatus)?.data as SubagentsStatusEvent;
+    expect(live.agents[0]).toMatchObject({
+      group: "Attention",
+      attentionReason: "Need a choice",
+      lastAction: "requested Need a choice",
+    });
 
     const collected = await subject.manager.collect([run!.id], "all");
     expect(collected.waitReason).toBe("blocked");
@@ -2099,6 +2207,7 @@ describe("SubagentManager v2", () => {
 
     subject.native.emit(runs[1]!.id, { type: "settled", report: "Second report." });
     await vi.waitFor(() => expect(runs[1]!.status).toBe("parked"));
+    expect(runs[1]!.completionAcknowledgedGeneration).toBeUndefined();
     expect(
       subject.emitted.filter((event) => event.name === events.continuationEnqueue),
     ).toHaveLength(0);
@@ -2119,12 +2228,18 @@ describe("SubagentManager v2", () => {
       "parked",
       "parked",
     ]);
+    expect(runs.map((run) => run.completionAcknowledgedGeneration)).toEqual([undefined, undefined]);
     subject.emit(events.continuationReceipt, {
       producerId: "hackler-batches-v3",
       requestId: completed.continuationId,
       status: "settled",
     });
     expect(subject.manager.batchSnapshots()[0]?.phase).toBe("delivered");
+    expect(runs.map((run) => run.completionAcknowledgedGeneration)).toEqual([1, 1]);
+    const historyOnly = [...subject.emitted]
+      .reverse()
+      .find((event) => event.name === events.subagentsStatus)?.data as SubagentsStatusEvent;
+    expect(historyOnly).toMatchObject({ foreground: 0, history: 2, agents: [] });
     expect(subject.manager.hubSnapshot().batchCounts.open).toBe(0);
     expect(subject.sentMessages).toEqual([]);
     await subject.manager.shutdown();
@@ -2159,6 +2274,27 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
   });
 
+  it("acknowledges the exact terminal generation returned by explicit collect", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [boundedTask("explicit-terminal-collect")],
+      subject.ctx,
+    );
+    subject.native.emit(run!.id, { type: "settled", report: "Collect this generation." });
+    await vi.waitFor(() => expect(run!.status).toBe("parked"));
+    expect(subject.manager.batchSnapshots()[0]?.phase).toBe("in-flight");
+    expect(run!.completionAcknowledgedGeneration).toBeUndefined();
+
+    const result = await subject.manager.collect([run!.id], "none");
+
+    expect(result.runs[0]?.completionAcknowledgedGeneration).toBe(1);
+    expect(run!.completionAcknowledgedGeneration).toBe(1);
+    expect(subject.manager.batchSnapshots()[0]?.phase).toBe("in-flight");
+    await subject.manager.shutdown();
+  });
+
   it("creates one singleton batch for every revival generation", async () => {
     const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
     temporary.push(root);
@@ -2177,6 +2313,42 @@ describe("SubagentManager v2", () => {
       [{ runId: run!.id, generation: 1 }],
       [{ runId: run!.id, generation: 2 }],
     ]);
+    await subject.manager.shutdown();
+  });
+
+  it("does not let a revived generation inherit an older acknowledgement", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [boundedTask("generation-safe-revival")],
+      subject.ctx,
+    );
+    subject.native.emit(run!.id, { type: "settled", report: "Generation one." });
+    await vi.waitFor(() => expect(run!.status).toBe("parked"));
+    const firstBatch = subject.manager.batchSnapshots()[0]!;
+    subject.emit(events.continuationReceipt, {
+      producerId: "hackler-batches-v3",
+      requestId: firstBatch.continuationId,
+      status: "settled",
+    });
+    expect(run!.completionAcknowledgedGeneration).toBe(1);
+
+    await subject.manager.steer(run!.id, "Open generation two.");
+    expect(run!.activeLeaseGeneration).toBe(2);
+    expect(run!.completionAcknowledgedGeneration).toBe(1);
+    subject.native.emit(run!.id, { type: "settled", report: "Generation two." });
+    await vi.waitFor(() => expect(run!.status).toBe("parked"));
+    expect(run!.terminationReason?.generation).toBe(2);
+    expect(run!.completionAcknowledgedGeneration).toBe(1);
+
+    const secondBatch = subject.manager.batchSnapshots()[1]!;
+    subject.emit(events.continuationReceipt, {
+      producerId: "hackler-batches-v3",
+      requestId: secondBatch.continuationId,
+      status: "settled",
+    });
+    expect(run!.completionAcknowledgedGeneration).toBe(2);
     await subject.manager.shutdown();
   });
 
@@ -2219,6 +2391,7 @@ describe("SubagentManager v2", () => {
       claimedBy: owner.id,
       results: [expect.objectContaining({ runId: child.id, report: "Collected evidence." })],
     });
+    expect(child.completionAcknowledgedGeneration).toBe(1);
     expect(subject.native.steered.some((entry) => entry.id === owner.id)).toBe(false);
     subject.native.emit(owner.id, { type: "settled", report: "Explicitly collected." });
     await vi.waitFor(() => expect(owner.status).toBe("parked"));
@@ -2256,6 +2429,7 @@ describe("SubagentManager v2", () => {
     await vi.waitFor(() => expect(child.status).toBe("stopped"));
     const nested = subject.manager.batchSnapshots().find((batch) => batch.ownerRunId === owner.id)!;
     expect(nested).toMatchObject({ route: "owner", phase: "orphaned" });
+    expect(child.completionAcknowledgedGeneration).toBeUndefined();
     expect(owner.report).toContain("Orphaned nested result");
     expect(owner.report).toContain("ancestor_terminated");
     expect(owner.report).toContain("Nested partial evidence.");
@@ -2363,9 +2537,85 @@ describe("SubagentManager v2", () => {
     const restored = harness(root);
     await restored.manager.status(restored.ctx);
     expect(restored.manager.batchSnapshots()).toEqual([]);
+    expect(restored.manager.store.get(run!.id)?.completionAcknowledgedGeneration).toBe(1);
     expect(restored.emitted.filter((event) => event.name === events.continuationEnqueue)).toEqual(
       [],
     );
+    await restored.manager.shutdown();
+    const migrated = JSON.parse(await readFile(path, "utf8")) as { schemaVersion?: number };
+    expect(migrated.schemaVersion).toBe(3);
+  });
+
+  it("derives schema v3 acknowledgement only from exact delivered terminal evidence", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const original = harness(root);
+    const runs = await original.manager.dispatch(
+      [
+        boundedTask("restored-delivered"),
+        boundedTask("restored-orphaned", "reviewer"),
+        boundedTask("restored-unknown"),
+      ],
+      original.ctx,
+      { toolCallId: "restore-acknowledgements" },
+    );
+    for (const run of runs)
+      original.native.emit(run.id, { type: "settled", report: `${run.id} evidence.` });
+    await vi.waitFor(() => expect(runs.every((run) => run.status === "parked")).toBe(true));
+    await original.manager.shutdown();
+
+    const path = join(root, "parent-session", "runs.json");
+    const persisted = JSON.parse(await readFile(path, "utf8")) as {
+      schemaVersion: number;
+      runs: Array<{
+        id: string;
+        completionAcknowledgedGeneration?: number;
+        completionReported: boolean;
+      }>;
+      batches: Array<{
+        phase: string;
+        deliveredAt?: string;
+        orphanedAt?: string;
+        members: Array<{ runId: string; generation: number }>;
+        results: Array<{ runId: string; generation: number }>;
+      }>;
+    };
+    expect(persisted.schemaVersion).toBe(3);
+    for (const run of persisted.runs) {
+      delete run.completionAcknowledgedGeneration;
+      run.completionReported = true;
+    }
+    const [batch] = persisted.batches;
+    expect(batch).toBeDefined();
+    // Split the original aggregate into three persisted batches so each migration case is isolated.
+    persisted.batches = batch!.members.map((member, index) => {
+      const result = structuredClone(
+        batch!.results.find(
+          (candidate) =>
+            candidate.runId === member.runId && candidate.generation === member.generation,
+        )!,
+      );
+      if (index === 2) result.generation += 100;
+      return {
+        ...structuredClone(batch!),
+        id: `${(batch as unknown as { id: string }).id}-${index}`,
+        sequence: index + 1,
+        members: [structuredClone(member)],
+        results: [result],
+        phase: index === 1 ? "orphaned" : "delivered",
+        ...(index === 1
+          ? { orphanedAt: new Date().toISOString(), deliveredAt: undefined }
+          : { deliveredAt: new Date().toISOString(), orphanedAt: undefined }),
+      };
+    });
+    await writeFile(path, `${JSON.stringify(persisted, null, 2)}\n`);
+
+    const restored = harness(root);
+    await restored.manager.status(restored.ctx);
+    expect(
+      runs.map((run) => restored.manager.store.get(run.id)?.completionAcknowledgedGeneration),
+    ).toEqual([1, undefined, undefined]);
+    expect(restored.manager.store.get(runs[2]!.id)?.completionReported).toBe(true);
     await restored.manager.shutdown();
   });
 });

@@ -60,10 +60,13 @@ describe("RunStore", () => {
     const listener = vi.fn();
     const unsubscribe = store.subscribe(listener);
     const record = run("active", "running");
+    record.completionAcknowledgedGeneration = 2;
     store.add(record);
     const snapshot = listener.mock.calls.at(-1)?.[0][0];
     record.ownership.owns.push("topic:later");
+    record.completionAcknowledgedGeneration = 3;
     expect(snapshot.ownership.owns).toEqual(["topic:active"]);
+    expect(snapshot.completionAcknowledgedGeneration).toBe(2);
     unsubscribe();
   });
 

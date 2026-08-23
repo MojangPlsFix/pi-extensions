@@ -214,6 +214,9 @@ export type RunRecord = {
   worktree?: RunWorktree;
   candidate?: IntegrationCandidate;
   integrationRequestId?: string;
+  /** The exact terminal lease generation whose result was delivered or explicitly collected. */
+  completionAcknowledgedGeneration?: number;
+  /** Legacy compatibility field; it is not authoritative for terminal acknowledgement. */
   completionReported: boolean;
 };
 
@@ -393,6 +396,7 @@ export function runSnapshot(run: RunRecord, now = Date.now()): RunSnapshot {
       ? { files: [...run.candidate.files], hasChanges: run.candidate.hasChanges }
       : undefined,
     integrationRequestId: run.integrationRequestId,
+    completionAcknowledgedGeneration: run.completionAcknowledgedGeneration,
     completionReported: run.completionReported,
     hidden: run.profile.hidden,
   };

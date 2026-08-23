@@ -1,8 +1,14 @@
 import { type ExtensionAPI, keyHint } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { type Component, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import type { CollectMode, DispatchInput, SubagentManager } from "./manager.js";
-import { safeDisplayText } from "./renderers.js";
+import {
+  presentationGroup,
+  presentRun,
+  rowWithReservedSuffix,
+  runDisplayLabel,
+} from "./presentation.js";
+import { formatDuration, safeDisplayText } from "./renderers.js";
 import type { SupervisorRequest } from "./supervisor.js";
 import type { RunSnapshot, Usage } from "./types.js";
 
@@ -25,23 +31,22 @@ function age(value: string | undefined, now = Date.now()): number | undefined {
   return Number.isFinite(parsed) ? Math.max(0, now - parsed) : undefined;
 }
 
-export function runState(run: RunSnapshot, now = Date.now()): string {
-  if (run.status === "blocked") return "blocked";
-  if (run.status === "failed") return "failed";
-  if (run.status === "stopped") return "stopped";
-  if (run.status === "parked") return "done (parked)";
-  if (run.status === "queued" || run.status === "starting") return "starting";
-  if (run.wrappingUp) return "wrapping up";
-  const lastEventAge = age(run.lastEventAt, now);
-  return lastEventAge !== undefined && lastEventAge >= 30_000
-    ? `quiet · no event for ${duration(lastEventAge)}`
-    : "working";
+export function runState(run: RunSnapshot, _now = Date.now()): string {
+  return presentRun(run).state;
 }
 
-function runLine(run: RunSnapshot): string {
-  const icon = run.status === "running" ? "●" : run.status === "blocked" ? "!" : "○";
-  const model = run.effectiveModel ? ` · ${safeDisplayText(run.effectiveModel)}` : "";
-  return `${icon} ${safeDisplayText(run.name)} · ${runState(run)}${model} · ${safeDisplayText(run.ownership.key)}`;
+function runLine(
+  run: RunSnapshot,
+  theme: { fg(color: string, text: string): string } = { fg: (_color, text) => text },
+  width = 10_000,
+): string {
+  const presentation = presentRun(run);
+  return rowWithReservedSuffix(
+    `${theme.fg(presentation.token, presentation.icon)} `,
+    theme.fg("text", runDisplayLabel(run)),
+    theme.fg("dim", ` · ${presentation.state} · ${formatDuration(run.elapsedMs)}`),
+    width,
+  );
 }
 
 export function runOperationalLines(run: RunSnapshot, now = Date.now()): string[] {
@@ -96,15 +101,35 @@ function runDetails(details: unknown): RunSnapshot[] {
   return value.runs ?? (value.run ? [value.run] : []);
 }
 
+class CompactLines implements Component {
+  private build = (_width: number) => "";
+
+  setBuilder(build: (width: number) => string): void {
+    this.build = build;
+  }
+
+  render(width: number): string[] {
+    if (width <= 0) return [];
+    return this.build(width)
+      .split("\n")
+      .map((line) => truncateToWidth(line, width, ""));
+  }
+
+  invalidate(): void {
+    // The builder reapplies current theme callbacks on the next render.
+  }
+}
+
 function resultRenderer(
   result: { details?: unknown; content?: Array<{ type?: string; text?: string }> },
   options: { expanded: boolean; isPartial: boolean },
   theme: { fg(color: string, text: string): string },
   context: { lastComponent?: unknown; isError?: boolean },
 ) {
-  const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
   if (options.isPartial) {
-    component.setText(theme.fg("muted", "Hackler operation in progress…"));
+    const component =
+      context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
+    component.setText(theme.fg("warning", "◐ Hackler operation in progress…"));
     return component;
   }
   const runs = runDetails(result.details);
@@ -114,16 +139,37 @@ function resultRenderer(
       .map((part) => part.text ?? "")
       .join("\n") ?? "";
   if (!options.expanded) {
-    const summary = runs.length
-      ? runs.map(runLine).join("\n")
-      : context.isError
-        ? "Hackler operation failed."
-        : "Hackler operation completed.";
-    component.setText(
-      `${theme.fg(context.isError ? "error" : "muted", summary)}\n${theme.fg("dim", expandHint())}`,
-    );
+    const shown = runs.slice(0, 4);
+    const omitted = Math.max(0, runs.length - shown.length);
+    const history = runs.filter((run) => presentationGroup(run) === "History").length;
+    const buildSummary = (width: number) =>
+      runs.length
+        ? [
+            theme.fg(context.isError ? "error" : "muted", "Hackler results"),
+            ...shown.map((run) => runLine(run, theme, width)),
+            ...(omitted || history
+              ? [
+                  theme.fg(
+                    "dim",
+                    [
+                      ...(omitted ? [`+${omitted} omitted`] : []),
+                      ...(history ? [`○ ${history} History`] : []),
+                    ].join(" · "),
+                  ),
+                ]
+              : []),
+          ].join("\n")
+        : theme.fg(
+            context.isError ? "error" : "muted",
+            context.isError ? "Hackler operation failed." : "Hackler operation completed.",
+          );
+    const component =
+      context.lastComponent instanceof CompactLines ? context.lastComponent : new CompactLines();
+    component.setBuilder((width) => `${buildSummary(width)}\n${theme.fg("dim", expandHint())}`);
     return component;
   }
+  const component =
+    context.lastComponent instanceof Text ? context.lastComponent : new Text("", 0, 0);
   component.setText(
     theme.fg(context.isError ? "error" : "toolOutput", safeDisplayText(content || "No output.")),
   );
@@ -136,7 +182,8 @@ function callRenderer(
   theme: { fg(color: string, text: string): string; bold(text: string): string },
   context: { lastComponent?: unknown; isPartial?: boolean },
 ) {
-  const component = (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const component =
+    context.lastComponent instanceof CompactLines ? context.lastComponent : new CompactLines();
   const tasks = Array.isArray(args.tasks) ? args.tasks.length : undefined;
   const preview =
     tasks !== undefined
@@ -146,8 +193,9 @@ function callRenderer(
         : typeof args.id === "string"
           ? args.id
           : "";
-  component.setText(
-    `${theme.fg("toolTitle", theme.bold(`${label} `))}${theme.fg("dim", safeDisplayText(preview).slice(0, 100))}${context.isPartial ? theme.fg("muted", " · working") : ""}`,
+  component.setBuilder(
+    (_width) =>
+      `${theme.fg("toolTitle", theme.bold(`${label} `))}${theme.fg("dim", safeDisplayText(preview).slice(0, 100))}${context.isPartial ? theme.fg("muted", " · working") : ""}`,
   );
   return component;
 }
@@ -189,7 +237,10 @@ function supervisorRequestLines(requests: readonly SupervisorRequest[]): string[
 }
 
 const dispatchTaskSchema = Type.Object({
-  key: Type.String({ description: "Stable unique key for this owned work slice." }),
+  key: Type.String({
+    description:
+      "Concise stable key that doubles as this run's display label (for example api-contract-review).",
+  }),
   agent: Type.String({ description: "Enabled profile name returned by subagent_status." }),
   task: Type.String({ description: "Self-contained bounded assignment." }),
   owns: Type.Array(Type.String(), {
@@ -304,7 +355,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_dispatch", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler dispatch", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -368,7 +419,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_status", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler status", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -404,7 +455,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_respond", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler respond", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -461,7 +512,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       };
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_collect", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler collect", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -492,7 +543,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_steer", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler steer", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });
@@ -526,7 +577,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       }
     },
     renderCall(args, theme, context) {
-      return callRenderer("subagent_stop", args as Record<string, unknown>, theme, context);
+      return callRenderer("Hackler stop", args as Record<string, unknown>, theme, context);
     },
     renderResult: resultRenderer,
   });

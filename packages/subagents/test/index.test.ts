@@ -54,7 +54,7 @@ describe("subagents extension registration", () => {
     );
     const output = component.render(160).join("\n");
 
-    expect(output).toContain("Hackler scout-one is wrapping up at its wall threshold");
+    expect(output).toContain("◐ Hackler scout-one is wrapping up at its wall threshold");
     expect(output).toContain("deadline 2026-01-01T00:10:00.000Z");
     expect(output).not.toMatch(/FORBIDDEN_WRAP_(?:TASK|REPORT)/);
   });

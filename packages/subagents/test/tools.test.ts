@@ -28,6 +28,8 @@ describe("Subagent parent usage accounting", () => {
         description?: string;
         parameters?: any;
         prepareArguments?: (input: unknown) => unknown;
+        renderCall?: (...args: any[]) => any;
+        renderResult?: (...args: any[]) => any;
       }
     >();
     const pi = {
@@ -38,21 +40,27 @@ describe("Subagent parent usage accounting", () => {
         parameters?: any;
         prepareArguments?: (input: unknown) => unknown;
         execute: (...args: any[]) => Promise<any>;
+        renderCall?: (...args: any[]) => any;
+        renderResult?: (...args: any[]) => any;
       }) {
         tools.set(definition.name, definition);
       },
     } as unknown as ExtensionAPI;
     const manager = {
       collect: vi.fn(async () => ({
-        runs: [
-          {
-            id: "scout-1",
-            name: "scout",
-            status: "parked",
-            ownership: { owns: [] },
-            report: "done",
+        runs: Array.from({ length: 6 }, (_, index) => ({
+          id: `scout-${index + 1}`,
+          name: "scout",
+          status: "parked",
+          activeLeaseGeneration: 1,
+          completionAcknowledgedGeneration: 1,
+          elapsedMs: 1_000,
+          ownership: {
+            key: index === 0 ? "api-contract-review" : `review-slice-${index + 1}`,
+            owns: [],
           },
-        ],
+          report: "done",
+        })),
         waitReason: "timeout",
       })),
       takeUnreportedUsage: vi.fn(() => usage()),
@@ -102,6 +110,9 @@ describe("Subagent parent usage accounting", () => {
     expect(tools.get("subagent_dispatch")!.description).toContain(
       "never invent work to fill capacity",
     );
+    expect(
+      tools.get("subagent_dispatch")!.parameters.properties.tasks.items.properties.key.description,
+    ).toContain("display label");
 
     const timeoutSchema = tools.get("subagent_collect")!.parameters.properties.timeoutSeconds;
     expect(timeoutSchema).toMatchObject({ minimum: 10, maximum: 3600 });
@@ -128,6 +139,26 @@ describe("Subagent parent usage accounting", () => {
     });
     expect(result.details).toMatchObject({ subagentUsageAttached: true });
     expect(manager.takeUnreportedUsage).toHaveBeenCalledWith(["scout-1"]);
+
+    const rendererTheme = {
+      fg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+    };
+    const callOutput = tools
+      .get("subagent_collect")!
+      .renderCall?.({}, rendererTheme, {})
+      .render(120)
+      .join("\n");
+    expect(callOutput).toContain("Hackler collect");
+    const collapsed = tools
+      .get("subagent_collect")!
+      .renderResult?.(result, { expanded: false, isPartial: false }, rendererTheme, {})
+      .render(120)
+      .join("\n");
+    expect(collapsed).toContain("○ API contract review · done · 00:01");
+    expect(collapsed).toContain("+2 omitted · ○ 6 History");
+    expect((collapsed.match(/^○ /gmu) ?? []).length).toBe(4);
+    expect(collapsed).not.toMatch(/[!●✗△▵▴▲]/u);
 
     const response = await tools
       .get("subagent_respond")!

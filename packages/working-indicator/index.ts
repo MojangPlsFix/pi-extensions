@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { events, type SubagentsStatusEvent } from "../../shared/events.js";
+import { presentationGroup } from "../subagents/presentation.js";
 import { activityViewLines } from "../subagents/renderers.js";
 
 const widgetKey = "pi-extensions:subagent-working";
@@ -8,6 +9,9 @@ const activeStatuses = new Set<string>(["queued", "starting", "running", "blocke
 
 const emptyStatus = (): SubagentsStatusEvent => ({
   active: 0,
+  foreground: 0,
+  attention: 0,
+  history: 0,
   running: 0,
   wrappingUp: 0,
   blocked: 0,
@@ -33,6 +37,9 @@ function normalized(value: unknown): SubagentsStatusEvent {
   const capacity = (candidate.capacity ?? {}) as Partial<SubagentsStatusEvent["capacity"]>;
   return {
     active: count(candidate.active),
+    foreground: candidate.foreground === undefined ? undefined : count(candidate.foreground),
+    attention: candidate.attention === undefined ? undefined : count(candidate.attention),
+    history: candidate.history === undefined ? undefined : count(candidate.history),
     running: count(candidate.running),
     wrappingUp: count(candidate.wrappingUp),
     blocked: count(candidate.blocked),
@@ -54,11 +61,27 @@ function normalized(value: unknown): SubagentsStatusEvent {
   };
 }
 
-function workingMessage(status: SubagentsStatusEvent): string {
-  if (status.active === 0) return "Hackeln...";
+function foregroundCount(status: SubagentsStatusEvent): number {
+  if (status.foreground !== undefined) return status.foreground;
+  return status.agents.filter(
+    (agent) => agent.group !== undefined || presentationGroup(agent) !== "History",
+  ).length;
+}
+
+function workingMessage(status: SubagentsStatusEvent): string | undefined {
+  if (foregroundCount(status) === 0) return undefined;
   if (status.blocked > 0) return "Hackler blocked";
   if (status.wrappingUp > 0) return "Hackler wrapping up";
   return "Hackler working";
+}
+
+function applyWorkingMessage(
+  ui: Pick<ExtensionContext["ui"], "setWorkingMessage">,
+  status: SubagentsStatusEvent,
+): void {
+  const message = workingMessage(status);
+  if (message) ui.setWorkingMessage(message);
+  else ui.setWorkingMessage();
 }
 
 /** Disposable, Pi-themed owner of the always-visible inline Subagent activity. */
@@ -77,12 +100,12 @@ export class SubagentActivityComponent {
     if (this.disposed) return;
     this.status = status;
     this.updatedAt = Date.now();
-    if (status.active > 0 && !this.timer) {
+    if (foregroundCount(status) > 0 && !this.timer) {
       this.timer = setInterval(() => {
         this.tui.requestRender();
       }, 1_000);
       this.timer.unref?.();
-    } else if (status.active === 0 && this.timer) {
+    } else if (foregroundCount(status) === 0 && this.timer) {
       clearInterval(this.timer);
       this.timer = undefined;
     }
@@ -107,6 +130,7 @@ export class SubagentActivityComponent {
   }
 
   invalidate(): void {
+    // Rendering is intentionally rebuilt from the current theme callbacks.
     this.tui.requestRender();
   }
 
@@ -127,7 +151,7 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
   const subscribed = pi.events.on(events.subagentsStatus, (data: unknown) => {
     status = normalized(data);
     ctx?.ui.setWorkingVisible(true);
-    ctx?.ui.setWorkingMessage(workingMessage(status));
+    if (ctx) applyWorkingMessage(ctx.ui, status);
     component?.update(status);
   });
   const unsubscribeStatus = typeof subscribed === "function" ? subscribed : () => {};
@@ -135,8 +159,7 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, extensionContext) => {
     ctx = extensionContext;
     ctx.ui.setWorkingVisible(true);
-    ctx.ui.setWorkingMessage(workingMessage(status));
-    ctx.ui.setWorkingIndicator();
+    applyWorkingMessage(ctx.ui, status);
     ctx.ui.setWidget(
       widgetKey,
       (tui, theme) => {
@@ -156,7 +179,6 @@ export default function workingIndicatorExtension(pi: ExtensionAPI): void {
     ctx?.ui.setWidget(widgetKey, undefined);
     ctx?.ui.setWorkingVisible(true);
     ctx?.ui.setWorkingMessage();
-    ctx?.ui.setWorkingIndicator();
     ctx = undefined;
   });
 }

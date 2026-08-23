@@ -17,11 +17,10 @@ function snapshot(overrides: Partial<SubagentActivitySnapshot> = {}): SubagentAc
     name: "scout",
     profileClass: "read",
     status: "running",
+    taskKey: "follow-up-read-only-inspection",
     task: "Follow-up read-only inspection",
     elapsedMs: 3_631_000,
-    effectiveModel: "openai-codex/gpt-5.6-luna",
-    effectiveThinking: "low",
-    latestActivity: "grep finished",
+    activeLeaseGeneration: 1,
     ...overrides,
   };
 }
@@ -32,6 +31,19 @@ function status(agents: SubagentActivitySnapshot[]): SubagentsStatusEvent {
   );
   return {
     active: active.length,
+    foreground: agents.filter(
+      (agent) =>
+        !(
+          ["parked", "failed", "stopped"].includes(agent.status) &&
+          agent.completionAcknowledgedGeneration === agent.activeLeaseGeneration
+        ),
+    ).length,
+    history: agents.filter(
+      (agent) =>
+        ["parked", "failed", "stopped"].includes(agent.status) &&
+        agent.activeLeaseGeneration !== undefined &&
+        agent.completionAcknowledgedGeneration === agent.activeLeaseGeneration,
+    ).length,
     running: agents.filter((agent) => ["queued", "starting", "running"].includes(agent.status))
       .length,
     wrappingUp: active.filter((agent) => agent.wrappingUp).length,
@@ -123,14 +135,14 @@ async function emit(subject: Harness, name: string): Promise<void> {
 }
 
 describe("working indicator lifecycle", () => {
-  it("uses Pi's normal spinner and Hackeln message on session start", async () => {
+  it("resets Hackler's message without replacing Pi's parent spinner", async () => {
     const subject = harness();
 
     await emit(subject, "session_start");
 
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackeln...");
-    expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
+    expect(subject.ui.setWorkingIndicator).not.toHaveBeenCalled();
     expect(subject.widget()).toBeInstanceOf(SubagentActivityComponent);
   });
 
@@ -142,11 +154,11 @@ describe("working indicator lifecycle", () => {
 
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
     expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler working");
+    expect(subject.ui.setWorkingIndicator).not.toHaveBeenCalled();
     const output = subject.widget()?.render(160).join("\n") ?? "";
-    expect(output).toContain("Hackler · slots 1/4 used · 3 free · shared writer 0/1");
-    expect(output).toContain("└─ Follow-up read-only inspection");
-    expect(output).toContain("read · working · luna · 60:31 · grep finished");
-    expect(output).not.toMatch(/[△▵▴▲]/u);
+    expect(output).toContain("Hackler · ◐ 1/4 active");
+    expect(output).toContain("◐ Follow up read only inspection · working · 60:31");
+    expect(output).not.toMatch(/[!●✗△▵▴▲]/u);
   });
 
   it("shows a waiting message for blocked Hackler runs and restores the idle message", async () => {
@@ -158,7 +170,8 @@ describe("working indicator lifecycle", () => {
 
     subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackeln...");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
+    expect(subject.widget()?.render(120)).toEqual([]);
   });
 
   it("strips terminal controls from child activity", async () => {
@@ -168,8 +181,9 @@ describe("working indicator lifecycle", () => {
       events.subagentsStatus,
       status([
         snapshot({
-          task: "Inspect \u001b]0;spoofed\u0007 auth",
-          latestActivity: "reading \u001b[31msecret\u001b[0m",
+          taskKey: "inspect-\u001b]0;spoofed\u0007-auth",
+          currentTool: "read",
+          lastAction: "reading \u001b[31msecret\u001b[0m",
         }),
       ]),
     );
@@ -181,7 +195,47 @@ describe("working indicator lifecycle", () => {
     expect(output).not.toContain("\u001b");
   });
 
-  it("restores the normal spinner configuration on shutdown", async () => {
+  it("hides History-only activity and stops elapsed refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      const subject = harness();
+      await emit(subject, "session_start");
+      subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
+      subject.emitExtensionEvent(
+        events.subagentsStatus,
+        status([
+          snapshot({
+            status: "parked",
+            completionAcknowledgedGeneration: 1,
+          }),
+        ]),
+      );
+      const renders = subject.tui.requestRender.mock.calls.length;
+      expect(subject.widget()?.render(120)).toEqual([]);
+      vi.advanceTimersByTime(2_000);
+      expect(subject.tui.requestRender).toHaveBeenCalledTimes(renders);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rebuilds themed content after invalidation", () => {
+    let prefix = "A:";
+    const tui = { requestRender: vi.fn() };
+    const dynamicTheme = {
+      ...theme(),
+      fg: (_color: string, text: string) => `${prefix}${text}`,
+    } as Theme;
+    const component = new SubagentActivityComponent(tui, dynamicTheme);
+    component.update(status([snapshot()]));
+    expect(component.render(120).join("\n")).toContain("A:Hackler");
+    prefix = "B:";
+    component.invalidate();
+    expect(component.render(120).join("\n")).toContain("B:Hackler");
+    component.dispose();
+  });
+
+  it("cleans up without replacing the parent spinner on shutdown", async () => {
     vi.useFakeTimers();
     try {
       const subject = harness();
@@ -198,7 +252,7 @@ describe("working indicator lifecycle", () => {
       );
       expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
       expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
-      expect(subject.ui.setWorkingIndicator).toHaveBeenLastCalledWith();
+      expect(subject.ui.setWorkingIndicator).not.toHaveBeenCalled();
       expect(subject.tui.requestRender).toHaveBeenCalledTimes(rendersBeforeShutdown);
     } finally {
       vi.useRealTimers();
