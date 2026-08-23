@@ -42,3 +42,9 @@ The timeout is an inactivity limit of 600,000 milliseconds (10 minutes) by defau
 For Codex, authenticate with `/login openai-codex`. Pi refreshes OAuth immediately before the native request. It sends the credential only to the trusted HTTPS `chatgpt.com` endpoint. Authentication failures, unsafe endpoint overrides, HTTP failures, malformed responses, empty results, and unsupported providers produce clear errors. The extension does not expose credentials, request headers, OAuth claims, or raw backend payloads.
 
 Both providers can charge retrieval against provider subscription quota. The backends do not report token or monetary usage for this retrieval. Search therefore omits Pi `usage` and cost values and marks consumption as `provider-accounted`. Pi excludes this consumption from local cost totals.
+
+## Opt-in live capability tests
+
+Normal CI skips the authenticated live tests. Set `PI_COPILOT_SEARCH_LIVE=1` to run the bundled-runtime authentication, tool-isolation, `web_search`, and `web_fetch` capability checks. These tests consume Copilot provider quota.
+
+Set `PI_COPILOT_SEARCH_LIVE_STRESS=1` with the live flag to add warm-runtime reuse, four-way concurrency, and cancellation checks. Set `PI_COPILOT_SEARCH_LIVE_COMPARE_CLI=1` with the live flag to add source-parity checks. The comparison requires an installed and authenticated legacy Copilot CLI.
