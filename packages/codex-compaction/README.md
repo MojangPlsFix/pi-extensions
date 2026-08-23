@@ -34,16 +34,15 @@ Pi can start native compaction for these reasons:
 
 The turn-boundary threshold is 90% by default. At that threshold, the extension uses this sequence:
 
-1. It stops the active run after `turn_end`.
+1. It synchronously raises the shared compaction gate and stops the active run after `turn_end`.
 2. It waits for `agent_settled`.
 3. It starts Pi's normal compaction lifecycle.
-4. It sends `Compaction completed. Continue.` after success.
+4. After success, it submits one durable `Compaction completed. Continue.` request to the workflow continuation coordinator.
+5. It closes all overlapping threshold and native operation gates on completion, failure, or runtime reset. A successful final close resumes queued coordinator work.
 
-After a threshold stop, the extension always sends the continuation when compaction succeeds. Queued input before or after the stop does not suppress the continuation.
+The continuation request ID is deterministic for the session and active branch/compaction anchor. Duplicate completion callbacks therefore cannot create duplicate automatic turns, and the workflow coordinator reconciles the explicit ID with any request it already persisted. The coordinator, rather than this extension, decides when the gated request can run; this extension never sends an automatic user message directly.
 
-If Pi is idle, the continuation starts a run immediately. If another run is active, Pi queues the continuation as a follow-up.
-
-Pi's overflow recovery does not use this continuation. Pi retries the overflow request.
+A standalone manual compaction does not reserve a continuation. Pi's overflow recovery also does not use this continuation; Pi retries the overflow request without adding a duplicate turn.
 
 Pi stores a short local marker because each `CompactionEntry` requires a summary. Requests to the matching Codex model exclude this marker. They contain recent user messages, one opaque checkpoint, and messages after that checkpoint.
 
@@ -53,7 +52,7 @@ Repeated compaction replaces the old opaque item. It does not nest opaque checkp
 
 `/compact [instructions]` starts native compaction for a matching Codex model.
 
-A standalone `/compact` does not send the continuation or start a new run after compaction. Pi remains idle unless another input is queued.
+A standalone `/compact` does not enqueue a continuation or start a new run after compaction. Pi remains idle unless another input is queued.
 
 The optional focus instructions cannot control a readable summary. Native compaction does not create one.
 
@@ -96,7 +95,9 @@ When another provider is active, this extension does not change its context, hea
 
 ## Failure behavior
 
-Native compaction fails closed. If the remote request fails, the extension cancels Pi's compaction and keeps the existing history.
+Native compaction fails closed. If the remote request fails, the extension cancels Pi's compaction, closes its shared gate, and keeps the existing history.
+
+The threshold reservation is intentionally in memory until successful compaction emits the synchronous coordinator request. There is no timer-based recovery and no cross-extension transaction: if the process dies after the checkpoint is committed but before the coordinator handles that event, the extension cannot reconstruct the pending reservation on restart. Once handled, the workflow coordinator owns durable reconciliation and delivery.
 
 The extension does not fall back to Pi text summarization. It retries transport failures, incomplete streams, HTTP 408, HTTP 409, HTTP 429, and server errors up to two times.
 

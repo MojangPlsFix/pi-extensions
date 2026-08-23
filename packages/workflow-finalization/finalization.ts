@@ -135,26 +135,22 @@ export function parseImplementationSummary(
   const fencedLines = new Set<number>();
   let fence: { marker: "`" | "~"; length: number } | undefined;
   for (const [line, text] of lines.entries()) {
-    const fenceMatch = /^\s{0,3}(`{3,}|~{3,})(?:\s*.*)?$/.exec(text);
-    if (fenceMatch) {
-      const sequence = fenceMatch[1] ?? "";
-      const marker = sequence[0];
-      if (!fence && (marker === "`" || marker === "~")) {
-        fence = { marker, length: sequence.length };
-        fencedLines.add(line);
-        continue;
-      }
-      if (fence && marker === fence.marker && sequence.length >= fence.length) {
-        fencedLines.add(line);
-        fence = undefined;
-        continue;
-      }
-    }
+    const fenceMatch = /^\s{0,3}(`+|~+)(.*)$/.exec(text);
+    const sequence = fenceMatch?.[1] ?? "";
+    const marker = sequence[0];
+    const suffix = fenceMatch?.[2] ?? "";
     if (fence) {
+      fencedLines.add(line);
+      if (marker === fence.marker && sequence.length >= fence.length && suffix.trim().length === 0)
+        fence = undefined;
+      continue;
+    }
+    if ((marker === "`" || marker === "~") && sequence.length >= 3) {
+      fence = { marker, length: sequence.length };
       fencedLines.add(line);
       continue;
     }
-    const match = /^\s{0,3}##[ \t]+(.+?)[ \t]*#*[ \t]*$/.exec(text);
+    const match = /^\s{0,3}##[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/.exec(text);
     if (!match) continue;
     const required = IMPLEMENTATION_SUMMARY_HEADINGS.find(
       (heading) => heading === match[1]?.trim(),
@@ -294,42 +290,178 @@ const MUTATOR_NAMES = new Set([
   "multi_edit",
 ]);
 
+function normalizeRuntimeToolName(toolName: string): string {
+  const normalized = toolName.trim().toLocaleLowerCase();
+  return /^(?:functions)[.:/](.+)$/.exec(normalized)?.[1] ?? normalized;
+}
+
 export function isReviewedRepositoryMutator(toolName: string): boolean {
-  return MUTATOR_NAMES.has(toolName.split(".").pop()?.toLocaleLowerCase() ?? "");
+  const normalized = normalizeRuntimeToolName(toolName);
+  if (MUTATOR_NAMES.has(normalized)) return true;
+  const namespaced = /^(?:repo|repository)[.:/](.+)$/.exec(normalized)?.[1];
+  return namespaced ? MUTATOR_NAMES.has(namespaced) : false;
+}
+
+function withoutQuotedShellText(source: string): string {
+  let quote: "'" | '"' | undefined;
+  let escaped = false;
+  let output = "";
+  for (const character of source) {
+    if (escaped) {
+      output += quote ? " " : character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      output += quote ? " " : character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = undefined;
+      output += " ";
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      quote = character;
+      // Keep one non-shell placeholder so a quoted redirection target remains visible.
+      output += "Q";
+      continue;
+    }
+    output += character;
+  }
+  return output;
 }
 
 /** Best-effort classifier for reviewed shell patterns that are likely to change the checkout. */
 export function isLikelyMutatingBash(command: string): boolean {
-  const source = command.trim();
+  const source = withoutQuotedShellText(command).trim();
   if (!source) return false;
-  if (
-    /(?:^|[;&|]\s*|\b)(?:rm|mv|cp|mkdir|rmdir|touch|truncate|chmod|chown|ln|install|tee|dd|patch|apply_patch)(?:\s|$)/i.test(
-      source,
-    ) ||
-    /\b(?:sed\s+[^\n]*(?:-i|--in-place)|perl\s+[^\n]*-p?i\b|find\b[^\n]*(?:-delete|-exec|-execdir|-ok)\b)/i.test(
-      source,
-    )
-  )
-    return true;
   // Output redirection to a real path is mutating. Descriptor duplication and
   // /dev/null-only redirection are operational rather than repository changes.
-  if (/(?:^|\s)(?:\d*)>>?\s*(?![&]|\/dev\/null(?:\s|$))[^\s]+/i.test(source)) return true;
-  if (
-    /\bgit\s+(?:add|am|apply|bisect|branch\s+(?:-d|-D|-m|-M)|checkout|cherry-pick|clean|commit|merge|mv|rebase|reset|restore|revert|rm|stash|switch|tag\s+(?:-d|-f)|worktree\s+(?:add|move|remove|repair))\b/i.test(
-      source,
+  if (/(?:^|[^<>])(?:\d*)>>?\s*(?![&]|\/dev\/null(?:\s|$))(?=\S)/i.test(source)) return true;
+
+  const mutatingCommands = new Set([
+    "rm",
+    "mv",
+    "cp",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "truncate",
+    "chmod",
+    "chown",
+    "ln",
+    "install",
+    "tee",
+    "dd",
+    "patch",
+    "apply_patch",
+  ]);
+  const gitMutators = new Set([
+    "add",
+    "am",
+    "apply",
+    "bisect",
+    "checkout",
+    "cherry-pick",
+    "clean",
+    "commit",
+    "merge",
+    "mv",
+    "rebase",
+    "reset",
+    "restore",
+    "revert",
+    "rm",
+    "stash",
+    "switch",
+  ]);
+  const dependencyMutators = new Set([
+    "add",
+    "install",
+    "remove",
+    "uninstall",
+    "update",
+    "upgrade",
+    "link",
+    "unlink",
+    "dedupe",
+    "version",
+    "sync",
+  ]);
+
+  for (const rawSegment of source.split(/\s*(?:&&|\|\||[;|\n])\s*/)) {
+    let segment = rawSegment.trim();
+    if (!segment) continue;
+    segment = segment.replace(/^(?:(?:sudo|command)\s+|[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*/, "");
+    if (segment.startsWith("env "))
+      segment = segment.replace(/^env\s+(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*/, "");
+    const words = segment.split(/\s+/);
+    const executable = (words[0] ?? "").split("/").at(-1)?.toLocaleLowerCase() ?? "";
+    const args = words.slice(1);
+    if (mutatingCommands.has(executable)) return true;
+    if (executable === "sed" && args.some((arg) => arg === "-i" || arg.startsWith("-i")))
+      return true;
+    if (executable === "perl" && args.some((arg) => /^-[A-Za-z]*p?i[A-Za-z]*$/.test(arg)))
+      return true;
+    if (
+      executable === "find" &&
+      args.some((arg) => ["-delete", "-exec", "-execdir", "-ok"].includes(arg))
     )
-  )
-    return true;
-  if (
-    /\b(?:npm|pnpm|yarn|bun)\s+(?:add|install|remove|uninstall|update|upgrade|link|unlink|dedupe|version)\b/i.test(
-      source,
-    ) ||
-    /\b(?:pip|pipx|uv\s+pip|poetry)\s+(?:install|uninstall|add|remove|sync)\b/i.test(source)
-  )
-    return true;
-  return /\b(?:prettier\b[^\n]*--write|eslint\b[^\n]*--fix|biome\s+(?:check|format)\b[^\n]*--write|gofmt\b[^\n]*-w|cargo\s+fmt\b|rustfmt\b)\b/i.test(
-    source,
-  );
+      return true;
+    if (executable === "git") {
+      const optionsWithValues = new Set([
+        "-C",
+        "-c",
+        "--config-env",
+        "--exec-path",
+        "--git-dir",
+        "--namespace",
+        "--super-prefix",
+        "--work-tree",
+      ]);
+      let subcommand: string | undefined;
+      for (let index = 0; index < args.length; index++) {
+        const argument = args[index] ?? "";
+        if (optionsWithValues.has(argument)) {
+          index++;
+          continue;
+        }
+        if (/^(?:-C|-c).+/.test(argument) || argument.startsWith("--")) continue;
+        if (argument.startsWith("-")) continue;
+        subcommand = argument.toLocaleLowerCase();
+        break;
+      }
+      if (subcommand && gitMutators.has(subcommand)) return true;
+      if (
+        (subcommand === "branch" || subcommand === "tag") &&
+        args.some((arg) => ["-d", "-D", "-f", "-m", "-M"].includes(arg))
+      )
+        return true;
+      if (
+        subcommand === "worktree" &&
+        args.some((arg) => ["add", "move", "remove", "repair"].includes(arg))
+      )
+        return true;
+    }
+    if (["npm", "pnpm", "yarn", "bun", "pip", "pipx", "poetry"].includes(executable)) {
+      const action = args.find((arg) => !arg.startsWith("-"))?.toLocaleLowerCase();
+      if (action && dependencyMutators.has(action)) return true;
+    }
+    if (executable === "uv" && args[0] === "pip" && dependencyMutators.has(args[1] ?? ""))
+      return true;
+    if (
+      (executable === "prettier" && args.includes("--write")) ||
+      (executable === "eslint" && args.includes("--fix")) ||
+      (executable === "biome" && args.includes("--write")) ||
+      (executable === "gofmt" && args.includes("-w")) ||
+      (executable === "cargo" && args[0] === "fmt") ||
+      executable === "rustfmt"
+    )
+      return true;
+  }
+  return false;
 }
 
 export function shouldArmForToolResult(event: {
@@ -338,8 +470,9 @@ export function shouldArmForToolResult(event: {
   isError: boolean;
 }): boolean {
   if (event.isError) return false;
-  const name = event.toolName.split(".").pop()?.toLocaleLowerCase() ?? "";
+  const name = normalizeRuntimeToolName(event.toolName);
   if (isReviewedRepositoryMutator(name)) return true;
+  if (["ctx_execute", "ctx_execute_file", "ctx_batch_execute"].includes(name)) return true;
   return name === "bash" && typeof event.input.command === "string"
     ? isLikelyMutatingBash(event.input.command)
     : false;

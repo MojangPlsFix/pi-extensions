@@ -231,6 +231,59 @@ export type RunSnapshot = Omit<
   capabilityPolicy: EffectiveCapabilityPolicy;
 };
 
+export type DispatchBatchRoute = "pi" | "owner" | "silent";
+export type DispatchBatchPhase = "collecting" | "ready" | "in-flight" | "delivered" | "orphaned";
+
+export type DispatchBatchMember = {
+  runId: string;
+  generation: number;
+};
+
+/** Terminal evidence captured after the member generation has completed cleanup. */
+export type DispatchBatchResult = {
+  runId: string;
+  generation: number;
+  status: Extract<RunStatus, "parked" | "failed" | "stopped">;
+  terminationReason?: StructuredTerminationReason;
+  report: string;
+  error?: string;
+  cleanupFailure?: { at: string; message: string };
+  snapshot?: RunSnapshot;
+  completedAt: string;
+};
+
+/** Persisted schema-v3 aggregate dispatch protocol. Membership is immutable and ordered. */
+export type DispatchBatch = {
+  id: string;
+  sequence: number;
+  members: DispatchBatchMember[];
+  originSessionId: string;
+  originEntryId: string | null;
+  dispatchMarkerId: string | null;
+  route: DispatchBatchRoute;
+  ownerRunId?: string;
+  codeChanging: boolean;
+  reviewing?: boolean;
+  phase: DispatchBatchPhase;
+  results: DispatchBatchResult[];
+  continuationId?: string;
+  claimedBy?: string;
+  claimedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+  readyAt?: string;
+  inFlightAt?: string;
+  deliveredAt?: string;
+  orphanedAt?: string;
+  foldedResultKeys?: string[];
+};
+
+export type DispatchBatchCounts = {
+  open: number;
+  ready: number;
+  inFlight: number;
+};
+
 export type RunSummary = {
   active: number;
   running: number;

@@ -72,10 +72,15 @@ function harness(
     options?: { triggerTurn?: boolean };
   }> = [];
   const replacementMessages: string[] = [];
-  const replacementEntries: Array<{ customType: string; data: unknown }> = [];
+  const replacementEntries: Array<{ id: string; customType: string; data: unknown }> = [];
   const replacementNotifications: Array<{ message: string; level: string }> = [];
   const staleAccesses: string[] = [];
+  const extensionEvents: Array<{ name: string; data: unknown }> = [];
+  let pendingContinuation:
+    | { producerId: string; requestId: string; deliveryEntryId: string }
+    | undefined;
   const selectCalls: Array<{ title: string; options: string[] }> = [];
+  const notifications: Array<{ message: string; level: string }> = [];
   const execCalls: Array<{ command: string; args: string[]; timeout?: number }> = [];
   const rtkVersions = [...(options.rtkVersions ?? [])];
   const rtkProbeResults = [...(options.rtkProbeResults ?? [])];
@@ -148,7 +153,27 @@ function harness(
     },
     events: {
       emit(name: string, data: unknown) {
+        extensionEvents.push({ name, data });
         for (const handler of bus.get(name) ?? []) handler(data);
+        if (name === events.continuationEnqueue) {
+          const request = data as any;
+          const requestId = request.requestId ?? `${request.producerId}:mock`;
+          request.respond?.({ accepted: true, requestId });
+          const deliveryEntryId = `continuation-${entries.length}`;
+          entries.push({
+            type: "custom_message",
+            id: deliveryEntryId,
+            customType: request.message.customType,
+            content: request.message.content,
+          });
+          sentMessages.push({
+            customType: request.message.customType,
+            content: request.message.content,
+            options: { triggerTurn: true },
+          });
+          sent.push(`${request.message.customType}:${request.message.content}`);
+          pendingContinuation = { producerId: request.producerId, requestId, deliveryEntryId };
+        }
       },
       on(name: string, handler: Handler) {
         bus.set(name, [...(bus.get(name) ?? []), handler]);
@@ -156,7 +181,7 @@ function harness(
     },
   } as unknown as ExtensionAPI;
   const ui = {
-    notify: () => undefined,
+    notify: (message: string, level: string) => notifications.push({ message, level }),
     select: async (title: string, selectOptions: string[]) => {
       selectCalls.push({ title, options: selectOptions });
       return selections.shift() ?? options.selection;
@@ -167,6 +192,8 @@ function harness(
   };
   const sessionManager = {
     getBranch: () => entries,
+    getLeafId: () => entries.at(-1)?.id ?? null,
+    getSessionId: () => "session",
     getSessionFile: () => "/tmp/session.jsonl",
   };
   const context = {
@@ -181,10 +208,6 @@ function harness(
     isIdle: () => {
       assertOldRuntimeActive("ctx.isIdle");
       return true;
-    },
-    hasPendingMessages: () => {
-      assertOldRuntimeActive("ctx.hasPendingMessages");
-      return false;
     },
     get sessionManager() {
       assertOldRuntimeActive("ctx.sessionManager");
@@ -218,7 +241,9 @@ function harness(
       return ui;
     },
     newSession: async (sessionOptions: {
-      setup?: (manager: { appendCustomEntry(type: string, data: unknown): void }) => Promise<void>;
+      setup?: (manager: {
+        appendCustomEntry(type: string, data: unknown): string;
+      }) => Promise<void>;
       withSession?: (replacement: {
         hasUI: boolean;
         ui: { notify(message: string, level: string): void };
@@ -235,7 +260,9 @@ function harness(
       }
       await sessionOptions.setup?.({
         appendCustomEntry: (customType, data) => {
-          replacementEntries.push({ customType, data });
+          const id = `replacement-${replacementEntries.length + 1}`;
+          replacementEntries.push({ id, customType, data });
+          return id;
         },
       });
       await sessionOptions.withSession?.({
@@ -264,8 +291,20 @@ function harness(
     replacementNotifications,
     staleAccesses,
     selectCalls,
+    notifications,
     execCalls,
+    extensionEvents,
     context,
+    settlePendingContinuation() {
+      if (!pendingContinuation) return;
+      const receipt = {
+        ...pendingContinuation,
+        status: "settled",
+        settledEntryId: String(entries.at(-1)?.id ?? pendingContinuation.deliveryEntryId),
+      };
+      pendingContinuation = undefined;
+      for (const handler of bus.get(events.continuationReceipt) ?? []) handler(receipt);
+    },
     activeTools: () => activeTools,
     setActiveToolsForTest(names: string[]) {
       activeTools = [...names];
@@ -284,11 +323,18 @@ async function emit(
   name: string,
   event: unknown,
 ): Promise<any[]> {
+  if (name === "agent_settled") subject.settlePendingContinuation();
   return Promise.all(
     (subject.handlers.get(name) ?? []).map((handler) =>
       handler(event, subject.context as ExtensionContext),
     ),
   );
+}
+
+function newestPlanState(subject: ReturnType<typeof harness>): any {
+  return [...subject.entries]
+    .reverse()
+    .find((entry) => entry.customType === "pi-extensions:plan-mode-state")?.data;
 }
 
 async function emitSequential(
@@ -715,13 +761,25 @@ describe("Plan Mode lifecycle", () => {
       "Plan Mode revision instruction: Treat this report as advisory.",
     );
     expect(subject.sentMessages.at(-1)?.content).toContain("thinking: high");
-    expect(subject.sentMessages.at(-1)?.content).toContain("revise the proposed plan if needed");
+    expect(subject.sentMessages.at(-1)?.content).toContain(
+      "one complete final <proposed_plan> block",
+    );
+    expect(subject.sentMessages.at(-1)?.content).toContain("even when the plan is unchanged");
     expect(subject.sentMessages.at(-1)?.content).toContain("Do not approve or implement");
-    expect(subject.entries.at(-1)?.data).toMatchObject({
+    expect(
+      [...subject.entries]
+        .reverse()
+        .find((entry) => entry.customType === "pi-extensions:plan-mode-state")?.data,
+    ).toMatchObject({
+      version: 2,
       lastReview: {
         planSourceEntryId: "assistant-review",
         reviewerId: "plan-reviewer-1",
         thinking: "high",
+      },
+      revisionExpectation: {
+        phase: "awaiting",
+        reviewedPlan: { sourceEntryId: "assistant-review", markdown: "# Review me" },
       },
     });
   });
@@ -795,6 +853,337 @@ describe("Plan Mode lifecycle", () => {
     expect(subject.selectCalls.at(-1)?.options).toEqual(["off"]);
   });
 
+  it("defers restored receipts until destination-branch Plan state is synchronized", async () => {
+    const subject = harness({ hasUI: true });
+    await emit(subject, "session_start", {});
+    subject.emitExtensionEvent(events.continuationReceipt, {
+      producerId: "plan-mode:review-revision:v2",
+      requestId: "review-destination",
+      status: "settled",
+      sessionId: "session",
+      originEntryId: "origin-destination",
+      deliveryEntryId: "delivery-destination",
+    });
+    expect(subject.entries).toHaveLength(0);
+
+    subject.entries.push(
+      {
+        type: "message",
+        id: "origin-destination",
+        message: { role: "user", content: [{ type: "text", text: "destination" }] },
+      },
+      {
+        type: "custom",
+        id: "state-destination",
+        customType: "pi-extensions:plan-mode-state",
+        data: {
+          version: 2,
+          mode: "plan",
+          disabledTools: ["edit", "write"],
+          latestPlan: { markdown: "# Destination", sourceEntryId: "plan-destination" },
+          revisionExpectation: {
+            reviewedPlan: { markdown: "# Destination", sourceEntryId: "plan-destination" },
+            phase: "awaiting",
+            retryCount: 0,
+            reviewContinuationId: "review-destination",
+            responseBoundary: {
+              requestId: "review-destination",
+              originEntryId: "origin-destination",
+            },
+          },
+        },
+      },
+      {
+        type: "custom_message",
+        id: "delivery-destination",
+        customType: "plan-review-response",
+        content: "review",
+      },
+    );
+    await emit(subject, "session_tree", {});
+
+    expect(newestPlanState(subject)).toMatchObject({
+      latestPlan: { sourceEntryId: "plan-destination" },
+      revisionExpectation: {
+        responseBoundary: {
+          requestId: "review-destination",
+          originEntryId: "origin-destination",
+          deliveryEntryId: "delivery-destination",
+        },
+      },
+    });
+  });
+
+  it("turns a sibling-only settled review boundary into the one allowed correction", async () => {
+    const subject = harness({ hasUI: true });
+    subject.entries.push(
+      {
+        type: "message",
+        id: "shared-origin",
+        message: { role: "user", content: [{ type: "text", text: "shared" }] },
+      },
+      {
+        type: "custom",
+        id: "plan-state-stale-boundary",
+        customType: "pi-extensions:plan-mode-state",
+        data: {
+          version: 2,
+          mode: "plan",
+          disabledTools: ["edit", "write"],
+          latestPlan: { markdown: "# Shared", sourceEntryId: "shared-plan" },
+          revisionExpectation: {
+            reviewedPlan: { markdown: "# Shared", sourceEntryId: "shared-plan" },
+            phase: "awaiting",
+            retryCount: 0,
+            reviewContinuationId: "review-sibling",
+            responseBoundary: {
+              requestId: "review-sibling",
+              originEntryId: "shared-origin",
+              deliveryEntryId: "sibling-delivery",
+              settledEntryId: "sibling-settled",
+            },
+          },
+        },
+      },
+      {
+        type: "custom",
+        id: "coordinator-stale-boundary",
+        customType: "workflow-finalization:continuation-state",
+        data: {
+          version: 1,
+          producerSequences: { "plan-mode:review-revision:v2": 1 },
+          nextOrdinal: 1,
+          requests: [
+            {
+              version: 1,
+              requestId: "review-sibling",
+              producerId: "plan-mode:review-revision:v2",
+              sequence: 1,
+              ordinal: 1,
+              revision: 1,
+              message: { content: "review" },
+              sessionId: "session",
+              originEntryId: "shared-origin",
+              deliveryEntryId: "sibling-delivery",
+              settledEntryId: "sibling-settled",
+              status: "settled",
+            },
+          ],
+        },
+      },
+    );
+    await emit(subject, "session_start", {});
+    expect(newestPlanState(subject).revisionExpectation).toMatchObject({
+      phase: "correction-requested",
+      retryCount: 1,
+      parseFailure: "missing",
+    });
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review-correction"),
+    ).toHaveLength(1);
+  });
+
+  it("accepts an immediate reviewed proposal and skips a newer marker-free acknowledgement", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["No, stay in Plan mode", "provider/model", "off", "No, stay in Plan mode"],
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "review-source-immediate",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Original\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    subject.onExtensionEvent(events.planReview, (request: any) => {
+      request.accept();
+      request.respond({ reviewerId: "reviewer", model: request.model, report: "No changes." });
+    });
+    await subject.commands.get("plan-review")?.("", subject.context);
+    await subject.commands.get("plan-implement")?.("", subject.context);
+    expect(subject.notifications.at(-1)?.message).toContain("active plan revision");
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-mode-implementation"),
+    ).toHaveLength(0);
+    subject.entries.push(
+      {
+        type: "message",
+        id: "review-valid-immediate",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "<proposed_plan>\n# Original\n</proposed_plan>" }],
+        },
+      },
+      {
+        type: "message",
+        id: "review-ack",
+        message: { role: "assistant", content: [{ type: "text", text: "Done." }] },
+      },
+    );
+    await emit(subject, "agent_settled", {});
+
+    expect(newestPlanState(subject)).toMatchObject({
+      latestPlan: { sourceEntryId: "review-valid-immediate", markdown: "# Original" },
+      lastOfferedEntryId: "review-valid-immediate",
+    });
+    expect(newestPlanState(subject).revisionExpectation).toBeUndefined();
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review-correction"),
+    ).toHaveLength(0);
+  });
+
+  it("persists one correction across tree reloads and accepts the corrected proposal without replay", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["No, stay in Plan mode", "provider/model", "off", "No, stay in Plan mode"],
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "review-source-correction",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Keep me\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    subject.onExtensionEvent(events.planReview, (request: any) => {
+      request.accept();
+      request.respond({ reviewerId: "reviewer", model: request.model, report: "Revise tests." });
+    });
+    await subject.commands.get("plan-review")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "review-malformed-first",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Broken" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+
+    expect(newestPlanState(subject)).toMatchObject({
+      latestPlan: { sourceEntryId: "review-source-correction", markdown: "# Keep me" },
+      revisionExpectation: {
+        phase: "correction-requested",
+        retryCount: 1,
+        parseFailure: "unterminated",
+        correctionContinuationId: expect.any(String),
+      },
+    });
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review-correction"),
+    ).toHaveLength(1);
+
+    await emit(subject, "session_tree", {});
+    await emit(subject, "session_tree", {});
+    await subject.commands.get("plan-review")?.("", subject.context);
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review-correction"),
+    ).toHaveLength(1);
+    expect(subject.notifications.at(-1)?.message).toContain("still awaiting");
+
+    subject.entries.push({
+      type: "message",
+      id: "review-corrected-success",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Corrected\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    expect(newestPlanState(subject)).toMatchObject({
+      latestPlan: { sourceEntryId: "review-corrected-success", markdown: "# Corrected" },
+    });
+    expect(newestPlanState(subject).revisionExpectation).toBeUndefined();
+  });
+
+  it("lets a newer malformed proposal supersede an older valid one and warns once after retry", async () => {
+    const subject = harness({
+      hasUI: true,
+      selections: ["No, stay in Plan mode", "provider/model", "off", "provider/model", "off"],
+    });
+    await emit(subject, "session_start", {});
+    await subject.commands.get("plan")?.("", subject.context);
+    subject.entries.push({
+      type: "message",
+      id: "review-source-warning",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "<proposed_plan>\n# Preserved\n</proposed_plan>" }],
+      },
+    });
+    await emit(subject, "agent_settled", {});
+    subject.onExtensionEvent(events.planReview, (request: any) => {
+      request.accept();
+      request.respond({ reviewerId: "reviewer", model: request.model, report: "Review." });
+    });
+    await subject.commands.get("plan-review")?.("", subject.context);
+    subject.entries.push(
+      {
+        type: "message",
+        id: "review-older-valid",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "<proposed_plan>\n# Should not win\n</proposed_plan>" }],
+        },
+      },
+      {
+        type: "message",
+        id: "review-newer-malformed",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "<proposed_plan>\n# New bad" }],
+        },
+      },
+    );
+    await emit(subject, "agent_settled", {});
+    expect(newestPlanState(subject).revisionExpectation.phase).toBe("correction-requested");
+
+    subject.entries.push({
+      type: "message",
+      id: "review-second-malformed",
+      message: { role: "assistant", content: [{ type: "text", text: "No proposal here." }] },
+    });
+    await emit(subject, "agent_settled", {});
+    expect(newestPlanState(subject)).toMatchObject({
+      mode: "plan",
+      latestPlan: { sourceEntryId: "review-source-warning", markdown: "# Preserved" },
+      revisionExpectation: { phase: "warned", retryCount: 1, parseFailure: "missing" },
+    });
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review-correction"),
+    ).toHaveLength(1);
+    const warnings = subject.notifications.filter((notification) =>
+      notification.message.includes("still invalid after one correction"),
+    );
+    expect(warnings).toHaveLength(1);
+    await emit(subject, "agent_settled", {});
+    expect(
+      subject.notifications.filter((notification) =>
+        notification.message.includes("still invalid after one correction"),
+      ),
+    ).toHaveLength(1);
+
+    const warnedReviewId = newestPlanState(subject).revisionExpectation.reviewContinuationId;
+    await subject.commands.get("plan-review")?.("", subject.context);
+    expect(newestPlanState(subject).revisionExpectation).toMatchObject({
+      phase: "awaiting",
+      retryCount: 0,
+    });
+    expect(newestPlanState(subject).revisionExpectation.reviewContinuationId).not.toBe(
+      warnedReviewId,
+    );
+    expect(
+      subject.sentMessages.filter((message) => message.customType === "plan-review"),
+    ).toHaveLength(2);
+  });
+
   it("implements an approved plan in the current context", async () => {
     const subject = harness({ hasUI: true, selection: "Yes, implement this plan" });
     await emit(subject, "session_start", {});
@@ -808,7 +1197,15 @@ describe("Plan Mode lifecycle", () => {
       },
     });
     await emit(subject, "agent_settled", {});
-    expect(subject.sent.at(-1)).toBe("Implement the approved plan.");
+    expect(subject.sent.at(-1)).toBe("plan-mode-implementation:Implement the approved plan.");
+    const waveIndex = subject.extensionEvents.findIndex(
+      (event) => event.name === events.implementationWaveAdvance,
+    );
+    const enqueueIndex = subject.extensionEvents.findIndex(
+      (event) => event.name === events.continuationEnqueue,
+    );
+    expect(waveIndex).toBeGreaterThanOrEqual(0);
+    expect(enqueueIndex).toBeGreaterThan(waveIndex);
   });
 
   it("implements an approved plan through only the replacement runtime", async () => {
@@ -827,10 +1224,23 @@ describe("Plan Mode lifecycle", () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(subject.replacementMessages[0]).toContain("fresh context");
-    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+    expect(
+      subject.replacementEntries.find(
+        (entry) => entry.customType === "pi-extensions:plan-mode-state",
+      )?.data,
+    ).toMatchObject({
+      version: 2,
       mode: "default",
       implementedPlanSourceEntryId: "assistant-fresh",
     });
+    const replacementPlanState = subject.replacementEntries.find(
+      (entry) => entry.customType === "pi-extensions:plan-mode-state",
+    );
+    expect(
+      subject.replacementEntries.find(
+        (entry) => entry.customType === "workflow-finalization:implementation-wave",
+      )?.data,
+    ).toMatchObject({ armed: true, wave: 1, anchorEntryId: replacementPlanState?.id });
     expect(subject.staleAccesses).toEqual([]);
   });
 
@@ -851,7 +1261,12 @@ describe("Plan Mode lifecycle", () => {
     await subject.commands.get("plan-implement")?.("fresh", subject.context);
 
     expect(subject.replacementMessages[0]).toContain("# Command Fresh");
-    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+    expect(
+      subject.replacementEntries.find(
+        (entry) => entry.customType === "pi-extensions:plan-mode-state",
+      )?.data,
+    ).toMatchObject({
+      version: 2,
       implementedPlanSourceEntryId: "assistant-command-fresh",
     });
     expect(subject.staleAccesses).toEqual([]);
@@ -882,7 +1297,11 @@ describe("Plan Mode lifecycle", () => {
         level: "error",
       },
     ]);
-    expect(subject.replacementEntries.at(-1)?.data).toMatchObject({
+    expect(
+      subject.replacementEntries.find(
+        (entry) => entry.customType === "pi-extensions:plan-mode-state",
+      )?.data,
+    ).toMatchObject({
       implementedPlanSourceEntryId: "assistant-send-failure",
     });
     expect(subject.staleAccesses).toEqual([]);

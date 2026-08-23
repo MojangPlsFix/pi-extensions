@@ -314,6 +314,7 @@ export function registerAgentsCommand(pi: ExtensionAPI, manager: SubagentManager
         ).length;
         const text = [
           `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
+          `Top-level active-branch batches: open ${hub.batchCounts.open} · ready ${hub.batchCounts.ready} · in-flight ${hub.batchCounts.inFlight}`,
           `Counts: running ${running} · wrapping ${wrapping} · blocked ${hub.runs.filter((run) => run.status === "blocked").length} · failed ${hub.runs.filter((run) => run.status === "failed").length} · stopped ${hub.runs.filter((run) => run.status === "stopped").length}`,
           ...(hub.runs.length
             ? hub.runs.flatMap((run) => [

@@ -280,9 +280,9 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
       tasks: Type.Array(dispatchTaskSchema, { minItems: 1, maxItems: 16 }),
     }),
     prepareArguments: prepareDispatchArguments,
-    async execute(_toolCallId, params, _signal, _update, ctx) {
+    async execute(toolCallId, params, _signal, _update, ctx) {
       try {
-        const runs = await manager.dispatch(params.tasks as DispatchInput[], ctx);
+        const runs = await manager.dispatch(params.tasks as DispatchInput[], ctx, { toolCallId });
         const snapshots = manager
           .snapshots()
           .filter((snapshot) => runs.some((run) => run.id === snapshot.id));
@@ -328,6 +328,7 @@ export function registerSubagentTools(pi: ExtensionAPI, manager: SubagentManager
           ),
           "",
           `Capacity: slots ${hub.capacity.used}/${hub.capacity.limit} used · ${hub.capacity.free} free · shared writers ${hub.capacity.sharedWritersUsed}/${hub.capacity.sharedWritersLimit}`,
+          `Top-level active-branch batches: open ${hub.batchCounts.open} · ready ${hub.batchCounts.ready} · in-flight ${hub.batchCounts.inFlight}`,
           `Counts: running ${hub.runs.filter((run) => ["queued", "starting", "running"].includes(run.status)).length} · wrapping ${hub.runs.filter((run) => run.wrappingUp && ["queued", "starting", "running", "blocked"].includes(run.status)).length} · blocked ${hub.runs.filter((run) => run.status === "blocked").length} · failed ${hub.runs.filter((run) => run.status === "failed").length} · stopped ${hub.runs.filter((run) => run.status === "stopped").length}`,
           "",
           "Runs:",

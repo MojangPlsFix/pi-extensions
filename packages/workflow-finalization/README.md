@@ -21,7 +21,7 @@ Shutdown and session replacement clear all runtime references. The queue never c
 
 ## Implementation finalization
 
-Successful `edit`, `write`, `apply_patch`, reviewed repository mutators, conservative likely-mutating Bash, and `events.implementationWaveAdvance` arm a new persisted wave. Read-only tools and failed mutations do not arm it. While armed, `before_agent_start` appends the summary contract.
+Successful `edit`, `write`, `apply_patch`, reviewed repository mutators, project-confined Context execution tools, conservative likely-mutating Bash, and `events.implementationWaveAdvance` arm a new persisted wave. Read-only tools and failed mutations do not arm it. A Reviewer completion advances only a wave that implementation work already armed. While armed, `before_agent_start` appends the summary contract.
 
 A valid response has exactly one of each required level-two heading. The headings stay outside fenced examples, use this order, and have non-empty unfenced content:
 
@@ -45,6 +45,6 @@ A producer owns its canonical request ID and producer state. The coordinator own
 
 ## Pi API limitation
 
-Pi exposes `session_before_compact` and successful `session_compact`. Pi does not report when a later handler cancels compaction. The coordinator keeps the native compaction gate closed until successful compaction or session reload. This can defer automation after a failed compaction.
+Pi exposes `session_before_compact` and successful `session_compact`. Compaction producers use separate operation IDs for overlapping work. A successful close can resume queued work; a failure close does not dispatch from inside the failure callback. Pi does not report when an unrelated later handler cancels compaction. Without a producer close event, the native fallback gate stays closed until a later lifecycle event or session reload.
 
 Pi also has no atomic extension turn reservation. User input or process termination can occur between the persisted claim and Pi message dispatch. Stable IDs and reload reconciliation reduce duplicates, but they cannot make this process-level window atomic.

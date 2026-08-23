@@ -88,7 +88,12 @@ export type ContinuationActivityEvent = {
   gated: boolean;
 };
 
-export type CompactionGateEvent = { active: boolean; operationId?: string };
+export type CompactionGateEvent = {
+  active: boolean;
+  operationId?: string;
+  /** A successful lifecycle boundary may resume queued work after this gate closes. */
+  resume?: boolean;
+};
 
 /** Relevant means the batch can still change or review the current implementation. */
 export type HacklerBatchGateEvent = {
@@ -110,6 +115,8 @@ export type ImplementationWaveAdvanceEvent = {
   producerId: string;
   reason: string;
   branchEntryId?: string;
+  /** Review completion advances only an implementation wave that is already armed. */
+  requiresArmed?: boolean;
 };
 
 type EventEmitter = {

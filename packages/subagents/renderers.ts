@@ -10,7 +10,7 @@ import {
 } from "@earendil-works/pi-tui";
 import type { SubagentsStatusEvent } from "../../shared/events.js";
 import type { HubSnapshot } from "./manager.js";
-import type { RunSnapshot, RunStatus } from "./types.js";
+import type { DispatchBatch, RunSnapshot, RunStatus } from "./types.js";
 
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -503,6 +503,10 @@ export class AgentsViewer {
         "dim",
         ` Running ${running} · wrapping ${wrapping} · blocked ${blocked} · failed ${failed} · stopped ${stopped}`,
       ),
+      this.theme.fg(
+        "dim",
+        ` Top-level batches ${this.snapshot.batchCounts.open} open · ${this.snapshot.batchCounts.ready} ready · ${this.snapshot.batchCounts.inFlight} in-flight`,
+      ),
     );
     const oldestBlock = this.snapshot.requests
       .filter((request) => request.blocking && request.status === "pending")
@@ -705,6 +709,69 @@ export class AgentsViewer {
   invalidate(): void {
     this.tui.requestRender();
   }
+}
+
+export function aggregateCompletionMessageRenderer(
+  details: unknown,
+  expanded: boolean,
+  theme: Theme,
+  outputPad = 0,
+): Component | undefined {
+  const value = details as
+    | { schemaVersion?: number; batch?: DispatchBatch; runs?: RunSnapshot[] }
+    | undefined;
+  if (value?.schemaVersion !== 3 || !value.batch) return undefined;
+  const batch = value.batch;
+  const runs = batch.results.length
+    ? batch.results.map(
+        (result) =>
+          result.snapshot ?? {
+            name: result.runId,
+            task: `Generation ${result.generation}`,
+            ownership: { owns: [] },
+            status: result.status,
+            terminationReason: result.terminationReason,
+            report: result.report,
+            error: result.error,
+            cleanupFailure: result.cleanupFailure,
+          },
+      )
+    : (value.runs ?? []);
+  const shell = (content: string): Component => {
+    const box = new Box(outputPad, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(content, 0, 0));
+    return box;
+  };
+  const failures = runs.filter((run) => run.status === "failed").length;
+  const stopped = runs.filter((run) => run.status === "stopped").length;
+  const heading = theme.fg(
+    failures ? "error" : stopped ? "warning" : "success",
+    `Hackler batch · ${runs.length} result${runs.length === 1 ? "" : "s"}${failures ? ` · ${failures} failed` : ""}${stopped ? ` · ${stopped} stopped` : ""}`,
+  );
+  if (!expanded) {
+    const lines = runs.map((run) => {
+      const reason = run.terminationReason?.code;
+      const evidence = run.status === "failed" ? run.error || run.report : run.report || run.error;
+      return `${run.status === "parked" ? "✓" : run.status === "failed" ? "!" : "○"} ${cleanDisplayLine(run.name)} · ${run.status}${reason ? ` · ${reason}` : ""}${evidence ? ` · ${taskLabel(evidence, 140)}` : ""}`;
+    });
+    return shell([heading, ...lines].join("\n"));
+  }
+  return shell(
+    [
+      heading,
+      theme.fg("dim", `${batch.id} · sequence ${batch.sequence} · route ${batch.route}`),
+      ...runs.map((run) => {
+        const reason = terminationText(run.terminationReason);
+        const report =
+          run.status === "failed"
+            ? `${theme.fg("error", `Failure${reason ? ` · ${reason}` : ""}${run.error ? ` · ${safeDisplayText(run.error)}` : ""}`)}${run.report ? `\n\n${theme.fg("warning", "Partial report")}\n${safeDisplayText(run.report)}` : ""}`
+            : run.status === "stopped"
+              ? `${theme.fg("warning", `Stopped${reason ? ` · ${reason}` : ""}`)}${run.report ? `\n\n${theme.fg("warning", "Partial report")}\n${safeDisplayText(run.report)}` : ""}`
+              : safeDisplayText(run.report || run.error || "(no report)");
+        return `${theme.fg("text", `${safeDisplayText(run.task)}\n${run.name} · ${run.status}`)}\n${theme.fg("dim", `Owns: ${cleanDisplayLine(run.ownership.owns.join(", "))}`)}\n${report}${run.cleanupFailure ? `\n${theme.fg("error", `Cleanup retained: ${safeDisplayText(run.cleanupFailure.message)}`)}` : ""}`;
+      }),
+    ].join("\n\n"),
+  );
 }
 
 export function completionMessageRenderer(

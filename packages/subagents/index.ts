@@ -2,7 +2,11 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { registerAgentsCommand } from "./agents-command.js";
 import { SubagentManager } from "./manager.js";
-import { completionMessageRenderer, taskLabel } from "./renderers.js";
+import {
+  aggregateCompletionMessageRenderer,
+  completionMessageRenderer,
+  taskLabel,
+} from "./renderers.js";
 import { registerSubagentTools } from "./tools.js";
 
 type WrapEntryV1 = {
@@ -18,6 +22,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     await manager.attachUi(ctx);
   });
+  pi.on("session_tree", (_event, ctx) => {
+    manager.reconcileBranch(ctx);
+  });
   pi.on("before_agent_start", async (event) => ({
     systemPrompt: manager.parentGuidance(event.systemPrompt),
   }));
@@ -27,6 +34,9 @@ export default function subagentsExtension(pi: ExtensionAPI): void {
   });
   pi.registerMessageRenderer("subagent-completion-v2", (message, options, theme) =>
     completionMessageRenderer(message.details, options.expanded, theme, options.outputPad),
+  );
+  pi.registerMessageRenderer("subagent-completion-v3", (message, options, theme) =>
+    aggregateCompletionMessageRenderer(message.details, options.expanded, theme, options.outputPad),
   );
   pi.registerEntryRenderer<WrapEntryV1>("subagent-wrap-v1", (entry, _options, theme) => {
     const data = entry.data;

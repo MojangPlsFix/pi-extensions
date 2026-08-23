@@ -18,7 +18,9 @@ function harness() {
   ];
   const notify = vi.fn();
   const sends: Array<{ message: any; options: any }> = [];
+  const receipts: unknown[] = [];
   let idle = true;
+  let startSynchronouslyOnSend = false;
   const append = (entry: Omit<SessionEntry, "id" | "parentId" | "timestamp">): void => {
     branch.push({
       ...entry,
@@ -57,6 +59,10 @@ function harness() {
         details: message.details,
         display: message.display,
       } as never);
+      if (startSynchronouslyOnSend) {
+        idle = false;
+        for (const handler of piHandlers.get("agent_start") ?? []) handler({}, context);
+      }
     },
     events: {
       on(name: string, handler: (value: unknown) => void) {
@@ -70,6 +76,7 @@ function harness() {
     },
   };
   workflowFinalization(api as never);
+  api.events.on(events.continuationReceipt, (value) => receipts.push(value));
   const emit = async (name: string, event: any = {}) => {
     const results = [];
     for (const handler of piHandlers.get(name) ?? []) results.push(await handler(event, context));
@@ -99,11 +106,15 @@ function harness() {
     context,
     notify,
     sends,
+    receipts,
     emit,
     bus,
     assistant,
     setIdle(value: boolean) {
       idle = value;
+    },
+    startSynchronouslyOnSend() {
+      startSynchronouslyOnSend = true;
     },
   };
 }
@@ -162,6 +173,32 @@ describe("workflow-finalization extension", () => {
     expect(subject.notify).toHaveBeenCalledTimes(1);
   });
 
+  it("does not settle a synchronously started continuation with the preceding run", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    subject.startSynchronouslyOnSend();
+    subject.setIdle(false);
+    await subject.emit("agent_start", {});
+    subject.bus(events.continuationEnqueue, {
+      producerId: "race",
+      requestId: "race:1",
+      message: { content: "continue" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    subject.setIdle(true);
+    await subject.emit("agent_settled", {});
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.receipts).toHaveLength(0);
+
+    subject.assistant("Continuation response.");
+    subject.setIdle(true);
+    await subject.emit("agent_settled", {});
+    expect(subject.receipts).toEqual([
+      expect.objectContaining({ requestId: "race:1", status: "settled" }),
+    ]);
+  });
+
   it("holds correction dispatch behind compaction and relevant Hackler gates", async () => {
     const subject = harness();
     await subject.emit("session_start", {});
@@ -177,17 +214,53 @@ describe("workflow-finalization extension", () => {
     await subject.emit("agent_settled", {});
     expect(subject.sends).toHaveLength(0);
 
-    await subject.emit("session_compact", {});
     subject.bus(events.hacklerBatchGate, {
       batchId: "review",
       active: true,
       relevant: true,
       phase: "review",
     });
-    await subject.emit("agent_settled", {});
+    await subject.emit("session_compact", {});
     expect(subject.sends).toHaveLength(0);
     subject.bus(events.hacklerBatchGate, { batchId: "review", active: false });
+    expect(subject.sends).toHaveLength(1);
+  });
+
+  it("does not pump queued work from a compaction failure gate close", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    await subject.emit("session_before_compact", {});
+    subject.bus(events.compactionGate, { active: true, operationId: "native" });
+    subject.bus(events.continuationEnqueue, {
+      producerId: "test:compaction",
+      message: { content: "continue later" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    subject.bus(events.compactionGate, { active: false, operationId: "native" });
+    expect(subject.sends).toHaveLength(0);
     await subject.emit("agent_settled", {});
+    expect(subject.sends).toHaveLength(1);
+  });
+
+  it("resumes queued work after a successful external compaction closes", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    await subject.emit("session_before_compact", {});
+    subject.bus(events.compactionGate, { active: true, operationId: "codex-native" });
+    subject.bus(events.continuationEnqueue, {
+      producerId: "test:successful-compaction",
+      message: { content: "continue after success" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    await subject.emit("session_compact", {});
+    expect(subject.sends).toHaveLength(0);
+    subject.bus(events.compactionGate, {
+      active: false,
+      operationId: "codex-native",
+      resume: true,
+    });
     expect(subject.sends).toHaveLength(1);
   });
 
@@ -207,14 +280,31 @@ describe("workflow-finalization extension", () => {
     expect(subject.sends).toHaveLength(1);
   });
 
-  it("explicit Hackler advancement arms a new wave", async () => {
+  it("explicit Hackler advancement arms a new wave and review-only completion is conditional", async () => {
     const subject = harness();
     await subject.emit("session_start", {});
+    subject.bus(events.implementationWaveAdvance, {
+      producerId: "hackler:review",
+      reason: "review completed",
+      requiresArmed: true,
+    });
+    expect((await subject.emit("before_agent_start", { systemPrompt: "base" }))[0]).toBeUndefined();
+
     subject.bus(events.implementationWaveAdvance, {
       producerId: "hackler:batch",
       reason: "integrated writer output",
     });
+    subject.bus(events.implementationWaveAdvance, {
+      producerId: "hackler:review",
+      reason: "review completed",
+      requiresArmed: true,
+    });
     const result = (await subject.emit("before_agent_start", { systemPrompt: "base" }))[0];
     expect(result.systemPrompt).toContain("Implementation finalization contract");
+    const states = subject.branch.filter(
+      (entry) =>
+        entry.type === "custom" && entry.customType === "workflow-finalization:implementation-wave",
+    );
+    expect((states.at(-1) as any).data.wave).toBe(2);
   });
 });

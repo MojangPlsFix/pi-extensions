@@ -3,8 +3,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, test } from "vitest";
+import { events } from "../../../shared/events.js";
 import { loadConfig, resolveConfigPaths } from "../config.js";
-import codexCompactionExtension from "../index.js";
+import codexCompactionExtension, {
+  CODEX_COMPACTION_CONTINUATION_TYPE,
+  CODEX_COMPACTION_PRODUCER_ID,
+  thresholdContinuationRequestId,
+} from "../index.js";
 import {
   buildCodexHeaders,
   buildCompactionRequestBody,
@@ -65,14 +70,17 @@ function extensionHarness(initialBranch: SessionEntry[]) {
   const entryRenderers = new Map<string, (...args: any[]) => any>();
   let branch = initialBranch;
   let aborted = false;
-  let hasPendingMessages = false;
-  let idle = false;
   let usageTokens = 40_000;
   let customEntryId = 0;
   const notifications: string[] = [];
   const compactionRequests: any[] = [];
-  const sentUserMessages: Array<{ content: string; options: any }> = [];
+  const emittedEvents: Array<{ name: string; data: any }> = [];
   const pi = {
+    events: {
+      emit(name: string, data: unknown) {
+        emittedEvents.push({ name, data });
+      },
+    },
     on(name: string, handler: (...args: any[]) => any) {
       handlers.set(
         name,
@@ -106,9 +114,6 @@ function extensionHarness(initialBranch: SessionEntry[]) {
         } as SessionEntry,
       ];
     },
-    sendUserMessage(content: string, options?: any) {
-      sentUserMessages.push({ content, options });
-    },
   } as any;
   codexCompactionExtension(pi);
 
@@ -125,9 +130,8 @@ function extensionHarness(initialBranch: SessionEntry[]) {
     compact: (options: any) => {
       compactionRequests.push(options);
     },
-    isIdle: () => idle,
+    isIdle: () => true,
     isProjectTrusted: () => false,
-    hasPendingMessages: () => hasPendingMessages,
     getContextUsage: () => ({
       tokens: usageTokens,
       contextWindow: model.contextWindow,
@@ -151,12 +155,6 @@ function extensionHarness(initialBranch: SessionEntry[]) {
     setBranch(next: SessionEntry[]) {
       branch = next;
     },
-    setHasPendingMessages(pending: boolean) {
-      hasPendingMessages = pending;
-    },
-    setIdle(value: boolean) {
-      idle = value;
-    },
     setUsageTokens(tokens: number) {
       usageTokens = tokens;
     },
@@ -169,7 +167,10 @@ function extensionHarness(initialBranch: SessionEntry[]) {
     entryRenderers,
     notifications,
     compactionRequests,
-    sentUserMessages,
+    emittedEvents,
+    eventsNamed(name: string) {
+      return emittedEvents.filter((event) => event.name === name).map((event) => event.data);
+    },
   };
 }
 
@@ -229,6 +230,9 @@ describe("pi-codex-compaction", () => {
     );
 
     expect(result.cancel).toBeUndefined();
+    expect(harness.eventsNamed(events.compactionGate)).toEqual([
+      expect.objectContaining({ active: true }),
+    ]);
     expect(result.compaction.summary).toContain("OpenAI Codex native compaction checkpoint");
     expect(result.compaction.details.kind).toBe(NATIVE_COMPACTION_KIND);
     expect(result.compaction.details.replacementHistory.at(-1)).toEqual({
@@ -310,6 +314,11 @@ describe("pi-codex-compaction", () => {
     );
 
     expect(result).toEqual({ cancel: true });
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
     expect(harness.notifications[0]).toContain("native compaction failed");
     expect(
       harness
@@ -317,6 +326,34 @@ describe("pi-codex-compaction", () => {
         .slice(1)
         .map((entry: any) => entry.data?.state),
     ).toEqual(["running", "failed"]);
+  });
+
+  test("releases both threshold and native gates when forced native compaction fails", async () => {
+    globalThis.fetch = (async () => new Response("bad request", { status: 400 })) as typeof fetch;
+    const entry = userEntry("user-overlap-failure", "continue after failure");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+
+    const result = await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    expect(result).toEqual({ cancel: true });
+    const active = new Set<string>();
+    for (const gate of harness.eventsNamed(events.compactionGate)) {
+      if (gate.active) active.add(gate.operationId);
+      else active.delete(gate.operationId);
+    }
+    expect(active).toEqual(new Set());
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
   });
 
   test("retries a message-less compaction stream error", async () => {
@@ -425,6 +462,8 @@ describe("pi-codex-compaction", () => {
       harness.context,
     );
     expect((harness.getBranch().at(-1) as any).data.state).toBe("complete");
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
     const renderer = harness.entryRenderers.get("openai-codex-compaction-status")!;
     const rendered = renderer(
       { data: { state: "complete" } },
@@ -464,7 +503,7 @@ describe("pi-codex-compaction", () => {
     expect(harness.getBranch()).toEqual([entry]);
   });
 
-  test("aborts at 90 percent, compacts after settlement, and visibly continues", () => {
+  test("aborts at the threshold, gates synchronously, and enqueues a deterministic continuation", () => {
     const entry = userEntry("user-1", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
@@ -472,77 +511,129 @@ describe("pi-codex-compaction", () => {
     harness.handlers.get("turn_end")!({}, harness.context);
     expect(harness.aborted).toBe(true);
     expect(harness.compactionRequests).toHaveLength(0);
+    expect(harness.eventsNamed(events.compactionGate)).toEqual([
+      expect.objectContaining({ active: true }),
+    ]);
 
-    harness.setIdle(true);
     harness.handlers.get("agent_settled")!({}, harness.context);
     expect(harness.compactionRequests).toHaveLength(1);
     harness.compactionRequests[0].onComplete({});
 
-    expect(harness.sentUserMessages).toEqual([
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([
       {
-        content: "Compaction completed. Continue.",
-        options: undefined,
+        producerId: CODEX_COMPACTION_PRODUCER_ID,
+        requestId: thresholdContinuationRequestId("session-123", "user-1"),
+        dedupeKey: thresholdContinuationRequestId("session-123", "user-1"),
+        sessionId: "session-123",
+        originEntryId: "user-1",
+        message: {
+          customType: CODEX_COMPACTION_CONTINUATION_TYPE,
+          content: "Compaction completed. Continue.",
+          display: true,
+          details: { reason: "threshold", compactionAnchorEntryId: "user-1" },
+        },
       },
     ]);
   });
 
-  test("continues when ctx.compact emits a matching manual event before onComplete", () => {
-    const entry = userEntry("user-1", "continue the task");
+  test("closes overlapping threshold and native gates before resuming the continuation", async () => {
+    globalThis.fetch = (async () => compactionSse()) as typeof fetch;
+    const entry = userEntry("user-overlap", "continue after compaction");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
-    harness.handlers.get("turn_end")!({}, harness.context);
-    harness.setIdle(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
-    expect(harness.compactionRequests).toHaveLength(1);
 
-    harness.handlers.get("session_compact")!(
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+    const result = await harness.handlers.get("session_before_compact")!(
       {
-        reason: "manual",
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "threshold",
         willRetry: false,
-        fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
+        signal: new AbortController().signal,
       },
       harness.context,
     );
-    harness.compactionRequests[0].onComplete({});
-    expect(harness.sentUserMessages).toEqual([
+    const compactionEntry = {
+      type: "compaction",
+      id: "compact-overlap",
+      parentId: entry.id,
+      timestamp: new Date().toISOString(),
+      summary: result.compaction.summary,
+      firstKeptEntryId: entry.id,
+      tokensBefore: 180_000,
+      details: result.compaction.details,
+    } as SessionEntry;
+    harness.setBranch([entry, compactionEntry]);
+    harness.handlers.get("session_compact")!(
       {
-        content: "Compaction completed. Continue.",
-        options: undefined,
+        reason: "threshold",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry,
       },
-    ]);
+      harness.context,
+    );
+
+    const active = new Set<string>();
+    let gatesAtEnqueue: string[] | undefined;
+    for (const emitted of harness.emittedEvents) {
+      if (emitted.name === events.compactionGate) {
+        if (emitted.data.active) active.add(emitted.data.operationId);
+        else active.delete(emitted.data.operationId);
+      } else if (emitted.name === events.continuationEnqueue) {
+        gatesAtEnqueue = [...active];
+      }
+    }
+    expect(gatesAtEnqueue).toHaveLength(2);
+    expect(active).toEqual(new Set());
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({
+      active: false,
+      resume: true,
+    });
+    expect(harness.eventsNamed(events.continuationEnqueue)).toHaveLength(1);
   });
 
-  test("continues exactly once after duplicate compaction completion signals", () => {
+  test("uses the completed compaction anchor and emits once for duplicate completion signals", () => {
     const entry = userEntry("user-duplicate", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
     harness.handlers.get("turn_end")!({}, harness.context);
-    harness.setIdle(true);
     harness.handlers.get("agent_settled")!({}, harness.context);
 
+    const compactionEntry = {
+      type: "compaction",
+      id: "compact-threshold-1",
+      parentId: entry.id,
+      timestamp: new Date().toISOString(),
+      summary: "marker",
+      firstKeptEntryId: entry.id,
+      tokensBefore: 180_000,
+      details: nativeDetails(),
+    } as SessionEntry;
+    harness.setBranch([entry, compactionEntry]);
     const completionEvent = {
       reason: "manual",
       willRetry: false,
       fromExtension: true,
-      compactionEntry: { details: nativeDetails() },
+      compactionEntry,
     };
     harness.handlers.get("session_compact")!(completionEvent, harness.context);
     harness.handlers.get("session_compact")!(completionEvent, harness.context);
     harness.compactionRequests[0].onComplete({});
     harness.compactionRequests[0].onComplete({});
-    harness.handlers.get("session_compact")!(completionEvent, harness.context);
 
-    expect(harness.sentUserMessages).toEqual([
-      {
-        content: "Compaction completed. Continue.",
-        options: undefined,
-      },
-    ]);
+    const requests = harness.eventsNamed(events.continuationEnqueue);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      requestId: thresholdContinuationRequestId("session-123", "compact-threshold-1"),
+      originEntryId: "compact-threshold-1",
+    });
   });
 
   test("uses Pi threshold compaction when it finishes before settlement", () => {
-    const entry = userEntry("user-1", "continue the task");
+    const entry = userEntry("user-early", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
     harness.handlers.get("turn_end")!({}, harness.context);
@@ -552,24 +643,18 @@ describe("pi-codex-compaction", () => {
         reason: "threshold",
         willRetry: false,
         fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
+        compactionEntry: { id: entry.id, details: nativeDetails() },
       },
       harness.context,
     );
-    harness.setIdle(true);
     harness.handlers.get("agent_settled")!({}, harness.context);
 
     expect(harness.compactionRequests).toHaveLength(0);
-    expect(harness.sentUserMessages).toEqual([
-      {
-        content: "Compaction completed. Continue.",
-        options: undefined,
-      },
-    ]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toHaveLength(1);
   });
 
-  test("does not add a continuation when overflow recovery will retry", () => {
-    const entry = userEntry("user-1", "continue the task");
+  test("overflow retry closes the gate without adding a continuation", () => {
+    const entry = userEntry("user-overflow", "continue the task");
     const harness = extensionHarness([entry]);
     harness.setUsageTokens(180_000);
     harness.handlers.get("turn_end")!({}, harness.context);
@@ -579,23 +664,68 @@ describe("pi-codex-compaction", () => {
         reason: "overflow",
         willRetry: true,
         fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
+        compactionEntry: { id: entry.id, details: nativeDetails() },
       },
       harness.context,
     );
-    harness.setIdle(true);
     harness.handlers.get("agent_settled")!({}, harness.context);
 
     expect(harness.compactionRequests).toHaveLength(0);
-    expect(harness.sentUserMessages).toEqual([]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
+  });
+
+  test("manual compaction clears a pending threshold without a continuation", () => {
+    const entry = userEntry("user-manual", "continue");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("session_compact")!(
+      {
+        reason: "manual",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry: { id: entry.id, details: nativeDetails() },
+      },
+      harness.context,
+    );
+    harness.handlers.get("agent_settled")!({}, harness.context);
+
+    expect(harness.compactionRequests).toEqual([]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
+  });
+
+  test("compaction callback failure closes the gate without a continuation", () => {
+    const harness = extensionHarness([userEntry("user-failure", "continue")]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+    harness.compactionRequests[0].onError(new Error("callback failure"));
+
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
+    expect(harness.notifications.at(-1)).toContain("callback failure");
+  });
+
+  test("reset closes a pending threshold gate and clears its reservation", () => {
+    const harness = extensionHarness([userEntry("user-reset", "continue")]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("model_select")!({ model }, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+
+    expect(harness.compactionRequests).toEqual([]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({ active: false });
   });
 
   test("does not interrupt below the configured threshold", () => {
-    const entry = userEntry("user-1", "continue the task");
-    const harness = extensionHarness([entry]);
+    const harness = extensionHarness([userEntry("user-below", "continue")]);
     harness.setUsageTokens(179_999);
     harness.handlers.get("turn_end")!({}, harness.context);
     expect(harness.aborted).toBe(false);
+    expect(harness.eventsNamed(events.compactionGate)).toEqual([]);
   });
 
   test("does not restart aborted, failed, or truncated turns", () => {
@@ -606,94 +736,11 @@ describe("pi-codex-compaction", () => {
         { message: { role: "assistant", stopReason } },
         harness.context,
       );
-      harness.setIdle(true);
       harness.handlers.get("agent_settled")!({}, harness.context);
       expect(harness.aborted).toBe(false);
       expect(harness.compactionRequests).toEqual([]);
-      expect(harness.sentUserMessages).toEqual([]);
+      expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
     }
-  });
-
-  test("continues as a follow-up when input is queued after the abort", () => {
-    const entry = userEntry("user-1", "continue the task");
-    const harness = extensionHarness([entry]);
-    harness.setUsageTokens(180_000);
-    harness.handlers.get("turn_end")!({}, harness.context);
-    harness.setHasPendingMessages(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
-    harness.handlers.get("session_compact")!(
-      {
-        reason: "manual",
-        willRetry: false,
-        fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
-      },
-      harness.context,
-    );
-    harness.compactionRequests[0].onComplete({});
-    expect(harness.sentUserMessages).toEqual([
-      {
-        content: "Compaction completed. Continue.",
-        options: { deliverAs: "followUp" },
-      },
-    ]);
-  });
-
-  test("continues when abort clears input that was already queued", () => {
-    const harness = extensionHarness([userEntry("user-queued", "continue")]);
-    harness.setUsageTokens(180_000);
-    harness.setHasPendingMessages(true);
-    harness.handlers.get("turn_end")!({}, harness.context);
-    harness.setHasPendingMessages(false);
-    harness.setIdle(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
-    harness.handlers.get("session_compact")!(
-      {
-        reason: "manual",
-        willRetry: false,
-        fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
-      },
-      harness.context,
-    );
-    harness.compactionRequests[0].onComplete({});
-    expect(harness.sentUserMessages).toEqual([
-      {
-        content: "Compaction completed. Continue.",
-        options: undefined,
-      },
-    ]);
-  });
-
-  test("a completed manual compaction clears pending automatic compaction", () => {
-    const harness = extensionHarness([userEntry("user-manual", "continue")]);
-    harness.setUsageTokens(180_000);
-    harness.handlers.get("turn_end")!({}, harness.context);
-    harness.handlers.get("session_compact")!(
-      {
-        reason: "manual",
-        willRetry: false,
-        fromExtension: true,
-        compactionEntry: { details: nativeDetails() },
-      },
-      harness.context,
-    );
-    harness.setIdle(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
-    expect(harness.compactionRequests).toEqual([]);
-    expect(harness.sentUserMessages).toEqual([]);
-  });
-
-  test("clears pending automatic compaction when the model changes", () => {
-    const entry = userEntry("user-1", "continue the task");
-    const harness = extensionHarness([entry]);
-    harness.setUsageTokens(180_000);
-    harness.handlers.get("turn_end")!({}, harness.context);
-    harness.handlers.get("model_select")!({ model }, harness.context);
-    harness.setIdle(true);
-    harness.handlers.get("agent_settled")!({}, harness.context);
-    expect(harness.compactionRequests).toEqual([]);
-    expect(harness.sentUserMessages).toEqual([]);
   });
 
   test("cancels an in-flight native request when the model changes", async () => {

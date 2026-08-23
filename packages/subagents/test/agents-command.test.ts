@@ -112,6 +112,8 @@ describe("/agents operational output", () => {
     const run = failedRun();
     const hub = {
       runs: [run],
+      batches: [],
+      batchCounts: { open: 0, ready: 0, inFlight: 0 },
       requests: [
         {
           id: "request-one",
@@ -184,6 +186,8 @@ describe("/agents operational output", () => {
       status: async () =>
         ({
           runs: [],
+          batches: [],
+          batchCounts: { open: 0, ready: 0, inFlight: 0 },
           requests: [],
           missions: [],
           profiles: [],

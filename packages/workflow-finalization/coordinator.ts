@@ -15,6 +15,10 @@ export type PersistedContinuationRequest = {
   requestId: string;
   producerId: string;
   sequence: number;
+  /** Session-global enqueue order. Older snapshots migrate from their append order. */
+  ordinal: number;
+  /** Parser-only migration marker; removed when coordinator state restores. */
+  legacyOrdinal?: true;
   /** Monotonic per-request revision prevents stale sibling snapshots from regressing status. */
   revision: number;
   dedupeKey?: string;
@@ -29,6 +33,7 @@ export type PersistedContinuationRequest = {
 export type ContinuationSnapshot = {
   version: 1;
   producerSequences: Record<string, number>;
+  nextOrdinal: number;
   requests: PersistedContinuationRequest[];
 };
 
@@ -40,6 +45,8 @@ export type DeliveredContinuationDetails = {
 
 export type CoordinatorHost = {
   persist(snapshot: ContinuationSnapshot): void;
+  /** Recheck Pi's live idle state immediately before every dispatch. */
+  canDispatch?(): boolean;
   /** send must append synchronously and may return the resulting branch leaf. */
   send(request: PersistedContinuationRequest): { entryId?: string } | undefined;
   receipt(event: ContinuationReceiptEvent): void;
@@ -96,6 +103,7 @@ export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot 
       typeof candidate.producerId !== "string" ||
       !candidate.producerId ||
       !Number.isSafeInteger(candidate.sequence) ||
+      !(candidate.ordinal === undefined || Number.isSafeInteger(candidate.ordinal)) ||
       !(candidate.revision === undefined || Number.isSafeInteger(candidate.revision)) ||
       typeof candidate.sessionId !== "string" ||
       !(candidate.originEntryId === null || typeof candidate.originEntryId === "string") ||
@@ -110,6 +118,10 @@ export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot 
       requestId: candidate.requestId,
       producerId: candidate.producerId,
       sequence: candidate.sequence as number,
+      // Snapshots written before global ordinals already stored requests in queue order.
+      // Producer-local sequences cannot order first requests from different producers.
+      ordinal: typeof candidate.ordinal === "number" ? candidate.ordinal : requests.length + 1,
+      ...(candidate.ordinal === undefined ? { legacyOrdinal: true } : {}),
       revision: typeof candidate.revision === "number" ? candidate.revision : 0,
       ...(typeof candidate.dedupeKey === "string" ? { dedupeKey: candidate.dedupeKey } : {}),
       message: cloneMessage(candidate.message),
@@ -124,7 +136,15 @@ export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot 
       status: candidate.status as PersistedContinuationRequest["status"],
     });
   }
-  return { version: 1, producerSequences, requests };
+  const persistedOrdinal = Number.isSafeInteger(value.nextOrdinal)
+    ? (value.nextOrdinal as number)
+    : 0;
+  return {
+    version: 1,
+    producerSequences,
+    nextOrdinal: Math.max(persistedOrdinal, ...requests.map((request) => request.ordinal), 0),
+    requests,
+  };
 }
 
 /** Stable, human-readable producer ID for packages that do not already have one. */
@@ -209,6 +229,7 @@ function isDescendant(
 export class ContinuationCoordinator {
   private requests: PersistedContinuationRequest[] = [];
   private sequences: Record<string, number> = {};
+  private nextOrdinal = 0;
   private sessionId: string | undefined;
   private branchIds = new Set<string>();
   private originEntryId: string | null = null;
@@ -228,15 +249,26 @@ export class ContinuationCoordinator {
     this.setBranch(branch);
 
     // Merge snapshots in append order. Divergent branches may each own pending work.
-    const merged = new Map<string, PersistedContinuationRequest>();
-    for (const entry of entries) {
-      if (entry.type !== "custom" || entry.customType !== CONTINUATION_STATE_ENTRY) continue;
+    const parsedSnapshots = entries.flatMap((entry) => {
+      if (entry.type !== "custom" || entry.customType !== CONTINUATION_STATE_ENTRY) return [];
       const parsed = parseContinuationSnapshot(entry.data);
-      if (!parsed) continue;
+      return parsed ? [parsed] : [];
+    });
+    this.nextOrdinal = Math.max(0, ...parsedSnapshots.map((snapshot) => snapshot.nextOrdinal));
+    let legacyNextOrdinal = this.nextOrdinal;
+    const legacyOrdinals = new Map<string, number>();
+    const merged = new Map<string, PersistedContinuationRequest>();
+    for (const parsed of parsedSnapshots) {
       for (const [producer, sequence] of Object.entries(parsed.producerSequences))
         this.sequences[producer] = Math.max(this.sequences[producer] ?? 0, sequence);
       for (const request of parsed.requests) {
         if (request.sessionId !== sessionId) continue;
+        if (request.legacyOrdinal) {
+          const ordinal = legacyOrdinals.get(request.requestId) ?? ++legacyNextOrdinal;
+          legacyOrdinals.set(request.requestId, ordinal);
+          request.ordinal = ordinal;
+          delete request.legacyOrdinal;
+        }
         this.sequences[request.producerId] = Math.max(
           this.sequences[request.producerId] ?? 0,
           request.sequence,
@@ -246,9 +278,10 @@ export class ContinuationCoordinator {
           merged.set(request.requestId, { ...request, message: cloneMessage(request.message) });
       }
     }
+    this.nextOrdinal = Math.max(this.nextOrdinal, legacyNextOrdinal);
     this.requests = [...merged.values()].sort(
       (left, right) =>
-        left.sequence - right.sequence || left.requestId.localeCompare(right.requestId),
+        left.ordinal - right.ordinal || left.requestId.localeCompare(right.requestId),
     );
 
     const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
@@ -318,17 +351,39 @@ export class ContinuationCoordinator {
     this.originEntryId = branch.at(-1)?.id ?? null;
   }
 
+  /** Refresh branch identity and correlate the actual in-flight custom message. */
+  observeBranch(entries: SessionEntry[], branch: SessionEntry[]): void {
+    this.setBranch(branch);
+    if (!this.inFlight) return;
+    const request = this.requests.find((candidate) => candidate.requestId === this.inFlight);
+    if (request?.status !== "dispatched") return;
+    const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+    const delivery = entries.find((entry) => {
+      const details = deliveredContinuationDetails(entry);
+      return (
+        details?.requestId === request.requestId &&
+        details.producerId === request.producerId &&
+        (request.originEntryId === null ||
+          isDescendant(entriesById, entry.id, request.originEntryId))
+      );
+    });
+    if (!delivery || request.deliveryEntryId === delivery.id) return;
+    request.deliveryEntryId = delivery.id;
+    request.revision += 1;
+    this.persist();
+  }
+
   setIdle(idle: boolean): void {
     this.idle = idle;
     if (idle) this.dispatch();
   }
 
-  setGate(gateId: string, active: boolean): void {
+  setGate(gateId: string, active: boolean, pump = true): void {
     if (!gateId) return;
     if (active) this.gates.add(gateId);
     else this.gates.delete(gateId);
     this.publish();
-    if (!active) this.dispatch();
+    if (!active && pump) this.dispatch();
   }
 
   enqueue(event: ContinuationEnqueueEvent): {
@@ -342,16 +397,21 @@ export class ContinuationCoordinator {
       return { accepted: false, reason: "invalid continuation request" };
     if (event.sessionId && event.sessionId !== this.sessionId)
       return { accepted: false, reason: "session mismatch" };
-    const originEntryId =
-      event.originEntryId === undefined ? this.originEntryId : event.originEntryId;
-    if (originEntryId !== null && !this.branchIds.has(originEntryId))
-      return { accepted: false, reason: "origin is not on the active branch" };
-
     const explicitId = event.requestId?.trim();
     if (event.requestId !== undefined && !explicitId)
       return { accepted: false, reason: "invalid request ID" };
+    const byExplicitId = explicitId
+      ? this.requests.find((request) => request.requestId === explicitId)
+      : undefined;
+    const originEntryId =
+      event.originEntryId === undefined
+        ? (byExplicitId?.originEntryId ?? this.originEntryId)
+        : event.originEntryId;
+    if (originEntryId !== null && !this.branchIds.has(originEntryId))
+      return { accepted: false, reason: "origin is not on the active branch" };
+
     if (explicitId) {
-      const byId = this.requests.find((request) => request.requestId === explicitId);
+      const byId = byExplicitId;
       if (byId) {
         const matches =
           byId.producerId === producerId &&
@@ -377,11 +437,13 @@ export class ContinuationCoordinator {
 
     const sequence = (this.sequences[producerId] ?? 0) + 1;
     this.sequences[producerId] = sequence;
+    const ordinal = ++this.nextOrdinal;
     const request: PersistedContinuationRequest = {
       version: 1,
       requestId: explicitId ?? `${producerId}:${sequence}`,
       producerId,
       sequence,
+      ordinal,
       revision: 1,
       ...(event.dedupeKey !== undefined ? { dedupeKey: event.dedupeKey } : {}),
       message: cloneMessage(event.message),
@@ -397,7 +459,7 @@ export class ContinuationCoordinator {
   }
 
   cancel(producerId: string, requestId?: string): void {
-    let changed = false;
+    const receipts: ContinuationReceiptEvent[] = [];
     for (const request of this.requests) {
       if (
         request.producerId !== producerId ||
@@ -408,10 +470,10 @@ export class ContinuationCoordinator {
         continue;
       request.status = "cancelled";
       request.revision += 1;
-      changed = true;
-      this.host.receipt(this.receiptFor(request, "cancelled"));
+      receipts.push(this.receiptFor(request, "cancelled"));
     }
-    if (changed) this.persist();
+    if (receipts.length > 0) this.persist();
+    for (const receipt of receipts) this.host.receipt(receipt);
     this.publish();
     this.dispatch();
   }
@@ -431,6 +493,13 @@ export class ContinuationCoordinator {
       return;
     }
     if (request?.status !== "dispatched") return;
+    if (!request.deliveryEntryId) {
+      // The custom message must be visible in the branch before its run can
+      // produce a correlated receipt. Keep the claim fail-closed otherwise.
+      this.inFlight = request.requestId;
+      this.inFlightStarted = true;
+      return;
+    }
     request.status = "settled";
     if (settledEntryId) request.settledEntryId = settledEntryId;
     request.revision += 1;
@@ -470,6 +539,7 @@ export class ContinuationCoordinator {
     this.gates.clear();
     this.requests = [];
     this.sequences = {};
+    this.nextOrdinal = 0;
   }
 
   private isOriginActive(request: PersistedContinuationRequest): boolean {
@@ -492,7 +562,14 @@ export class ContinuationCoordinator {
   }
 
   private dispatch(): void {
-    if (!this.active || !this.sessionId || !this.idle || this.inFlight || this.gates.size > 0)
+    if (
+      !this.active ||
+      !this.sessionId ||
+      !this.idle ||
+      this.inFlight ||
+      this.gates.size > 0 ||
+      this.host.canDispatch?.() === false
+    )
       return;
     const request = this.requests.find(
       (candidate) => candidate.status === "queued" && this.isOriginActive(candidate),
@@ -529,6 +606,7 @@ export class ContinuationCoordinator {
     return {
       version: 1,
       producerSequences: { ...this.sequences },
+      nextOrdinal: this.nextOrdinal,
       requests: this.requests.map((request) => ({
         ...request,
         message: cloneMessage(request.message),

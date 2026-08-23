@@ -8,6 +8,7 @@ describe("subagents extension registration", () => {
     let wrapRenderer:
       | ((entry: { data?: unknown }, options: unknown, theme: Theme) => Component)
       | undefined;
+    const messageTypes: string[] = [];
     const pi = {
       events: {
         on: vi.fn(() => () => {}),
@@ -16,7 +17,9 @@ describe("subagents extension registration", () => {
       on: vi.fn(),
       registerTool: vi.fn(),
       registerCommand: vi.fn(),
-      registerMessageRenderer: vi.fn(),
+      registerMessageRenderer(type: string) {
+        messageTypes.push(type);
+      },
       registerEntryRenderer(
         type: string,
         renderer: (entry: { data?: unknown }, options: unknown, theme: Theme) => Component,
@@ -28,6 +31,7 @@ describe("subagents extension registration", () => {
     subagentsExtension(pi);
 
     expect(wrapRenderer).toBeTypeOf("function");
+    expect(messageTypes).toEqual(["subagent-completion-v2", "subagent-completion-v3"]);
     const theme = {
       fg: (_color: string, text: string) => text,
       bg: (_color: string, text: string) => text,

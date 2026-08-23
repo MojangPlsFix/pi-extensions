@@ -237,6 +237,25 @@ describe("NativeBackend", () => {
     await backend.park("run-1");
   });
 
+  it("emits accepted and settled lifecycle for every idle follow-up", async () => {
+    const events: NativeRunEvent[] = [];
+    const backend = new NativeBackend();
+    await backend.start(spec(), (event) => events.push(event));
+    fakes.resolvePrompt();
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === "settled")).toHaveLength(1),
+    );
+    fakes.session.isStreaming = false;
+    const followUp = backend.followUp("run-1", "Consume the aggregate.");
+    await vi.waitFor(() =>
+      expect(events.filter((event) => event.type === "accepted")).toHaveLength(2),
+    );
+    fakes.resolvePrompt();
+    await followUp;
+    expect(events.filter((event) => event.type === "settled")).toHaveLength(2);
+    await backend.park("run-1");
+  });
+
   it("disposes an accepted session when its parent cancellation signal fires", async () => {
     const controller = new AbortController();
     const backend = new NativeBackend();

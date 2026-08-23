@@ -7,6 +7,7 @@ import {
   type AgentsOverlayAction,
   AgentsViewer,
   activityViewLines,
+  aggregateCompletionMessageRenderer,
   completionMessageRenderer,
 } from "../renderers.js";
 import { emptyUsage, type RunSnapshot } from "../types.js";
@@ -119,6 +120,8 @@ function run(id: string, parentId?: string): RunSnapshot {
 function snapshot(overrides: Partial<HubSnapshot> = {}): HubSnapshot {
   return {
     runs: [],
+    batches: [],
+    batchCounts: { open: 0, ready: 0, inFlight: 0 },
     requests: [],
     missions: [],
     profiles: BUILTIN_PROFILES.map((profile) => structuredClone(profile)),
@@ -313,6 +316,55 @@ describe("activityViewLines", () => {
 });
 
 describe("completionMessageRenderer", () => {
+  it("renders aggregate batches compactly and complete failure evidence when expanded", () => {
+    const successful = { ...run("successful"), report: "Implemented and validated." };
+    const failed = {
+      ...run("failed"),
+      status: "failed" as const,
+      error: "provider disconnected",
+      report: "Partial failure evidence.",
+      terminationReason: {
+        code: "runner_error" as const,
+        at: "2025-01-01T00:01:00.000Z",
+        generation: 1,
+        phase: "execution" as const,
+      },
+    };
+    const details = {
+      schemaVersion: 3,
+      batch: {
+        id: "batch-render",
+        sequence: 1,
+        members: [
+          { runId: successful.id, generation: 1 },
+          { runId: failed.id, generation: 1 },
+        ],
+        originSessionId: "session",
+        originEntryId: null,
+        dispatchMarkerId: null,
+        route: "pi",
+        codeChanging: true,
+        phase: "ready",
+        results: [],
+        createdAt: "2025-01-01T00:00:00.000Z",
+        updatedAt: "2025-01-01T00:01:00.000Z",
+      },
+      runs: [successful, failed],
+    };
+    const collapsed =
+      aggregateCompletionMessageRenderer(details, false, theme())?.render(180).join("\n") ?? "";
+    expect(collapsed).toContain("Hackler batch · 2 results · 1 failed");
+    expect(collapsed).toContain("Implemented and validated.");
+    expect(collapsed).toContain("runner_error");
+
+    const expanded =
+      aggregateCompletionMessageRenderer(details, true, theme())?.render(180).join("\n") ?? "";
+    expect(expanded).toContain("Failure · runner_error · phase execution");
+    expect(expanded.indexOf("provider disconnected")).toBeLessThan(
+      expanded.indexOf("Partial failure evidence."),
+    );
+  });
+
   it("renders an exact failure reason before an available partial report", () => {
     const component = completionMessageRenderer(
       {

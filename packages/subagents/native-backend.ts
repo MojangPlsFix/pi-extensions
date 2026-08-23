@@ -83,6 +83,7 @@ type LiveNativeRun = {
   report: string;
   accepted: boolean;
   stopping: boolean;
+  listener: NativeRunListener;
   rejectStartup?: (error: Error) => void;
   parking?: Promise<void>;
   aborting?: Promise<void>;
@@ -316,6 +317,7 @@ export class NativeBackend {
         report: "",
         accepted: false,
         stopping: false,
+        listener,
       };
       live.unsubscribe = session.subscribe((event) => this.forward(live, event, listener));
       this.runs.set(spec.id, live);
@@ -413,8 +415,18 @@ export class NativeBackend {
   async followUp(id: string, message: string): Promise<void> {
     const run = this.runs.get(id);
     if (!run) throw new Error(`Native Hackler ${id} is not active.`);
-    if (run.session.isStreaming) await run.session.followUp(message);
-    else await run.session.prompt(message, { source: "rpc" });
+    run.listener({ type: "accepted", sessionFile: run.session.sessionFile });
+    run.prompt = (async () => {
+      if (run.session.isStreaming) await run.session.followUp(message);
+      else await run.session.prompt(message, { source: "rpc" });
+      await run.session.waitForIdle();
+      if (!run.stopping) run.listener({ type: "settled", report: run.report.trim() });
+    })().catch((cause: unknown) => {
+      const error = cause instanceof Error ? cause : new Error(String(cause));
+      if (!run.stopping) run.listener({ type: "error", error });
+      throw error;
+    });
+    await run.prompt;
   }
 
   async abort(id: string): Promise<void> {

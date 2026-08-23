@@ -49,7 +49,6 @@ function restoreWave(branch: SessionEntry[]): ImplementationWaveState {
 export default function workflowFinalization(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let wave = createImplementationWaveState();
-  let runtimeGeneration = 0;
   let userInteractionDepth = 0;
   let herdrBlockedDepth = 0;
   const finalizationGates = new Set<string>();
@@ -58,6 +57,9 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
   const coordinator = new ContinuationCoordinator({
     persist(snapshot: ContinuationSnapshot) {
       pi.appendEntry(CONTINUATION_STATE_ENTRY, snapshot);
+    },
+    canDispatch() {
+      return context?.isIdle() ?? false;
     },
     send(request: PersistedContinuationRequest) {
       pi.sendMessage(
@@ -73,7 +75,7 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
         },
         { triggerTurn: true },
       );
-      return { entryId: context?.sessionManager.getLeafId() ?? undefined };
+      return undefined;
     },
     receipt(event) {
       pi.events.emit(events.continuationReceipt, event);
@@ -85,22 +87,71 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
 
   const persistWave = (): void => pi.appendEntry(FINALIZATION_STATE_ENTRY, wave);
 
-  const setGate = (gateId: string, active: boolean): void => {
+  function maybeFinalize(ctx: ExtensionContext): void {
+    if (
+      context?.sessionManager.getSessionId() !== ctx.sessionManager.getSessionId() ||
+      !ctx.isIdle() ||
+      !wave.armed ||
+      finalizationGates.size > 0 ||
+      coordinator.hasOpenRequests()
+    )
+      return;
+
+    const branch = ctx.sessionManager.getBranch() as SessionEntry[];
+    coordinator.setBranch(branch);
+    const transition = evaluateImplementationFinalization(
+      wave,
+      assistantResponsesAfterAnchor(branch, wave.anchorEntryId),
+    );
+    if (transition.state !== wave) {
+      wave = transition.state;
+      persistWave();
+    }
+    if (transition.action === "queue-correction") {
+      const expectedWave = wave.wave;
+      pi.events.emit(events.continuationEnqueue, {
+        producerId: FINALIZATION_PRODUCER_ID,
+        dedupeKey: `wave:${expectedWave}:correction`,
+        message: {
+          customType: "implementation-summary-correction",
+          content: IMPLEMENTATION_SUMMARY_CORRECTION,
+          display: true,
+        },
+        respond(result) {
+          if (wave.wave !== expectedWave || !result.requestId) return;
+          if (wave.correctionRequestId === result.requestId) return;
+          wave = { ...wave, correctionRequestId: result.requestId };
+          persistWave();
+        },
+      } satisfies ContinuationEnqueueEvent);
+    } else if (transition.action === "warn" && ctx.hasUI) {
+      ctx.ui.notify(
+        `Implementation summary is still invalid after one correction (${transition.errors?.join("; ") ?? "unknown error"}).`,
+        "warning",
+      );
+    }
+  }
+
+  const setGate = (gateId: string, active: boolean, pump = true, evaluate = true): void => {
     if (active) finalizationGates.add(gateId);
     else finalizationGates.delete(gateId);
-    coordinator.setGate(gateId, active);
+    coordinator.setGate(gateId, active, pump);
+    if (!active && evaluate && finalizationGates.size === 0 && context) maybeFinalize(context);
   };
 
   const arm = (reason: string, anchorEntryId?: string): void => {
     if (!context) return;
     const branch = context.sessionManager.getBranch() as SessionEntry[];
-    const anchor = anchorEntryId ?? branch.at(-1)?.id ?? null;
+    const requestedAnchor =
+      typeof anchorEntryId === "string" && branch.some((entry) => entry.id === anchorEntryId)
+        ? anchorEntryId
+        : undefined;
+    const anchor = requestedAnchor ?? branch.at(-1)?.id ?? null;
     wave = advanceImplementationWave(wave, anchor, reason);
     persistWave();
   };
 
   const reload = (ctx: ExtensionContext): void => {
-    runtimeGeneration += 1;
     context = ctx;
     const branch = ctx.sessionManager.getBranch() as SessionEntry[];
     wave = restoreWave(branch);
@@ -122,6 +173,7 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
       event?.respond?.({ accepted: false, reason: "invalid continuation request" });
       return;
     }
+    if (context) coordinator.setBranch(context.sessionManager.getBranch() as SessionEntry[]);
     const result = coordinator.enqueue(event as ContinuationEnqueueEvent);
     event.respond?.(result);
   });
@@ -140,7 +192,14 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
 
   pi.events.on(events.compactionGate, (value: unknown) => {
     const event = value as Partial<CompactionGateEvent> | undefined;
-    if (typeof event?.active === "boolean") setGate("compaction:external", event.active);
+    if (typeof event?.active !== "boolean") return;
+    const operationId =
+      typeof event.operationId === "string" && event.operationId ? event.operationId : "legacy";
+    const resume = !event.active && event.resume === true;
+    // Failure callbacks close gates without re-entering Pi. Successful lifecycle
+    // boundaries set resume so the final close can pump and evaluate once.
+    setGate(`compaction:external:${operationId}`, event.active, false, false);
+    if (!event.active) setGate("compaction:native", false, resume, resume);
   });
 
   pi.events.on(events.userInteraction, (value: unknown) => {
@@ -178,14 +237,17 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
   pi.events.on(events.implementationWaveAdvance, (value: unknown) => {
     const event = value as Partial<ImplementationWaveAdvanceEvent> | undefined;
     if (typeof event?.producerId !== "string" || typeof event.reason !== "string") return;
-    arm(`${event.producerId}: ${event.reason}`, event.branchEntryId);
+    if (event.requiresArmed === true && !wave.armed) return;
+    arm(
+      `${event.producerId}: ${event.reason}`,
+      typeof event.branchEntryId === "string" ? event.branchEntryId : undefined,
+    );
   });
 
   pi.on("session_start", (_event, ctx) => reload(ctx));
   pi.on("session_tree", (_event, ctx) => reload(ctx));
 
   pi.on("session_shutdown", () => {
-    runtimeGeneration += 1;
     context = undefined;
     userInteractionDepth = 0;
     herdrBlockedDepth = 0;
@@ -196,13 +258,17 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
   });
 
   pi.on("session_before_compact", () => {
-    setGate("compaction:native", true);
+    setGate("compaction:native", true, true, false);
   });
-  pi.on("session_compact", () => {
-    setGate("compaction:native", false);
+  pi.on("session_compact", (_event, ctx) => {
+    context = ctx;
+    setGate("compaction:native", false, false, false);
+    coordinator.setIdle(ctx.isIdle());
+    maybeFinalize(ctx);
   });
 
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
+    context = ctx;
     coordinator.setIdle(false);
     coordinator.agentStarted();
   });
@@ -219,48 +285,11 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
 
   pi.on("agent_settled", (_event, ctx) => {
     context = ctx;
-    const generation = runtimeGeneration;
-    coordinator.setIdle(true);
+    const branch = ctx.sessionManager.getBranch() as SessionEntry[];
+    coordinator.observeBranch(ctx.sessionManager.getEntries() as SessionEntry[], branch);
+    // Close the flight that just settled before another queued request can start.
     coordinator.agentSettled(ctx.sessionManager.getLeafId() ?? undefined);
-    if (
-      generation !== runtimeGeneration ||
-      !wave.armed ||
-      finalizationGates.size > 0 ||
-      coordinator.hasOpenRequests()
-    )
-      return;
-
-    const responses = assistantResponsesAfterAnchor(
-      ctx.sessionManager.getBranch() as SessionEntry[],
-      wave.anchorEntryId,
-    );
-    const transition = evaluateImplementationFinalization(wave, responses);
-    if (transition.state !== wave) {
-      wave = transition.state;
-      persistWave();
-    }
-    if (transition.action === "queue-correction") {
-      const expectedWave = wave.wave;
-      pi.events.emit(events.continuationEnqueue, {
-        producerId: FINALIZATION_PRODUCER_ID,
-        dedupeKey: `wave:${expectedWave}:correction`,
-        message: {
-          customType: "implementation-summary-correction",
-          content: IMPLEMENTATION_SUMMARY_CORRECTION,
-          display: true,
-        },
-        respond(result) {
-          if (wave.wave !== expectedWave || !result.requestId) return;
-          if (wave.correctionRequestId === result.requestId) return;
-          wave = { ...wave, correctionRequestId: result.requestId };
-          persistWave();
-        },
-      } satisfies ContinuationEnqueueEvent);
-    } else if (transition.action === "warn" && ctx.hasUI) {
-      ctx.ui.notify(
-        `Implementation summary is still invalid after one correction (${transition.errors?.join("; ") ?? "unknown error"}).`,
-        "warning",
-      );
-    }
+    coordinator.setIdle(ctx.isIdle());
+    maybeFinalize(ctx);
   });
 }

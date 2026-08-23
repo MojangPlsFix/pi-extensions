@@ -14,11 +14,20 @@ import {
   type TUI,
 } from "@earendil-works/pi-tui";
 import {
+  type ContinuationEnqueueEvent,
+  type ContinuationReceiptEvent,
   events,
+  type ImplementationWaveAdvanceEvent,
   type PlanModeEvent,
   type SubagentsStatusEvent,
   withBlockingUserInteraction,
 } from "../../shared/events.js";
+import { findPersistedContinuationRequest } from "../workflow-finalization/coordinator.js";
+import {
+  advanceImplementationWave,
+  createImplementationWaveState,
+  FINALIZATION_STATE_ENTRY,
+} from "../workflow-finalization/finalization.js";
 import { bashBlockReason, configureBashPolicy } from "./bash-policy.js";
 import { type LoadedPlanModeConfig, loadPlanModeConfig, updatePlanModeConfig } from "./config.js";
 import { PlanModeEditor } from "./editor.js";
@@ -29,6 +38,7 @@ import {
   planModeToolBlockReason,
 } from "./policy.js";
 import { appendPlanModePrompt } from "./prompt.js";
+import { evaluatePlanRevision, revisionAssistantText } from "./revision.js";
 import {
   createDefaultPlanModeState,
   PLAN_MODE_STATE_ENTRY,
@@ -43,6 +53,13 @@ const implementationMessage = "Implement the approved plan.";
 const freshImplementationPrefix =
   "A previous agent produced the plan below for the user's task. Implement it in a fresh context. Treat the plan as the source of user intent, re-read files as needed, and complete implementation and verification.";
 const reviewFailedPrefix = "Plan review failed";
+const revisionProducerId = "plan-mode:review-revision:v2";
+const implementationProducerId = "plan-mode:implementation:v2";
+const revisionCorrection = [
+  "Your response to the advisory plan review did not contain one complete final proposal.",
+  "Remain in Plan Mode. Return exactly one non-empty <proposed_plan> block with both tags on standalone lines, even if the reviewed plan needs no changes.",
+  "Do not approve or implement the plan in this turn.",
+].join("\n");
 const rtkProbeTimeoutMs = 2_000;
 
 export class PlanModeBashPolicyError extends Error {
@@ -142,24 +159,7 @@ type MessageEntryLike = {
 };
 
 function assistantText(entry: MessageEntryLike): string | undefined {
-  if (
-    entry.type !== "message" ||
-    entry.message?.role !== "assistant" ||
-    !Array.isArray(entry.message.content)
-  )
-    return undefined;
-  const text = entry.message.content
-    .filter((block): block is { type: "text"; text: string } =>
-      Boolean(
-        block &&
-          typeof block === "object" &&
-          (block as { type?: unknown }).type === "text" &&
-          typeof (block as { text?: unknown }).text === "string",
-      ),
-    )
-    .map((block) => block.text)
-    .join("\n");
-  return text || undefined;
+  return revisionAssistantText(entry);
 }
 
 function unique(names: string[]): string[] {
@@ -175,6 +175,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
   let previousEditorFactory: ReturnType<ExtensionContext["ui"]["getEditorComponent"]> | undefined;
   let editorInstalled = false;
   let activeWriters = 0;
+  const pendingRevisionReceipts = new Map<string, ContinuationReceiptEvent>();
   let loadedConfig: LoadedPlanModeConfig = {
     readOnlyTools: [],
     readOnlyCommands: {},
@@ -357,7 +358,43 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       ...state,
       disabledTools: [...state.disabledTools],
       ...(state.latestPlan ? { latestPlan: { ...state.latestPlan } } : {}),
+      ...(state.lastReview ? { lastReview: { ...state.lastReview } } : {}),
+      ...(state.revisionExpectation
+        ? {
+            revisionExpectation: {
+              ...state.revisionExpectation,
+              reviewedPlan: { ...state.revisionExpectation.reviewedPlan },
+              responseBoundary: { ...state.revisionExpectation.responseBoundary },
+            },
+          }
+        : {}),
     });
+  }
+
+  function enqueueContinuation(event: ContinuationEnqueueEvent): {
+    accepted?: boolean;
+    requestId?: string;
+    reason?: string;
+  } {
+    let response: { accepted: boolean; requestId?: string; reason?: string } | undefined;
+    pi.events.emit(events.continuationEnqueue, {
+      ...event,
+      respond(result) {
+        response = result;
+        event.respond?.(result);
+      },
+    } satisfies ContinuationEnqueueEvent);
+    return response ?? {};
+  }
+
+  function continuationWasAccepted(
+    result: { accepted?: boolean; requestId?: string; reason?: string },
+    requestId: string,
+  ): boolean {
+    return (
+      result.accepted === true ||
+      (result.requestId === requestId && result.reason === "deduplicated")
+    );
   }
 
   function reportFreshImplementationError(
@@ -395,9 +432,62 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     return true;
   }
 
+  function applyPendingRevisionReceipt(ctx: ExtensionContext): void {
+    const expectation = state.revisionExpectation;
+    if (!expectation) {
+      for (const [requestId, receipt] of pendingRevisionReceipts) {
+        if (
+          receipt.sessionId === undefined ||
+          receipt.sessionId === ctx.sessionManager.getSessionId()
+        )
+          pendingRevisionReceipts.delete(requestId);
+      }
+      return;
+    }
+    const receipt = pendingRevisionReceipts.get(expectation.responseBoundary.requestId);
+    if (!receipt) return;
+    if (receipt.sessionId && receipt.sessionId !== ctx.sessionManager.getSessionId()) return;
+    const branchIds = new Set(ctx.sessionManager.getBranch().map((entry) => entry.id));
+    const receiptOrigin = receipt.originEntryId ?? expectation.responseBoundary.originEntryId;
+    if (receiptOrigin !== null && !branchIds.has(receiptOrigin)) return;
+    if (receipt.deliveryEntryId && !branchIds.has(receipt.deliveryEntryId)) return;
+    if (receipt.settledEntryId && !branchIds.has(receipt.settledEntryId)) return;
+    pendingRevisionReceipts.delete(receipt.requestId);
+    state = {
+      ...state,
+      revisionExpectation: {
+        ...expectation,
+        responseBoundary: {
+          ...expectation.responseBoundary,
+          ...(receipt.originEntryId !== undefined ? { originEntryId: receipt.originEntryId } : {}),
+          ...(receipt.deliveryEntryId ? { deliveryEntryId: receipt.deliveryEntryId } : {}),
+          ...(receipt.settledEntryId ? { settledEntryId: receipt.settledEntryId } : {}),
+        },
+      },
+    };
+    persistState();
+  }
+
   function synchronizeState(ctx: ExtensionContext): void {
     restoreTools(state.disabledTools);
-    state = restorePlanModeState(ctx.sessionManager.getBranch());
+    const branch = ctx.sessionManager.getBranch() as Array<{
+      type: string;
+      customType?: string;
+      data?: unknown;
+    }>;
+    state = restorePlanModeState(branch);
+    const newestPersisted = [...branch]
+      .reverse()
+      .find(
+        (entry) =>
+          entry.type === "custom" &&
+          (entry.customType === PLAN_MODE_STATE_ENTRY || entry.customType === "plan-mode-state"),
+      );
+    if (
+      newestPersisted &&
+      (newestPersisted.data as { version?: unknown } | undefined)?.version === 1
+    )
+      persistState();
     if (state.mode === "plan") disableDirectMutators();
     emitMode();
     requestRender();
@@ -456,7 +546,18 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       await ctx.newSession({
         parentSession,
         setup: async (sessionManager) => {
-          sessionManager.appendCustomEntry(PLAN_MODE_STATE_ENTRY, replacementState);
+          const planStateEntryId = sessionManager.appendCustomEntry(
+            PLAN_MODE_STATE_ENTRY,
+            replacementState,
+          );
+          sessionManager.appendCustomEntry(
+            FINALIZATION_STATE_ENTRY,
+            advanceImplementationWave(
+              createImplementationWaveState(),
+              planStateEntryId,
+              "plan-mode: fresh implementation kickoff",
+            ),
+          );
         },
         withSession: async (replacement) => {
           try {
@@ -477,10 +578,48 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     persistState();
   }
 
+  function startCurrentImplementation(sourceEntryId: string, ctx: ExtensionContext): void {
+    consumePlan(sourceEntryId);
+    leave(ctx, false);
+    pi.events.emit(events.implementationWaveAdvance, {
+      producerId: implementationProducerId,
+      reason: `approved Plan Mode proposal ${sourceEntryId}`,
+      branchEntryId: ctx.sessionManager.getBranch().at(-1)?.id,
+    } satisfies ImplementationWaveAdvanceEvent);
+    const requestId = `${implementationProducerId}:${sourceEntryId}`;
+    const result = enqueueContinuation({
+      producerId: implementationProducerId,
+      requestId,
+      dedupeKey: `plan:${sourceEntryId}`,
+      originEntryId: ctx.sessionManager.getLeafId(),
+      message: {
+        customType: "plan-mode-implementation",
+        content: implementationMessage,
+        display: true,
+      },
+    });
+    if (!continuationWasAccepted(result, requestId)) {
+      state = { ...state, implementedPlanSourceEntryId: undefined };
+      enter(ctx);
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          `Could not queue plan implementation: ${result.reason ?? "continuation coordinator is unavailable"}.`,
+          "error",
+        );
+    }
+  }
+
   async function implementPlan(args: string, ctx: ExtensionCommandContext): Promise<void> {
     latestCommandContext = ctx;
     if (!ctx.isIdle()) {
       ctx.ui.notify("Plan implementation is unavailable while the agent is working.", "warning");
+      return;
+    }
+    if (
+      state.revisionExpectation?.phase === "awaiting" ||
+      state.revisionExpectation?.phase === "correction-requested"
+    ) {
+      ctx.ui.notify("Finish the active plan revision before implementation.", "warning");
       return;
     }
     const plan = state.latestPlan?.markdown;
@@ -500,9 +639,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       await startFreshImplementation(plan, ctx);
       return;
     }
-    consumePlan(sourceEntryId);
-    leave(ctx, false);
-    pi.sendUserMessage(implementationMessage);
+    startCurrentImplementation(sourceEntryId, ctx);
   }
 
   pi.registerCommand("plan", {
@@ -560,6 +697,18 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`${reviewFailedPrefix}: no latest plan is available.`, "error");
         return;
       }
+      if (
+        state.revisionExpectation?.phase === "awaiting" ||
+        state.revisionExpectation?.phase === "correction-requested"
+      ) {
+        ctx.ui.notify(
+          `${reviewFailedPrefix}: the current review is still awaiting a complete revised proposal.`,
+          "error",
+        );
+        return;
+      }
+      const previousExpectation = state.revisionExpectation;
+      const expectationGuard = previousExpectation?.reviewContinuationId;
       if (state.implementedPlanSourceEntryId === state.latestPlan.sourceEntryId) {
         ctx.ui.notify(
           `${reviewFailedPrefix}: the latest plan was already consumed; produce a newer plan.`,
@@ -577,14 +726,15 @@ export default function planModeExtension(pi: ExtensionAPI): void {
       }
       const selection = await selectReviewerModel(ctx);
       if (!selection) return;
-      const sourceEntryId = state.latestPlan.sourceEntryId;
+      const reviewedPlan = { ...state.latestPlan };
+      const sourceEntryId = reviewedPlan.sourceEntryId;
       const result = await requestPlanReview(
         [
           "Review this Plan Mode proposal. The report is advisory: never approve or implement it.",
           `Plan source ID: ${sourceEntryId}`,
           "Return findings, risks, omissions, and concrete revisions for the parent.",
           "",
-          state.latestPlan.markdown,
+          reviewedPlan.markdown,
         ].join("\n\n"),
         selection.model,
         selection.thinking,
@@ -597,6 +747,17 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         );
         return;
       }
+      if (
+        state.mode !== "plan" ||
+        state.latestPlan?.sourceEntryId !== sourceEntryId ||
+        state.revisionExpectation?.reviewContinuationId !== expectationGuard
+      ) {
+        ctx.ui.notify(
+          `${reviewFailedPrefix}: plan state changed while the review was running.`,
+          "error",
+        );
+        return;
+      }
       const review = {
         planSourceEntryId: sourceEntryId,
         reviewerId: result.reviewerId,
@@ -605,25 +766,58 @@ export default function planModeExtension(pi: ExtensionAPI): void {
         reviewedAt: new Date().toISOString(),
         report: result.report,
       };
-      state = { ...state, lastReview: review };
+      const responseBoundaryEntryId = ctx.sessionManager.getLeafId();
+      const reviewContinuationId = [
+        revisionProducerId,
+        sourceEntryId,
+        review.reviewerId,
+        responseBoundaryEntryId ?? "root",
+      ].join(":");
+      state = {
+        ...state,
+        lastReview: review,
+        revisionExpectation: {
+          reviewedPlan,
+          phase: "awaiting",
+          retryCount: 0,
+          reviewContinuationId,
+          responseBoundary: {
+            requestId: reviewContinuationId,
+            originEntryId: responseBoundaryEntryId,
+          },
+        },
+      };
+      // The expectation must exist before the coordinator can synchronously dispatch the report.
       persistState();
-      pi.sendMessage(
-        {
+      const queued = enqueueContinuation({
+        producerId: revisionProducerId,
+        requestId: reviewContinuationId,
+        dedupeKey: `review:${reviewContinuationId}`,
+        originEntryId: responseBoundaryEntryId,
+        message: {
           customType: "plan-review",
           content: [
             `Advisory plan review for ${sourceEntryId} using ${result.model} (thinking: ${review.thinking}):`,
             "",
             result.report,
             "",
-            "Plan Mode revision instruction: Treat this report as advisory. Review the findings and revise the proposed plan if needed, then remain in Plan Mode. Do not approve or implement the plan in this turn.",
+            "Plan Mode revision instruction: Treat this report as advisory. Review the findings and return one complete final <proposed_plan> block, even when the plan is unchanged. Remain in Plan Mode. Do not approve or implement the plan in this turn.",
           ].join("\n"),
           display: true,
           details: review,
         },
-        { triggerTurn: true },
-      );
+      });
+      if (!continuationWasAccepted(queued, reviewContinuationId)) {
+        state = { ...state, revisionExpectation: previousExpectation };
+        persistState();
+        ctx.ui.notify(
+          `${reviewFailedPrefix}: ${queued.reason ?? "coordinator rejected the review report"}.`,
+          "error",
+        );
+        return;
+      }
       ctx.ui.notify(
-        "Plan review completed. The report is available for revising the plan; it did not approve implementation.",
+        "Plan review completed. A complete final proposal is now required; the report did not approve implementation.",
         "info",
       );
     },
@@ -786,44 +980,168 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     return { systemPrompt: appendPlanModePrompt(event.systemPrompt) };
   });
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  function reconcileRevisionBoundary(ctx: ExtensionContext): boolean {
+    const expectation = state.revisionExpectation;
+    if (!expectation) return false;
+    const branch = ctx.sessionManager.getBranch();
+    const branchIds = new Set(branch.map((entry) => entry.id));
+    const persisted = findPersistedContinuationRequest(
+      branch as never[],
+      expectation.responseBoundary.requestId,
+    );
+    if (!persisted) return false;
+    const originEntryId =
+      persisted.originEntryId === null || branchIds.has(persisted.originEntryId)
+        ? persisted.originEntryId
+        : expectation.responseBoundary.originEntryId;
+    const deliveryEntryId =
+      persisted.deliveryEntryId && branchIds.has(persisted.deliveryEntryId)
+        ? persisted.deliveryEntryId
+        : undefined;
+    const settledEntryId =
+      persisted.settledEntryId && branchIds.has(persisted.settledEntryId)
+        ? persisted.settledEntryId
+        : undefined;
+    const orphanedSettlement =
+      persisted.status === "settled" && (!deliveryEntryId || !settledEntryId);
+    if (
+      originEntryId === expectation.responseBoundary.originEntryId &&
+      deliveryEntryId === expectation.responseBoundary.deliveryEntryId &&
+      settledEntryId === expectation.responseBoundary.settledEntryId
+    )
+      return orphanedSettlement;
+    state = {
+      ...state,
+      revisionExpectation: {
+        ...expectation,
+        responseBoundary: {
+          requestId: expectation.responseBoundary.requestId,
+          originEntryId,
+          ...(deliveryEntryId ? { deliveryEntryId } : {}),
+          ...(settledEntryId ? { settledEntryId } : {}),
+        },
+      },
+    };
+    persistState();
+    return orphanedSettlement;
+  }
+
+  function queueRevisionCorrection(
+    ctx: ExtensionContext,
+    failure: "missing" | "empty" | "multiple" | "unterminated",
+    lastCheckedAssistantEntryId?: string,
+  ): void {
+    const expectation = state.revisionExpectation;
+    if (expectation?.phase !== "awaiting") return;
+    const requestId = `${expectation.reviewContinuationId}:correction`;
+    const responseBoundaryEntryId = ctx.sessionManager.getLeafId();
+    state = {
+      ...state,
+      revisionExpectation: {
+        ...expectation,
+        phase: "correction-requested",
+        retryCount: 1,
+        correctionContinuationId: requestId,
+        responseBoundary: { requestId, originEntryId: responseBoundaryEntryId },
+        ...(lastCheckedAssistantEntryId ? { lastCheckedAssistantEntryId } : {}),
+        parseFailure: failure,
+      },
+    };
+    // Persist the one allowed retry before it can dispatch.
+    persistState();
+    const queued = enqueueContinuation({
+      producerId: revisionProducerId,
+      requestId,
+      dedupeKey: `correction:${expectation.reviewContinuationId}`,
+      originEntryId: responseBoundaryEntryId,
+      message: {
+        customType: "plan-review-correction",
+        content: revisionCorrection,
+        display: true,
+      },
+    });
+    if (!continuationWasAccepted(queued, requestId)) {
+      state = {
+        ...state,
+        revisionExpectation: {
+          ...state.revisionExpectation!,
+          phase: "warned",
+        },
+      };
+      persistState();
+      if (ctx.hasUI)
+        ctx.ui.notify(
+          `Plan revision correction could not be queued: ${queued.reason ?? "coordinator rejected it"}.`,
+          "warning",
+        );
+    }
+  }
+
+  function evaluateRevisionExpectation(ctx: ExtensionContext): string | undefined {
+    if (!state.revisionExpectation) return undefined;
+    const orphanedSettlement = reconcileRevisionBoundary(ctx);
+    const expectation = state.revisionExpectation;
+    if (!expectation || expectation.phase === "warned") return undefined;
+    const evaluation = orphanedSettlement
+      ? ({ kind: "invalid", failure: "missing", lastCheckedAssistantEntryId: undefined } as const)
+      : evaluatePlanRevision(expectation, ctx.sessionManager.getBranch() as MessageEntryLike[]);
+    if (evaluation.kind === "pending") return undefined;
+    if (evaluation.kind === "valid") {
+      state = {
+        ...state,
+        latestPlan: { markdown: evaluation.plan, sourceEntryId: evaluation.entryId },
+        implementedPlanSourceEntryId: undefined,
+        lastReview: undefined,
+        lastOfferedEntryId: undefined,
+        revisionExpectation: undefined,
+      };
+      persistState();
+      requestRender();
+      return evaluation.entryId;
+    }
+    if (expectation.phase === "awaiting") {
+      queueRevisionCorrection(ctx, evaluation.failure, evaluation.lastCheckedAssistantEntryId);
+      return undefined;
+    }
+    state = {
+      ...state,
+      revisionExpectation: {
+        ...expectation,
+        phase: "warned",
+        ...(evaluation.lastCheckedAssistantEntryId
+          ? { lastCheckedAssistantEntryId: evaluation.lastCheckedAssistantEntryId }
+          : {}),
+        parseFailure: evaluation.failure,
+      },
+    };
+    persistState();
+    if (ctx.hasUI)
+      ctx.ui.notify(
+        `Plan revision is still invalid after one correction (${evaluation.failure}). The previously reviewed plan remains available in Plan Mode.`,
+        "warning",
+      );
+    return undefined;
+  }
+
+  async function offerLatestPlan(ctx: ExtensionContext, sourceEntryId: string): Promise<void> {
     if (
       state.mode !== "plan" ||
       approvalOpen ||
       !ctx.hasUI ||
       !ctx.isIdle() ||
-      ctx.hasPendingMessages()
+      state.lastOfferedEntryId === sourceEntryId ||
+      state.latestPlan?.sourceEntryId !== sourceEntryId
     )
       return;
-    const latest = [...ctx.sessionManager.getBranch()]
-      .reverse()
-      .find((entry) => assistantText(entry as MessageEntryLike)) as MessageEntryLike | undefined;
-    if (!latest || latest.id === state.lastOfferedEntryId) return;
-    const parsed = extractProposedPlan(assistantText(latest) ?? "");
-    if (!parsed.plan) {
-      if (parsed.error)
-        ctx.ui.notify(`Invalid <proposed_plan> response: ${parsed.error}.`, "warning");
-      return;
-    }
-    state = {
-      ...state,
-      latestPlan: { markdown: parsed.plan, sourceEntryId: latest.id },
-      implementedPlanSourceEntryId: undefined,
-      lastReview: undefined,
-      lastOfferedEntryId: latest.id,
-    };
+    state = { ...state, lastOfferedEntryId: sourceEntryId };
     persistState();
-    requestRender();
-
     approvalOpen = true;
     try {
       const choice = await waitForUser("Plan Mode proposal approval", () =>
         ctx.ui.select("Implement this plan?", [implementCurrent, implementFresh, stayInPlanMode]),
       );
       if (choice === implementCurrent) {
-        consumePlan(latest.id);
-        leave(ctx, false);
-        pi.sendUserMessage(implementationMessage, { deliverAs: "followUp" });
+        startCurrentImplementation(sourceEntryId, ctx);
       } else if (choice === implementFresh) {
         const plan = state.latestPlan?.markdown;
         if (!latestCommandContext || !plan) {
@@ -847,6 +1165,49 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     } finally {
       approvalOpen = false;
     }
+  }
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    applyPendingRevisionReceipt(ctx);
+    if (state.mode !== "plan" || approvalOpen || !ctx.isIdle()) return;
+    const revisedSourceEntryId = evaluateRevisionExpectation(ctx);
+    if (revisedSourceEntryId) {
+      await offerLatestPlan(ctx, revisedSourceEntryId);
+      return;
+    }
+    if (state.revisionExpectation && state.revisionExpectation.phase !== "warned") return;
+
+    const latest = [...ctx.sessionManager.getBranch()]
+      .reverse()
+      .find((entry) => assistantText(entry as MessageEntryLike)) as MessageEntryLike | undefined;
+    if (!latest || latest.id === state.lastOfferedEntryId) return;
+    const parsed = extractProposedPlan(assistantText(latest) ?? "");
+    if (!parsed.plan) {
+      if (parsed.error && ctx.hasUI)
+        ctx.ui.notify(`Invalid <proposed_plan> response: ${parsed.error}.`, "warning");
+      return;
+    }
+    state = {
+      ...state,
+      latestPlan: { markdown: parsed.plan, sourceEntryId: latest.id },
+      implementedPlanSourceEntryId: undefined,
+      lastReview: undefined,
+      revisionExpectation: undefined,
+    };
+    persistState();
+    requestRender();
+    await offerLatestPlan(ctx, latest.id);
+  });
+
+  pi.events.on(events.continuationReceipt, (data: unknown) => {
+    const receipt = data as Partial<ContinuationReceiptEvent> | undefined;
+    if (
+      receipt?.status !== "settled" ||
+      receipt.producerId !== revisionProducerId ||
+      typeof receipt.requestId !== "string"
+    )
+      return;
+    pendingRevisionReceipts.set(receipt.requestId, receipt as ContinuationReceiptEvent);
   });
 
   pi.events.on(events.subagentsStatus, (data: unknown) => {
@@ -854,16 +1215,26 @@ export default function planModeExtension(pi: ExtensionAPI): void {
     activeWriters = typeof status?.writers === "number" ? status.writers : 0;
   });
 
+  async function reconcileRestoredRevision(ctx: ExtensionContext): Promise<void> {
+    applyPendingRevisionReceipt(ctx);
+    if (state.mode !== "plan" || approvalOpen || !ctx.isIdle()) return;
+    const revisedSourceEntryId = evaluateRevisionExpectation(ctx);
+    if (revisedSourceEntryId) await offerLatestPlan(ctx, revisedSourceEntryId);
+  }
+
   pi.on("session_start", async (_event, ctx) => {
     await reloadPolicy(ctx);
     synchronizeState(ctx);
     installEditorIndicator(ctx);
+    await reconcileRestoredRevision(ctx);
   });
   pi.on("session_tree", async (_event, ctx) => {
     await reloadPolicy(ctx);
     synchronizeState(ctx);
+    await reconcileRestoredRevision(ctx);
   });
   pi.on("session_shutdown", (_event, ctx) => {
+    pendingRevisionReceipts.clear();
     restoreTools(state.disabledTools);
     if (editorInstalled && ctx.mode === "tui") ctx.ui.setEditorComponent(previousEditorFactory);
     activeTui = undefined;

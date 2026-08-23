@@ -71,6 +71,9 @@ import {
 import {
   type AgentDefinition,
   capabilityPolicySnapshot,
+  type DispatchBatch,
+  type DispatchBatchCounts,
+  type DispatchBatchResult,
   type EffectiveRunLimits,
   emptyUsage,
   type ProfileClass,
@@ -121,6 +124,8 @@ export type MissionSnapshot = Omit<MissionRecord, "candidate"> & {
 
 export type HubSnapshot = {
   runs: RunSnapshot[];
+  batches: DispatchBatch[];
+  batchCounts: DispatchBatchCounts;
   requests: SupervisorRequest[];
   missions: MissionSnapshot[];
   profiles: AgentDefinition[];
@@ -150,6 +155,8 @@ type DispatchOptions = {
   missionId?: string;
   cwd?: string;
   modelOverride?: ModelSelection;
+  toolCallId?: string;
+  route?: DispatchBatch["route"];
 };
 
 type PreparedRun = {
@@ -169,11 +176,15 @@ const WRITE_CLASSES = new Set<ProfileClass>(["write"]);
 const ASSISTANT_WRITING_ACTIVITY = "writing response";
 const DEFAULT_COLLECT_TIMEOUT_SECONDS = 60;
 const WRAP_ENTRY_TYPE = "subagent-wrap-v1";
+const DISPATCH_MARKER_ENTRY_TYPE = "subagent-dispatch-marker-v1";
+const COMPLETION_MESSAGE_TYPE = "subagent-completion-v3";
+const COMPLETION_PRODUCER_ID = "hackler-batches-v3";
 
 type LeaseRuntime = {
   generation: number;
   controller: AbortController;
   phase: "active" | "completing" | "terminalizing" | "closed";
+  idle: boolean;
   wrapTimer?: ReturnType<typeof setTimeout>;
   deadlineTimer?: ReturnType<typeof setTimeout>;
   completion?: Promise<void>;
@@ -241,6 +252,15 @@ function usageDelta(current: Usage, accounted: Usage | undefined): Usage {
     total: Math.max(0, current.total - previous.total),
     cost: Math.max(0, current.cost - previous.cost),
   };
+}
+
+function stableId(source: string): string {
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
 }
 
 function parentSessionId(ctx: ExtensionContext): string {
@@ -365,6 +385,13 @@ export class SubagentManager {
   private readonly discoverProfiles: typeof discoverAgents;
   private readonly sessionRoot: string;
   private readonly missions = new Map<string, MissionRecord>();
+  private readonly batches = new Map<string, DispatchBatch>();
+  private batchSequence = 0;
+  private readonly batchRoutes = new Map<string, Promise<void>>();
+  private readonly pendingContinuationReceipts = new Map<
+    string,
+    { status: "settled" | "cancelled" }
+  >();
   private readonly missionFinalizers = new Map<string, Promise<void>>();
   private readonly requestResponses = new Map<
     string,
@@ -390,6 +417,7 @@ export class SubagentManager {
   private persistTimer?: ReturnType<typeof setTimeout>;
   private readonly unsubscribePlanMode: () => void;
   private readonly unsubscribePlanReview: () => void;
+  private readonly unsubscribeContinuationReceipt: () => void;
 
   constructor(
     private readonly pi: ExtensionAPI,
@@ -430,6 +458,17 @@ export class SubagentManager {
         );
     });
     this.unsubscribePlanReview = typeof review === "function" ? review : () => {};
+    const receipt = pi.events.on(events.continuationReceipt, (value: unknown) => {
+      const event = value as {
+        producerId?: string;
+        requestId?: string;
+        status?: "settled" | "cancelled";
+      };
+      if (event.producerId !== COMPLETION_PRODUCER_ID || !event.requestId || !event.status) return;
+      this.pendingContinuationReceipts.set(event.requestId, { status: event.status });
+      this.applyContinuationReceipt(event.requestId);
+    });
+    this.unsubscribeContinuationReceipt = typeof receipt === "function" ? receipt : () => {};
     this.store.subscribe(() => this.publish());
     this.inbox.subscribe(() => this.publish());
   }
@@ -446,6 +485,20 @@ export class SubagentManager {
     const config = await this.refreshProfiles(ctx);
     if (parentChanged) await this.restore(parent);
     await this.pruneRetention(config);
+    this.reconcileBranch(ctx);
+  }
+
+  reconcileBranch(ctx: ExtensionContext): void {
+    this.ctx = ctx;
+    for (const batch of this.batches.values()) {
+      if (batch.route !== "pi") continue;
+      const active = this.isActiveTopLevelBatch(batch);
+      this.emitBatchGate(
+        batch,
+        active && ["collecting", "ready", "in-flight"].includes(batch.phase),
+      );
+      if (active && batch.phase === "ready") void this.routeBatch(batch);
+    }
     this.publish();
   }
 
@@ -523,10 +576,47 @@ export class SubagentManager {
     });
   }
 
+  private activeBranchIds(): Set<string> {
+    const manager = this.ctx?.sessionManager as
+      | { getBranch?: () => Array<{ id?: string }> }
+      | undefined;
+    return new Set(
+      (manager?.getBranch?.() ?? [])
+        .map((entry) => entry.id)
+        .filter((id): id is string => typeof id === "string"),
+    );
+  }
+
+  private isActiveTopLevelBatch(batch: DispatchBatch): boolean {
+    if (batch.route !== "pi") return false;
+    if (this.ctx && batch.originSessionId !== parentSessionId(this.ctx)) return false;
+    if (batch.originEntryId === null) return true;
+    const branch = this.activeBranchIds();
+    return branch.size === 0 || branch.has(batch.originEntryId);
+  }
+
+  private batchCounts(): DispatchBatchCounts {
+    const active = [...this.batches.values()].filter((batch) => this.isActiveTopLevelBatch(batch));
+    return {
+      open: active.filter((batch) => ["collecting", "ready", "in-flight"].includes(batch.phase))
+        .length,
+      ready: active.filter((batch) => batch.phase === "ready").length,
+      inFlight: active.filter((batch) => batch.phase === "in-flight").length,
+    };
+  }
+
+  batchSnapshots(): DispatchBatch[] {
+    return [...this.batches.values()]
+      .sort((left, right) => left.sequence - right.sequence)
+      .map((batch) => structuredClone(batch));
+  }
+
   hubSnapshot(): HubSnapshot {
     const summary = this.store.summary();
     return {
       runs: this.snapshots(),
+      batches: this.batchSnapshots(),
+      batchCounts: this.batchCounts(),
       requests: this.inbox.all(),
       missions: this.missionSnapshots(),
       profiles: this.profiles.map(profileClone),
@@ -642,6 +732,7 @@ export class SubagentManager {
     this.pi.events.emit(events.subagentsStatus, {
       ...summary,
       capacity: snapshot.capacity,
+      batches: snapshot.batchCounts,
       blockingRequestCount: blockingRequests.length,
       ...(oldestBlockingRequest
         ? {
@@ -668,6 +759,43 @@ export class SubagentManager {
                     : 5;
         return priority(left) - priority(right);
       }),
+    });
+    const activeWriterRunIds = new Set(
+      snapshot.batches
+        .filter(
+          (batch) =>
+            batch.codeChanging &&
+            ["collecting", "ready", "in-flight"].includes(batch.phase) &&
+            (batch.route !== "pi" || this.isActiveTopLevelBatch(batch)),
+        )
+        .flatMap((batch) => batch.members.map((member) => member.runId)),
+    );
+    this.pi.events.emit(events.hacklerActivity, {
+      active: summary.active,
+      writers: snapshot.runs.filter(
+        (run) =>
+          activeWriterRunIds.has(run.id) &&
+          ["write", "orchestrator"].includes(run.profileClass ?? "") &&
+          ACTIVE_STATUSES.has(run.status),
+      ).length,
+      integrating:
+        snapshot.batches.filter(
+          (batch) =>
+            batch.codeChanging &&
+            batch.phase === "in-flight" &&
+            (batch.route !== "pi" || this.isActiveTopLevelBatch(batch)),
+        ).length +
+        snapshot.requests.filter(
+          (request) => request.kind === "integration-ready" && request.status === "pending",
+        ).length,
+      relevantBatchIds: snapshot.batches
+        .filter(
+          (batch) =>
+            batch.codeChanging &&
+            ["collecting", "ready", "in-flight"].includes(batch.phase) &&
+            (batch.route !== "pi" || this.isActiveTopLevelBatch(batch)),
+        )
+        .map((batch) => batch.id),
     });
     this.pi.events.emit(events.subagentsHub, snapshot);
     for (const listener of this.hubListeners) listener(snapshot);
@@ -777,6 +905,10 @@ export class SubagentManager {
     this.inbox.reset();
     this.claims.clear();
     this.missions.clear();
+    this.batches.clear();
+    this.batchRoutes.clear();
+    this.pendingContinuationReceipts.clear();
+    this.batchSequence = 0;
     this.leaseRuntimes.clear();
     this.parentWrapNotices.length = 0;
   }
@@ -883,6 +1015,436 @@ export class SubagentManager {
     await this.refreshProfiles(ctx);
     this.publish();
     return path;
+  }
+
+  private batchForMember(runId: string, generation: number): DispatchBatch | undefined {
+    return [...this.batches.values()].find((batch) =>
+      batch.members.some((member) => member.runId === runId && member.generation === generation),
+    );
+  }
+
+  private batchContent(batch: DispatchBatch): string {
+    const results = batch.members
+      .map((member) =>
+        batch.results.find(
+          (result) => result.runId === member.runId && result.generation === member.generation,
+        ),
+      )
+      .filter((result): result is DispatchBatchResult => Boolean(result));
+    return [
+      `Hackler batch ${batch.id} · ${results.length} result${results.length === 1 ? "" : "s"}`,
+      ...results.map((result) => {
+        const run = result.snapshot;
+        const label = run?.name ?? result.runId;
+        const reason = result.terminationReason?.code ?? "legacy_unknown";
+        const evidence =
+          result.status === "failed"
+            ? `Failure reason: ${reason}${result.error ? ` · ${result.error}` : ""}${result.report ? `\n\nPartial report:\n${result.report}` : ""}`
+            : result.status === "stopped"
+              ? `Stop reason: ${reason}${result.error ? ` · ${result.error}` : ""}${result.report ? `\n\nPartial report:\n${result.report}` : ""}`
+              : result.report || result.error || "(no report)";
+        const cleanup = result.cleanupFailure
+          ? `\n\nCleanup retained: ${result.cleanupFailure.message}`
+          : "";
+        return `\n## ${label} · ${result.status}\n${evidence}${cleanup}`;
+      }),
+    ].join("\n");
+  }
+
+  private emitBatchGate(
+    batch: DispatchBatch,
+    active: boolean,
+    phase?: "dispatch" | "running" | "review" | "integration",
+  ): void {
+    const branchActive = batch.route !== "pi" || this.isActiveTopLevelBatch(batch);
+    this.pi.events.emit(events.hacklerBatchGate, {
+      batchId: batch.id,
+      active: active && branchActive,
+      relevant: batch.codeChanging || batch.reviewing === true,
+      phase:
+        phase ??
+        (batch.phase === "collecting" ? "running" : batch.codeChanging ? "integration" : "review"),
+    });
+  }
+
+  private registerBatch(
+    members: Array<{ runId: string; generation: number }>,
+    prepared: PreparedRun[],
+    ctx: ExtensionContext,
+    options: DispatchOptions,
+  ): DispatchBatch {
+    const route =
+      options.route ??
+      (options.parentId
+        ? "owner"
+        : prepared.every((item) => item.profile.hidden)
+          ? "silent"
+          : "pi");
+    const sessionId = parentSessionId(ctx);
+    const identity = options.toolCallId
+      ? `${sessionId}\u0000${options.parentId ?? "pi"}\u0000${options.toolCallId}`
+      : `${sessionId}\u0000${options.parentId ?? "pi"}\u0000dispatch-${this.batchSequence + 1}`;
+    const id = `batch-${stableId(identity)}`;
+    const existing = this.batches.get(id);
+    if (existing) throw new Error(`Hackler dispatch batch ${id} is already registered.`);
+    const appendEntry = (
+      this.pi as ExtensionAPI & { appendEntry?: (customType: string, data: unknown) => void }
+    ).appendEntry;
+    appendEntry?.(DISPATCH_MARKER_ENTRY_TYPE, {
+      schemaVersion: 1,
+      batchId: id,
+      sessionId,
+      toolCallId: options.toolCallId,
+      ownerRunId: options.parentId,
+      members,
+    });
+    const sessionManager = ctx.sessionManager as typeof ctx.sessionManager & {
+      getLeafId?: () => string | undefined;
+    };
+    const marker = sessionManager.getLeafId?.() ?? null;
+    const now = iso();
+    const batch: DispatchBatch = {
+      id,
+      sequence: ++this.batchSequence,
+      members: members.map((member) => ({ ...member })),
+      originSessionId: sessionId,
+      originEntryId: marker,
+      dispatchMarkerId: marker,
+      route,
+      ...(options.parentId ? { ownerRunId: options.parentId } : {}),
+      codeChanging: prepared.some((item) =>
+        ["write", "orchestrator"].includes(profileClass(item.profile)),
+      ),
+      reviewing: prepared.some((item) => profileClass(item.profile) === "review"),
+      phase: "collecting",
+      results: [],
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.batches.set(id, batch);
+    this.emitBatchGate(batch, true, "dispatch");
+    this.publish();
+    return batch;
+  }
+
+  private registerRevivalBatch(
+    run: RunRecord,
+    generation: number,
+    ctx: ExtensionContext,
+  ): DispatchBatch {
+    const prepared = [{ profile: run.profile }] as PreparedRun[];
+    return this.registerBatch([{ runId: run.id, generation }], prepared, ctx, {
+      parentId: run.parentId,
+      toolCallId: `revival:${run.id}:${generation}`,
+      route: run.parentId ? "owner" : run.profile.hidden ? "silent" : "pi",
+    });
+  }
+
+  private settleBatchMember(run: RunRecord, generation: number): void {
+    const batch = this.batchForMember(run.id, generation);
+    if (
+      !batch ||
+      batch.results.some((result) => result.runId === run.id && result.generation === generation)
+    )
+      return;
+    const snapshot = runSnapshot(run);
+    if (!["parked", "failed", "stopped"].includes(snapshot.status)) return;
+    batch.results.push({
+      runId: run.id,
+      generation,
+      status: snapshot.status as DispatchBatchResult["status"],
+      terminationReason: snapshot.terminationReason
+        ? structuredClone(snapshot.terminationReason)
+        : undefined,
+      report: snapshot.report,
+      error: snapshot.error,
+      cleanupFailure: snapshot.cleanupFailure ? { ...snapshot.cleanupFailure } : undefined,
+      snapshot,
+      completedAt: iso(),
+    });
+    batch.results.sort(
+      (left, right) =>
+        batch.members.findIndex(
+          (member) => member.runId === left.runId && member.generation === left.generation,
+        ) -
+        batch.members.findIndex(
+          (member) => member.runId === right.runId && member.generation === right.generation,
+        ),
+    );
+    batch.updatedAt = iso();
+    if (batch.phase === "orphaned") this.foldOrphanEvidence(batch);
+    if (batch.phase === "collecting" && batch.results.length === batch.members.length) {
+      batch.phase = "ready";
+      batch.readyAt = batch.updatedAt;
+      void this.routeBatch(batch);
+    }
+    this.publish();
+  }
+
+  private settleMissingBatchMembers(batch: DispatchBatch, message: string): void {
+    for (const member of batch.members) {
+      if (
+        batch.results.some(
+          (result) => result.runId === member.runId && result.generation === member.generation,
+        )
+      )
+        continue;
+      const run = this.store.get(member.runId);
+      if (run) continue;
+      const at = iso();
+      batch.results.push({
+        ...member,
+        status: "failed",
+        terminationReason: {
+          code: "startup_error",
+          at,
+          generation: member.generation,
+          phase: "startup",
+        },
+        report: "",
+        error: message,
+        completedAt: at,
+      });
+    }
+    if (batch.results.length === batch.members.length && batch.phase === "collecting") {
+      batch.phase = "ready";
+      batch.readyAt = iso();
+      batch.updatedAt = batch.readyAt;
+      void this.routeBatch(batch);
+    }
+  }
+
+  private batchDeliveryDetails(batch: DispatchBatch): {
+    schemaVersion: 3;
+    batch: DispatchBatch;
+    runs: RunSnapshot[];
+  } {
+    const immutable = structuredClone(batch);
+    immutable.phase = "ready";
+    immutable.updatedAt = immutable.readyAt ?? immutable.createdAt;
+    delete immutable.continuationId;
+    delete immutable.inFlightAt;
+    delete immutable.deliveredAt;
+    delete immutable.orphanedAt;
+    return {
+      schemaVersion: 3,
+      batch: immutable,
+      runs: batch.results.map((result) => result.snapshot).filter(Boolean) as RunSnapshot[],
+    };
+  }
+
+  private applyContinuationReceipt(requestId: string): void {
+    const receipt = this.pendingContinuationReceipts.get(requestId);
+    if (!receipt) return;
+    const batch = [...this.batches.values()].find(
+      (candidate) =>
+        candidate.continuationId === requestId ||
+        `${COMPLETION_PRODUCER_ID}:${candidate.id}` === requestId,
+    );
+    if (!batch) return;
+    if (batch.phase === "delivered" || batch.phase === "orphaned") {
+      this.pendingContinuationReceipts.delete(requestId);
+      return;
+    }
+    if (batch.phase !== "in-flight") return;
+    this.pendingContinuationReceipts.delete(requestId);
+    if (receipt.status === "settled") this.markBatchDelivered(batch);
+    else this.orphanBatch(batch, "continuation cancelled");
+  }
+
+  private routeBatch(batch: DispatchBatch): Promise<void> {
+    const existing = this.batchRoutes.get(batch.id);
+    if (existing) return existing;
+    const operation = this.routeBatchOnce(batch).finally(() => {
+      if (this.batchRoutes.get(batch.id) === operation) this.batchRoutes.delete(batch.id);
+    });
+    this.batchRoutes.set(batch.id, operation);
+    return operation;
+  }
+
+  private async routeBatchOnce(batch: DispatchBatch): Promise<void> {
+    if (batch.phase !== "ready") return;
+    if (batch.route === "silent") {
+      this.markBatchDelivered(batch);
+      return;
+    }
+    if (batch.route === "owner") {
+      const owner = batch.ownerRunId ? this.store.get(batch.ownerRunId) : undefined;
+      const runtime = owner ? this.leaseRuntimes.get(owner.id) : undefined;
+      if (!owner || !runtime || runtime.phase !== "active" || !ACTIVE_STATUSES.has(owner.status)) {
+        this.orphanBatch(batch, "owning orchestrator terminated before delivery");
+        return;
+      }
+      // Owner aggregates are follow-ups, never steering injections. Wait for a factual idle
+      // boundary so collect can claim the batch while an orchestrator turn is still active.
+      if (!runtime.idle) return;
+      if (batch.claimedBy === owner.id) {
+        this.markBatchDelivered(batch);
+        if (runtime.idle && !this.hasOpenOwnedBatches(owner.id))
+          await this.completeRun(owner, runtime.generation);
+        return;
+      }
+      batch.phase = "in-flight";
+      batch.inFlightAt = iso();
+      batch.updatedAt = batch.inFlightAt;
+      this.publish();
+      try {
+        if (owner.runner !== "native")
+          throw new Error("Nested aggregate delivery requires a live native orchestrator.");
+        await this.native.followUp(owner.id, this.batchContent(batch));
+        if (batch.phase !== "in-flight") return;
+        this.markBatchDelivered(batch);
+        const current = this.leaseRuntimes.get(owner.id);
+        if (current?.phase === "active" && !this.hasOpenOwnedBatches(owner.id))
+          await this.completeRun(owner, current.generation);
+      } catch (cause) {
+        this.orphanBatch(
+          batch,
+          `owner delivery failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        const current = this.leaseRuntimes.get(owner.id);
+        if (current?.phase === "active" && !this.hasOpenOwnedBatches(owner.id))
+          await this.completeRun(owner, current.generation);
+      }
+      return;
+    }
+    const requestId = `${COMPLETION_PRODUCER_ID}:${batch.id}`;
+    let response: { accepted: boolean; requestId?: string; reason?: string } | undefined;
+    this.pi.events.emit(events.continuationEnqueue, {
+      producerId: COMPLETION_PRODUCER_ID,
+      requestId,
+      dedupeKey: batch.id,
+      sessionId: batch.originSessionId,
+      originEntryId: batch.originEntryId,
+      message: {
+        customType: COMPLETION_MESSAGE_TYPE,
+        content: this.batchContent(batch),
+        display: true,
+        details: this.batchDeliveryDetails(batch),
+      },
+      respond(result: { accepted: boolean; requestId?: string; reason?: string }) {
+        response = result;
+      },
+    });
+    const reconciled =
+      response?.accepted === true ||
+      (response?.requestId === requestId && response.reason === "deduplicated");
+    if (!reconciled) {
+      batch.updatedAt = iso();
+      this.emitBatchGate(batch, true);
+      this.publish();
+      return;
+    }
+    batch.continuationId = response?.requestId ?? requestId;
+    batch.phase = "in-flight";
+    batch.inFlightAt = iso();
+    batch.updatedAt = batch.inFlightAt;
+    this.emitBatchGate(batch, false);
+    this.publish();
+    this.applyContinuationReceipt(batch.continuationId);
+  }
+
+  private markBatchDelivered(batch: DispatchBatch): void {
+    if (batch.phase === "delivered") return;
+    batch.phase = "delivered";
+    batch.deliveredAt = iso();
+    batch.updatedAt = batch.deliveredAt;
+    if (batch.codeChanging || (batch.route === "pi" && batch.reviewing))
+      this.pi.events.emit(events.implementationWaveAdvance, {
+        producerId: COMPLETION_PRODUCER_ID,
+        reason: `Hackler batch ${batch.id} completed`,
+        branchEntryId: batch.originEntryId ?? undefined,
+        ...(batch.reviewing && !batch.codeChanging ? { requiresArmed: true } : {}),
+      });
+    this.emitBatchGate(batch, false);
+    this.publish();
+  }
+
+  private hasOpenOwnedBatches(ownerRunId: string): boolean {
+    return [...this.batches.values()].some(
+      (batch) =>
+        batch.ownerRunId === ownerRunId &&
+        ["collecting", "ready", "in-flight"].includes(batch.phase),
+    );
+  }
+
+  private orphanBatch(batch: DispatchBatch, reason: string): void {
+    if (batch.phase === "delivered" || batch.phase === "orphaned") return;
+    batch.phase = "orphaned";
+    batch.orphanedAt = iso();
+    batch.updatedAt = batch.orphanedAt;
+    this.emitBatchGate(batch, false);
+    const owner = batch.ownerRunId ? this.store.get(batch.ownerRunId) : undefined;
+    if (owner) {
+      this.appendActivity(owner, "error", `nested batch ${batch.id} orphaned: ${reason}`);
+      this.foldOrphanEvidence(batch);
+    }
+    this.publish();
+  }
+
+  private foldOrphanEvidence(batch: DispatchBatch): void {
+    const owner = batch.ownerRunId ? this.store.get(batch.ownerRunId) : undefined;
+    if (!owner) return;
+    const marker = "\n\n## Orphaned nested result · batch ";
+    const base = owner.report.split(marker)[0]?.trimEnd() ?? "";
+    const evidence = [...this.batches.values()]
+      .filter((candidate) => candidate.ownerRunId === owner.id && candidate.phase === "orphaned")
+      .flatMap((candidate) =>
+        candidate.results.map((result) => {
+          const parts = [
+            `${marker}${candidate.id}`,
+            `### ${result.runId} · ${result.status}`,
+            `Termination: ${result.terminationReason?.code ?? "legacy_unknown"}`,
+            ...(result.error ? [`Error: ${result.error}`] : []),
+            ...(result.cleanupFailure ? [`Cleanup failure: ${result.cleanupFailure.message}`] : []),
+            result.report ? `Partial report:\n${result.report}` : "Partial report: (none)",
+          ];
+          return parts.join("\n");
+        }),
+      )
+      .join("\n");
+    owner.report = `${base}${evidence}`;
+    batch.foldedResultKeys = batch.results.map((result) => `${result.runId}:${result.generation}`);
+  }
+
+  claimOwnedBatches(ownerRunId: string, ids: readonly string[]): void {
+    const selected = new Set(ids);
+    for (const batch of this.batches.values()) {
+      if (
+        batch.ownerRunId !== ownerRunId ||
+        !batch.members.every((member) => selected.has(member.runId)) ||
+        !["collecting", "ready"].includes(batch.phase)
+      )
+        continue;
+      batch.claimedBy = ownerRunId;
+      batch.claimedAt ??= iso();
+      batch.updatedAt = iso();
+      if (batch.phase === "ready") this.markBatchDelivered(batch);
+      this.publish();
+    }
+  }
+
+  acknowledgeOwnedBatches(ownerRunId: string, ids: readonly string[]): void {
+    const selected = new Set(ids);
+    for (const batch of this.batches.values()) {
+      if (
+        batch.ownerRunId !== ownerRunId ||
+        !batch.members.every((member) => selected.has(member.runId)) ||
+        !["collecting", "ready", "in-flight"].includes(batch.phase)
+      )
+        continue;
+      if (batch.phase === "collecting") {
+        delete batch.claimedBy;
+        delete batch.claimedAt;
+        batch.updatedAt = iso();
+        this.publish();
+        continue;
+      }
+      batch.claimedBy = ownerRunId;
+      batch.claimedAt = iso();
+      this.markBatchDelivered(batch);
+      this.publish();
+    }
   }
 
   async dispatch(
@@ -1034,15 +1596,37 @@ export class SubagentManager {
       });
     }
 
+    const dispatchKey = options.toolCallId ?? `dispatch-${this.batchSequence + 1}`;
+    const allocatedIds = prepared.map(
+      (item, index) =>
+        `${item.profile.name}-${stableId(`${parentSessionId(ctx)}\u0000${options.parentId ?? "pi"}\u0000${dispatchKey}\u0000${index}`)}`,
+    );
+    const batch = this.registerBatch(
+      allocatedIds.map((runId) => ({ runId, generation: 1 })),
+      prepared,
+      ctx,
+      options,
+    );
     const runs: RunRecord[] = [];
     try {
-      for (const item of prepared) {
+      await this.flushPersistence();
+      for (const [index, item] of prepared.entries()) {
         this.assertOpen();
-        runs.push(await this.startPrepared(item, ctx, options.parentId, options.missionId));
+        const run = await this.startPrepared(
+          item,
+          ctx,
+          options.parentId,
+          options.missionId,
+          allocatedIds[index],
+        );
+        runs.push(run);
+        await this.flushPersistence();
       }
+      if (batch.phase === "collecting") this.emitBatchGate(batch, true, "running");
       return runs;
     } catch (cause) {
       await Promise.all(runs.map((run) => this.stop(run.id).catch(() => undefined)));
+      this.settleMissingBatchMembers(batch, cause instanceof Error ? cause.message : String(cause));
       throw cause;
     }
   }
@@ -1137,6 +1721,7 @@ export class SubagentManager {
       generation,
       controller: new AbortController(),
       phase: "active",
+      idle: false,
       resolveDone,
       done,
       wrapDelivery: "none",
@@ -1342,6 +1927,8 @@ export class SubagentManager {
     this.setOperation(run, "cleanup", "transport cleanup", at);
     this.inbox.cancelByRun(run.id, this.terminationMessage(code));
     this.claims.release(run.id);
+    for (const batch of this.batches.values())
+      if (batch.ownerRunId === run.id) this.orphanBatch(batch, `owner terminated: ${code}`);
     runtime.controller.abort(new Error(this.terminationMessage(code)));
 
     const descendants = this.store
@@ -1392,17 +1979,8 @@ export class SubagentManager {
         run.currentOperation = undefined;
         runtime.resolveDone();
       }
-      if (code !== "parent_shutdown" && code !== "session_change") {
-        try {
-          this.reportCompletion(run);
-        } catch (cause) {
-          this.appendActivity(
-            run,
-            "error",
-            `completion notification failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          );
-        }
-      }
+      if (code !== "parent_shutdown" && code !== "session_change")
+        this.settleBatchMember(run, generation);
       this.store.changed();
       if (run.missionId) await this.maybeFinalizeMission(run.missionId);
     })();
@@ -1506,15 +2084,7 @@ export class SubagentManager {
         run.activeLeaseGeneration = undefined;
         run.currentOperation = undefined;
         runtime.resolveDone();
-        try {
-          this.reportCompletion(run);
-        } catch (cause) {
-          this.appendActivity(
-            run,
-            "error",
-            `completion notification failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-          );
-        }
+        this.settleBatchMember(run, generation);
         this.store.changed();
         if (run.missionId) await this.maybeFinalizeMission(run.missionId);
       } catch (cause) {
@@ -1591,9 +2161,12 @@ export class SubagentManager {
     ctx: ExtensionContext,
     parentId?: string,
     missionId?: string,
+    allocatedId?: string,
   ): Promise<RunRecord> {
     this.assertOpen();
-    const id = `${prepared.profile.name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    const id =
+      allocatedId ??
+      `${prepared.profile.name}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
     const sessionDir = join(this.sessionRoot, parentSessionId(ctx), id);
     const startedAt = Date.now();
     const limits = this.effectiveLimits(prepared);
@@ -1656,6 +2229,8 @@ export class SubagentManager {
         prepared.task,
         WRITE_CLASSES.has(profileClass(prepared.profile)) ? "write" : "read",
       );
+      // The run, lease, and claim must be durable before worktree creation or transport startup.
+      await this.flushPersistence();
       const mission = missionId ? this.missions.get(missionId) : undefined;
       if (
         ["write", "orchestrator"].includes(prepared.profile.class) &&
@@ -2077,7 +2652,7 @@ export class SubagentManager {
             }),
           } as { tasks: DispatchTask[] };
         },
-        execute: async (_toolCallId, params) => {
+        execute: async (toolCallId, params) => {
           try {
             const mission = run.missionId ? this.missions.get(run.missionId) : undefined;
             // A sidecar's mission worktree is already isolated from the source checkout. Its
@@ -2089,6 +2664,7 @@ export class SubagentManager {
               parentId: run.id,
               missionId: run.missionId,
               cwd: mission?.worktree?.cwd ?? ctx.cwd,
+              toolCallId,
             });
             return textResult(
               children.map((child) => `${child.ownership.key}: ${child.id}`).join("\n"),
@@ -2115,12 +2691,14 @@ export class SubagentManager {
           const ids = params.ids ?? owned;
           if (ids.some((id) => !owned.includes(id)))
             return textResult("An orchestrator may collect only its owned children.", true);
+          this.claimOwnedBatches(run.id, ids);
           const collected = await this.collect(
             ids,
             params.wait ?? "all",
             signal,
             params.timeoutSeconds,
           );
+          this.acknowledgeOwnedBatches(run.id, ids);
           return textResult(
             `${collected.runs
               .map(
@@ -2217,6 +2795,7 @@ export class SubagentManager {
     const now = Date.now();
     run.lastEventAt = iso(now);
     if (event.type === "accepted") {
+      runtime.idle = false;
       lease.acceptedAt = iso(now);
       this.transition(run, "running", "accepted", now, generation);
       run.sessionFile = event.sessionFile;
@@ -2227,6 +2806,9 @@ export class SubagentManager {
       run.sessionFile = event.sessionFile;
     } else if (event.type === "text") {
       run.report = event.text;
+      for (const batch of this.batches.values())
+        if (batch.ownerRunId === run.id && batch.phase === "orphaned")
+          this.foldOrphanEvidence(batch);
       this.recordAssistantWritingActivity(run);
     } else if (event.type === "tool_start" && runtime.phase === "active") {
       run.currentTool = event.toolName;
@@ -2286,8 +2868,19 @@ export class SubagentManager {
     } else if (event.type === "model" && runtime.phase === "active") {
       run.effectiveModel = `${event.provider}/${event.id}`;
     } else if (event.type === "settled" && runtime.phase === "active") {
+      runtime.idle = true;
       run.report = event.report || run.report;
-      if (now >= Date.parse(lease.deadlineAt))
+      for (const batch of this.batches.values())
+        if (batch.ownerRunId === run.id && batch.phase === "ready") void this.routeBatch(batch);
+      if (this.hasOpenOwnedBatches(run.id)) {
+        this.appendActivity(run, "status", "idle while owned Hackler batches remain open");
+        run.currentOperation = {
+          kind: "supervisor",
+          name: "collecting owned batches",
+          startedAt: iso(now),
+          generation,
+        };
+      } else if (now >= Date.parse(lease.deadlineAt))
         void this.beginTermination(run, "wall_limit", {
           phase: "execution",
           limit: {
@@ -2635,8 +3228,8 @@ export class SubagentManager {
     run.task = message;
     run.taskHistory.push(message);
     run.error = undefined;
-    run.completionReported = false;
     const runtime = this.openLease(run, limits);
+    this.registerRevivalBatch(run, runtime.generation, this.ctx);
     this.transition(run, "starting", "revival", Date.now(), runtime.generation);
     this.setOperation(run, "transport", `reviving ${run.runner} transport`);
     this.store.changed();
@@ -2785,6 +3378,11 @@ export class SubagentManager {
     run.worktree = undefined;
     this.appendActivity(run, "status", "integration candidate applied to the source checkout");
     this.store.changed();
+    this.pi.events.emit(events.implementationWaveAdvance, {
+      producerId: COMPLETION_PRODUCER_ID,
+      reason: `integrated worktree candidate from ${run.id}`,
+      branchEntryId: this.ctx?.sessionManager.getLeafId?.() ?? undefined,
+    });
   }
 
   async startMission(
@@ -2946,6 +3544,11 @@ export class SubagentManager {
     mission.worktree = undefined;
     mission.status = "integrated";
     mission.finishedAt = new Date().toISOString();
+    this.pi.events.emit(events.implementationWaveAdvance, {
+      producerId: COMPLETION_PRODUCER_ID,
+      reason: `integrated mission worktree ${mission.id}`,
+      branchEntryId: this.ctx?.sessionManager.getLeafId?.() ?? undefined,
+    });
     this.publish();
   }
 
@@ -2978,7 +3581,11 @@ export class SubagentManager {
         },
       ],
       ctx,
-      { modelOverride: { model, thinking: thinking as ThinkingPolicy | undefined } },
+      {
+        modelOverride: { model, thinking: thinking as ThinkingPolicy | undefined },
+        route: "silent",
+        toolCallId: `plan-review:${Date.now().toString(36)}`,
+      },
     );
     if (!run) throw new Error("Plan reviewer did not start.");
     const { runs: results } = await this.collect([run.id], "all");
@@ -2992,27 +3599,15 @@ export class SubagentManager {
     };
   }
 
-  private reportCompletion(run: RunRecord): void {
-    if (run.completionReported) return;
-    run.completionReported = true;
-    if (run.profile.hidden) return;
-    const content =
-      run.status === "failed"
-        ? `${run.profile.name} · failed\n\nFailure reason: ${run.terminationReason?.code ?? "legacy_unknown"}${run.error ? ` · ${run.error}` : ""}${run.report ? `\n\nPartial report:\n${run.report}` : ""}`
-        : `${run.profile.name} · ${run.status}\n\n${run.report || run.error || "(no report)"}`;
-    this.pi.sendMessage(
-      {
-        customType: "subagent-completion-v2",
-        content,
-        display: true,
-        details: { run: runSnapshot(run) },
-      },
-      { triggerTurn: true, deliverAs: "followUp" },
-    );
-  }
-
   private statePath(parent: string): string {
     return join(this.sessionRoot, parent, "runs.json");
+  }
+
+  private async flushPersistence(): Promise<void> {
+    if (this.persistTimer) clearTimeout(this.persistTimer);
+    this.persistTimer = undefined;
+    this.enqueuePersist(false);
+    await this.persistenceTail;
   }
 
   private queuePersist(): void {
@@ -3024,12 +3619,14 @@ export class SubagentManager {
     this.persistTimer.unref?.();
   }
 
-  private enqueuePersist(): void {
+  private enqueuePersist(suppressErrors = true): void {
     if (!this.restoredParent) return;
     const path = this.statePath(this.restoredParent);
     const payload = JSON.stringify(
       {
-        schemaVersion: 2,
+        schemaVersion: 3,
+        batchSequence: this.batchSequence,
+        batches: this.batchSnapshots(),
         runs: this.store.all(),
         missions: [...this.missions.values()].map((mission) => ({
           ...mission,
@@ -3044,15 +3641,15 @@ export class SubagentManager {
       null,
       2,
     );
-    this.persistenceTail = this.persistenceTail
+    const write = this.persistenceTail
       .catch(() => {})
       .then(async () => {
         await fs.mkdir(dirname(path), { recursive: true });
         const temporary = `${path}.tmp-${process.pid}-${Date.now()}`;
         await fs.writeFile(temporary, payload, { mode: 0o600 });
         await fs.rename(temporary, path);
-      })
-      .catch(() => {});
+      });
+    this.persistenceTail = suppressErrors ? write.catch(() => {}) : write;
   }
 
   private async recoverPersistedCost(run: RunRecord): Promise<void> {
@@ -3131,11 +3728,31 @@ export class SubagentManager {
     try {
       const parsed = JSON.parse(await fs.readFile(this.statePath(parent), "utf8")) as {
         schemaVersion?: number;
+        batchSequence?: number;
+        batches?: DispatchBatch[];
         runs?: RunRecord[];
         missions?: MissionRecord[];
         evaluation?: EvaluationTraceV1;
       };
-      if (parsed.schemaVersion !== 2) return;
+      if (parsed.schemaVersion !== 2 && parsed.schemaVersion !== 3) return;
+      if (parsed.schemaVersion === 3) {
+        this.batchSequence = Number.isSafeInteger(parsed.batchSequence)
+          ? Math.max(0, parsed.batchSequence ?? 0)
+          : 0;
+        for (const batch of parsed.batches ?? []) {
+          if (
+            !batch ||
+            typeof batch.id !== "string" ||
+            !Array.isArray(batch.members) ||
+            !Array.isArray(batch.results) ||
+            !["pi", "owner", "silent"].includes(batch.route) ||
+            !["collecting", "ready", "in-flight", "delivered", "orphaned"].includes(batch.phase)
+          )
+            continue;
+          this.batches.set(batch.id, structuredClone(batch));
+          this.batchSequence = Math.max(this.batchSequence, batch.sequence || 0);
+        }
+      }
       if (parsed.evaluation?.schemaVersion === 1) {
         const restored = buildEvaluationTraceV1(parsed.evaluation);
         this.evaluationActivities = restored.activities;
@@ -3322,6 +3939,35 @@ export class SubagentManager {
         this.missions.set(mission.id, mission);
       }
       this.restoreIntegrationRequests();
+      if (parsed.schemaVersion === 3) {
+        for (const batch of this.batches.values()) {
+          this.settleMissingBatchMembers(
+            batch,
+            "member run state was unavailable after manager restore",
+          );
+          for (const member of batch.members) {
+            if (
+              batch.results.some(
+                (result) =>
+                  result.runId === member.runId && result.generation === member.generation,
+              )
+            )
+              continue;
+            const run = this.store.get(member.runId);
+            if (run && !ACTIVE_STATUSES.has(run.status))
+              this.settleBatchMember(run, member.generation);
+          }
+          if (batch.route === "owner") {
+            const owner = batch.ownerRunId ? this.store.get(batch.ownerRunId) : undefined;
+            if (!owner || !ACTIVE_STATUSES.has(owner.status))
+              this.orphanBatch(batch, "owning orchestrator was not active after restore");
+          } else if (batch.phase === "ready" || batch.phase === "in-flight") {
+            // Re-enqueueing the same canonical request reconciles with the continuation ledger.
+            if (batch.phase === "in-flight") batch.phase = "ready";
+            void this.routeBatch(batch);
+          }
+        }
+      }
     } catch (cause) {
       if ((cause as NodeJS.ErrnoException).code !== "ENOENT")
         this.diagnostics.push({
@@ -3345,6 +3991,7 @@ export class SubagentManager {
   shutdown(): Promise<void> {
     this.unsubscribePlanMode();
     this.unsubscribePlanReview();
+    this.unsubscribeContinuationReceipt();
     if (!this.shutdownPromise) {
       this.shutdownController.abort(new Error("Parent session is shutting down."));
       this.shutdownPromise = this.shutdownNow();

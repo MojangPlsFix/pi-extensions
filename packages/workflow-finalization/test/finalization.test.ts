@@ -38,6 +38,11 @@ describe("implementation summary parser", () => {
     ["empty", valid.replace("## Validation\nTests passed.", "## Validation")],
     ["prefix impostor", valid.replace("## Outcome", "## Outcome details")],
     ["wrong heading level", valid.replace("## Outcome", "# Outcome")],
+    ["unspaced trailing hashes", valid.replace("## Outcome", "## Outcome###")],
+    [
+      "invalid fence close with info text",
+      `\`\`\`md\nexample\n\`\`\`not-a-close\n${valid}\n\`\`\``,
+    ],
     [
       "fenced-only content",
       valid.replace("## Validation\nTests passed.", "## Validation\n```text\nTests passed.\n```"),
@@ -106,6 +111,9 @@ describe("mutation classification", () => {
   it("does not arm for read-only tools, failed writes, or known read-only Bash", () => {
     expect(shouldArmForToolResult({ toolName: "read", input: {}, isError: false })).toBe(false);
     expect(shouldArmForToolResult({ toolName: "write", input: {}, isError: true })).toBe(false);
+    expect(shouldArmForToolResult({ toolName: "memory.write", input: {}, isError: false })).toBe(
+      false,
+    );
     expect(
       shouldArmForToolResult({
         toolName: "bash",
@@ -116,11 +124,42 @@ describe("mutation classification", () => {
   });
 
   it("arms successful mutators and conservative likely-mutating Bash", () => {
-    for (const toolName of ["edit", "write", "apply_patch", "repo.move_file"])
+    for (const toolName of [
+      "edit",
+      "write",
+      "apply_patch",
+      "repo.move_file",
+      "functions.edit",
+      "ctx_execute",
+      "functions.ctx_execute_file",
+      "ctx_batch_execute",
+    ])
       expect(shouldArmForToolResult({ toolName, input: {}, isError: false })).toBe(true);
-    for (const command of ["rm file", "sed -i s/a/b/ file", "npm install", "git apply fix.patch"])
+    for (const command of [
+      "rm file",
+      "sed -i s/a/b/ file",
+      "npm install",
+      "git apply fix.patch",
+      "printf x>file",
+      'printf x > "file.txt"',
+      "git -C repo add file",
+    ])
       expect(isLikelyMutatingBash(command), command).toBe(true);
-    for (const command of ["unknown-command", "npm test", "npm run typecheck"])
+    expect(
+      shouldArmForToolResult({
+        toolName: "functions.bash",
+        input: { command: "touch generated.txt" },
+        isError: false,
+      }),
+    ).toBe(true);
+    for (const command of [
+      "unknown-command",
+      "npm test",
+      "npm run typecheck",
+      "printf 'rm file'",
+      "rg 'git apply' packages",
+      "git log --grep='npm install'",
+    ])
       expect(isLikelyMutatingBash(command), command).toBe(false);
   });
 });

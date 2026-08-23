@@ -30,7 +30,9 @@ The todo tool is separate from Plan Mode. Do not use a numbered todo list or tod
 
 ### Final proposal
 
-Only present a final plan when it is decision-complete. Wrap it in exactly one non-empty <proposed_plan> block, with each tag on its own line. Use Markdown inside the block. The plan must include a clear title, summary, implementation changes, tests, and explicit assumptions where needed. A later proposal replaces the previous proposal completely.`;
+Only present a final plan when it is decision-complete. Wrap it in exactly one non-empty <proposed_plan> block, with each tag on its own line. Use Markdown inside the block. The plan must include a clear title, summary, implementation changes, tests, and explicit assumptions where needed. A later proposal replaces the previous proposal completely.
+
+After an advisory Plan Mode review, always return one complete final <proposed_plan> block, even when the reviewed plan needs no changes. An acknowledgement or a statement that the old plan is unchanged is not a final proposal.`;
 
 export function appendPlanModePrompt(systemPrompt: string): string {
   return `${systemPrompt}\n\n${PLAN_MODE_PROMPT}`;

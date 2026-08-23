@@ -43,9 +43,11 @@ The reviewed `repository_reference` tool can clone validated remotes into manage
 
 A proposal is recognized only when `<proposed_plan>` and `</proposed_plan>` occupy standalone lines outside fenced code. Inline and fenced examples are ignored. While active, `/plan` autocompletes `off`. `/plan-implement` autocompletes `fresh` for a new session.
 
-`/plan-review` requires active Plan Mode, an idle parent, a latest unconsumed plan, and no running Worker. It uses an available, scoped model for a temporary read-only review. Cancellation, unavailable models, and authentication failures leave plan state unchanged. The report supports plan revision. It never approves or implements a plan.
+`/plan-review` requires active Plan Mode, an idle parent, a latest unconsumed plan, no pending revision expectation, and no running Worker. It uses an available, scoped model for a temporary read-only review. Cancellation, unavailable models, and authentication failures leave plan state unchanged. A successful review durably records the exact reviewed plan and response boundary before its visible report is queued through the workflow continuation coordinator. The next response must contain one complete final `<proposed_plan>` block even when no revision is needed. Marker-free acknowledgements are skipped; within the bounded response, a newer malformed proposal supersedes an older valid one.
 
-`/plan-implement` consumes a plan source once in the active session. Another attempt requires a newer proposal. A fresh implementation records consumption in the replacement session. The parent session keeps independent state if you resume it.
+A missing or malformed review response queues one durable correction turn. A second failure warns once, queues no third turn, preserves the previously valid plan, and leaves Plan Mode active. Coordinator request IDs, delivery and settlement bounds, retry phase, last checked assistant entry, and parse failure are persisted so reloads and tree navigation do not replay review or correction turns. Plan Mode state is strict version 2; valid version 1 entries under either historical custom type are migrated without replaying an old proposal.
+
+`/plan-implement` consumes a plan source once in the active session. Another attempt requires a newer proposal. Current-session implementation advances the implementation wave and uses the continuation coordinator rather than a direct automatic send. Fresh implementation records version 2 Plan Mode state and a separate armed workflow-finalization implementation-wave entry in replacement setup before the replacement context sends its kickoff. The parent session keeps independent state if you resume it.
 
 ## Trust boundary
 

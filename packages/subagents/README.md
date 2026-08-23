@@ -67,6 +67,20 @@ The manager rejects these cases before it starts a child:
 - a write profile while Plan Mode is active
 - a capability above the profile class ceiling
 
+## Persisted dispatch batches
+
+Each `subagent_dispatch` call creates one schema-version-3 batch before any child starts. The batch keeps the ordered run IDs and lease generations, origin session and branch entry, route, terminal evidence, and delivery state. A top-level tool call derives its stable batch ID from the parent session and tool-call ID. Each revival creates a separate singleton batch.
+
+A top-level batch sends one aggregate continuation after all members are terminal and transport cleanup is complete. The message stays on its origin branch. If another branch is active, delivery waits until that branch is active again. Hidden Plan Mode review batches are silent. Nested batches go only to their owning orchestrator; they never send a top-level Pi message.
+
+`subagent_collect` returns complete expandable evidence. An orchestrator that collects every member claims the aggregate before it waits and acknowledges it afterward. Partial collection does not suppress evidence for the other members. If the owner ends first, the manager marks the batch orphaned and folds errors, cleanup failures, and partial reports into the owner result.
+
+The collapsed aggregate renderer shows each report or failure summary. Expanded output shows ordered reports and terminal evidence. The legacy `subagent-completion-v2` renderer remains available for old session messages.
+
+Manager persistence now uses schema version 3. Schema-version-2 state restores its runs but does not create or replay ambiguous historical completion batches. Batch claims, ready state, and continuation IDs survive reload. The manager reconciles coordinator receipts before it retries delivery. It writes batch membership and each starting run before it starts that run's worktree or transport.
+
+An open worktree integration request gates implementation finalization. Accepting the integration advances the implementation wave after the candidate changes the source checkout. Keeping the worktree closes the gate without reporting a source change.
+
 ## Native transport and lifecycle
 
 The default `native` runner creates an in-process `AgentSession`. It calls `prompt()`, `steer()`, `followUp()`, `abort()`, and `dispose()` directly.

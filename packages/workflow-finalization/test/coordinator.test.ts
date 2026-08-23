@@ -6,6 +6,7 @@ import {
   type ContinuationSnapshot,
   deliveredContinuationDetails,
   deterministicProducerId,
+  parseContinuationSnapshot,
   withContinuationDetails,
 } from "../coordinator.js";
 
@@ -49,7 +50,7 @@ function harness() {
     persist: vi.fn((snapshot: ContinuationSnapshot) => {
       latest = structuredClone(snapshot);
     }),
-    send: vi.fn(),
+    send: vi.fn(() => ({ entryId: "delivery" })),
     receipt: vi.fn(),
     activity: vi.fn(),
   };
@@ -220,6 +221,111 @@ describe("ContinuationCoordinator", () => {
       requestId: "hackler-batch:abc",
       producerId: "batch",
     });
+  });
+
+  it("reconciles a canonical replay after the active leaf advances", () => {
+    const subject = harness();
+    const branch = [entry("root")];
+    subject.coordinator.restore("session", branch, branch, false);
+    subject.coordinator.enqueue({
+      producerId: "stable",
+      requestId: "stable:request",
+      message: { content: "same" },
+    });
+    subject.coordinator.setBranch([...branch, entry("later", "root")]);
+    expect(
+      subject.coordinator.enqueue({
+        producerId: "stable",
+        requestId: "stable:request",
+        message: { content: "same" },
+      }),
+    ).toMatchObject({ accepted: false, requestId: "stable:request", reason: "deduplicated" });
+  });
+
+  it("rechecks the host idle gate immediately before dispatch", () => {
+    let liveIdle = false;
+    const host = {
+      persist: vi.fn(),
+      canDispatch: () => liveIdle,
+      send: vi.fn(() => ({ entryId: "delivery" })),
+      receipt: vi.fn(),
+      activity: vi.fn(),
+    };
+    const coordinator = new ContinuationCoordinator(host);
+    const branch = [entry("root")];
+    coordinator.restore("session", branch, branch, true);
+    coordinator.enqueue({ producerId: "live", message: { content: "wait" } });
+    expect(host.send).not.toHaveBeenCalled();
+    liveIdle = true;
+    coordinator.setIdle(true);
+    expect(host.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("preserves stored request order when legacy snapshots lack global ordinals", () => {
+    const snapshot = parseContinuationSnapshot({
+      version: 1,
+      producerSequences: { zeta: 1, alpha: 1 },
+      requests: [
+        {
+          version: 1,
+          requestId: "zeta:1",
+          producerId: "zeta",
+          sequence: 1,
+          message: { content: "first" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "queued",
+        },
+        {
+          version: 1,
+          requestId: "alpha:1",
+          producerId: "alpha",
+          sequence: 1,
+          message: { content: "second" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "queued",
+        },
+      ],
+    });
+    expect(snapshot?.requests.map((request) => request.ordinal)).toEqual([1, 2]);
+
+    const subject = harness();
+    const root = entry("root");
+    const state = custom("state", snapshot!);
+    subject.coordinator.restore("session", [root, state], [root, state], true);
+    expect(subject.host.send).toHaveBeenCalledWith(
+      expect.objectContaining({ producerId: "zeta", requestId: "zeta:1" }),
+    );
+  });
+
+  it("orders legacy requests from divergent snapshots by snapshot append order", () => {
+    const legacy = (producerId: string) =>
+      ({
+        version: 1,
+        producerSequences: { [producerId]: 1 },
+        requests: [
+          {
+            version: 1,
+            requestId: `${producerId}:1`,
+            producerId,
+            sequence: 1,
+            message: { content: producerId },
+            sessionId: "session",
+            originEntryId: "root",
+            status: "queued",
+          },
+        ],
+      }) as unknown as ContinuationSnapshot;
+    const subject = harness();
+    const root = entry("root");
+    subject.coordinator.restore(
+      "session",
+      [root, custom("state-z", legacy("zeta")), custom("state-a", legacy("alpha"))],
+      [root],
+      true,
+    );
+    expect(subject.host.send).toHaveBeenCalledWith(expect.objectContaining({ producerId: "zeta" }));
   });
 
   it("invalidates all runtime dispatch state on shutdown", () => {
