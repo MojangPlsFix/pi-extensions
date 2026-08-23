@@ -21,6 +21,7 @@ pi update --extensions
 | Extension | Purpose | Commands and tools | Availability |
 | --- | --- | --- | --- |
 | [Ask User Question](packages/ask-user-question/) | Gives the model a structured UI for single-choice, multi-select, and custom questions. | `ask_user_question` | Interactive sessions |
+| [Workflow Finalization](packages/workflow-finalization/) | Serializes extension continuations and checks implementation summaries after repository changes. | Automatic | Any provider |
 | [Plan Mode](packages/plan-mode/) | Adds a read-only planning workflow, advisory `/plan-review`, and controlled implementation steps. | `/plan`, `/plan off`, `/plan-review`, `/plan-implement`, `/plan-implement fresh` | Any provider |
 | [Repository Reference](packages/repository-reference/) | Clones validated Git remotes and revisions into managed temporary paths with list, remove, and cleanup operations. | `repository_reference` | Any provider; no Context Mode dependency |
 | [Notify](packages/notify/) | Sends a desktop or terminal notification after an assistant turn completes. | `/notify-test`, `/notify-toggle`, `/notify-status` | Windows, WSL, and supported terminals |
@@ -37,7 +38,7 @@ pi update --extensions
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 
-The package installs all 17 extension entrypoints. Missing optional tools do not block Pi startup:
+The package installs all 18 extension entrypoints. Missing optional tools do not block Pi startup:
 
 - **GitHub authentication:** Usage Meter uses Pi's Copilot credentials or `gh auth token` for `github-copilot`. Search requires the Copilot CLI.
 - **OpenAI Codex OAuth:** Codex Compaction, Usage Meter, and Search use OpenAI Codex OAuth. Run `/login openai-codex`.
@@ -47,6 +48,8 @@ The package installs all 17 extension entrypoints. Missing optional tools do not
 - **External runners:** The manager starts configured commands without a shell and sends tasks through stdin.
 
 Search uses `gpt-5.6-luna` with no reasoning effort for every Copilot CLI retrieval. Codex uses native `/codex/alpha/search`. Both backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because neither backend exposes usage or cost for local Pi totals.
+
+Workflow Finalization keeps extension-generated continuations in one application queue. It sends only one continuation after Pi becomes idle. Requests remain on their origin branch and wait when that branch is inactive. Repository changes also arm a five-section implementation summary. The extension asks for one correction after an invalid summary, then shows one warning.
 
 ### Stats periods and viewer
 

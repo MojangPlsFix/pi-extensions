@@ -7,9 +7,15 @@ This extension provides two shared-tree services:
 
 ## Continuation protocol
 
-Producers emit `events.continuationEnqueue` with a stable `producerId`, message, optional `dedupeKey`, and optional synchronous `respond` callback. The coordinator assigns deterministic monotonic request IDs (`<producerId>:<sequence>`), persists the claim before sending one custom-context message, and emits `events.continuationReceipt` only after the triggered agent run starts and emits `agent_settled`. `continuationCancel`, named `continuationGate`, `compactionGate`, and blocking-UI events inhibit dispatch. `continuationActivity` exposes queue, in-flight, and gate state.
+Producers emit `events.continuationEnqueue` with a stable `producerId` and message. They can also set a canonical `requestId`, a deduplication key, and an origin entry. The synchronous `respond` callback returns the accepted or reconciled request ID.
 
-Requests retain their origin branch entry. Work from inactive branches remains queued until that origin is in the active branch. Persisted custom-message details are reconciled on reload: delivered requests are not resent, while a persisted dispatch claim with no delivered message returns to the queue. Runtime references and claims are invalidated on shutdown/session replacement. The queue never calls `hasPendingMessages` and uses no debounce timer.
+The coordinator persists each claim before it sends one custom-context message. It preserves the producer custom type and renderer details. It adds a `workflowContinuation` receipt envelope to the message details. The coordinator emits `events.continuationReceipt` only after the matching run starts and settles.
+
+`continuationCancel`, named `continuationGate`, `compactionGate`, and blocking UI events stop dispatch. `continuationActivity` reports active-branch queue, in-flight, and gate state.
+
+Each request retains its origin branch entry. A request waits while its branch is inactive. Reload reconciliation follows entry ancestry, so sibling assistant messages cannot complete the request. The coordinator does not resend a delivered custom message. A persisted claim without a delivered message returns to the queue.
+
+Shutdown and session replacement clear all runtime references. The queue never calls `hasPendingMessages` and uses no debounce timer.
 
 `deterministicProducerId`, snapshot parsing, and `ContinuationCoordinator` are exported for other packages and tests.
 
@@ -17,7 +23,7 @@ Requests retain their origin branch entry. Work from inactive branches remains q
 
 Successful `edit`, `write`, `apply_patch`, reviewed repository mutators, conservative likely-mutating Bash, and `events.implementationWaveAdvance` arm a new persisted wave. Read-only tools and failed mutations do not arm it. While armed, `before_agent_start` appends the summary contract.
 
-A valid response has exactly one of each required unfenced heading, in order, with non-empty content:
+A valid response has exactly one of each required level-two heading. The headings stay outside fenced examples, use this order, and have non-empty unfenced content:
 
 1. Outcome
 2. Changes
@@ -29,6 +35,16 @@ All assistant entries after the wave anchor are searched. The first invalid resp
 
 Pure exports include `parseImplementationSummary`, `evaluateImplementationFinalization`, `advanceImplementationWave`, `assistantResponsesAfterAnchor`, `isLikelyMutatingBash`, and `shouldArmForToolResult`.
 
+The Bash classifier detects reviewed mutation patterns. These include file commands, output redirection, Git changes, dependency changes, and formatter write flags. It does not classify arbitrary third-party commands. Producers must emit `implementationWaveAdvance` when another reviewed integration changes the checkout.
+
+## State and migration
+
+The extension stores continuation snapshots and implementation waves as version-1 custom entries. It merges continuation request revisions across the session tree. It restores implementation waves only from the active branch. Malformed or unknown state versions do not start work.
+
+A producer owns its canonical request ID and producer state. The coordinator owns dispatch, custom-message correlation, and settlement receipts. A producer must not send the same automatic continuation directly as a fallback.
+
 ## Pi API limitation
 
-Pi exposes `session_before_compact` and successful `session_compact`, but no event saying a later handler cancelled compaction. The coordinator therefore keeps the native compaction gate closed after a cancellation until a successful compaction event or session reload. This can defer automation longer than necessary, but cannot dispatch unsafely during a compaction whose outcome is unknown.
+Pi exposes `session_before_compact` and successful `session_compact`. Pi does not report when a later handler cancels compaction. The coordinator keeps the native compaction gate closed until successful compaction or session reload. This can defer automation after a failed compaction.
+
+Pi also has no atomic extension turn reservation. User input or process termination can occur between the persisted claim and Pi message dispatch. Stable IDs and reload reconciliation reduce duplicates, but they cannot make this process-level window atomic.

@@ -4,7 +4,9 @@ import {
   CONTINUATION_MESSAGE_TYPE,
   ContinuationCoordinator,
   type ContinuationSnapshot,
+  deliveredContinuationDetails,
   deterministicProducerId,
+  withContinuationDetails,
 } from "../coordinator.js";
 
 function entry(id: string, parentId: string | null = null): SessionEntry {
@@ -131,6 +133,93 @@ describe("ContinuationCoordinator", () => {
     subject.coordinator.agentStarted();
     subject.coordinator.agentSettled();
     expect(subject.host.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let a sibling assistant settle an origin-branch delivery", () => {
+    const first = harness();
+    const origin = [entry("root"), entry("origin", "root")];
+    first.coordinator.restore("session", origin, origin, true);
+    first.coordinator.enqueue({
+      producerId: "branch",
+      requestId: "branch:stable",
+      message: { content: "origin work" },
+    });
+    const state = custom("state", first.latest()!);
+    const delivery = { ...delivered("delivery", "branch:stable", "branch"), parentId: "origin" };
+    const sibling = entry("sibling", "root");
+    const unrelatedAssistant = {
+      ...entry("assistant", "sibling"),
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "unrelated" }],
+        timestamp: 2,
+        stopReason: "stop",
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+      },
+    } as SessionEntry;
+
+    const second = harness();
+    second.coordinator.restore(
+      "session",
+      [...origin, state, delivery, sibling, unrelatedAssistant],
+      [origin[0]!, sibling, unrelatedAssistant],
+      true,
+    );
+    expect(second.coordinator.getRequest("branch:stable")?.status).toBe("dispatched");
+    expect(second.coordinator.hasOpenRequests()).toBe(false);
+    expect(second.host.receipt).not.toHaveBeenCalled();
+    expect(second.host.send).not.toHaveBeenCalled();
+  });
+
+  it("supports canonical IDs and preserves producer renderer details in its envelope", () => {
+    const subject = harness();
+    const branch = [entry("root")];
+    subject.coordinator.restore("session", branch, branch, false);
+    expect(
+      subject.coordinator.enqueue({
+        producerId: "batch",
+        requestId: "hackler-batch:abc",
+        message: { content: "reports", customType: "subagent-batch-v3", details: { batch: 7 } },
+      }),
+    ).toMatchObject({ accepted: true, requestId: "hackler-batch:abc" });
+    expect(
+      subject.coordinator.enqueue({
+        producerId: "batch",
+        requestId: "hackler-batch:abc",
+        message: { content: "different" },
+      }),
+    ).toMatchObject({ accepted: false, reason: "request ID conflict" });
+
+    const details = withContinuationDetails(
+      { batch: 7 },
+      {
+        version: 1,
+        requestId: "hackler-batch:abc",
+        producerId: "batch",
+      },
+    );
+    const message = {
+      type: "custom_message",
+      id: "delivery",
+      parentId: "root",
+      timestamp: "2026-01-01T00:00:00Z",
+      customType: "subagent-batch-v3",
+      content: "reports",
+      display: true,
+      details,
+    } as SessionEntry;
+    expect(details.batch).toBe(7);
+    expect(deliveredContinuationDetails(message)).toMatchObject({
+      requestId: "hackler-batch:abc",
+      producerId: "batch",
+    });
   });
 
   it("invalidates all runtime dispatch state on shutdown", () => {
