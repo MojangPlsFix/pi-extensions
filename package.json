@@ -46,7 +46,7 @@
     "lint": "biome check .",
     "test": "vitest run",
     "validate:package": "tsx scripts/validate-package.ts",
-    "lint:docs": "uv run --no-project python scripts/ste-lint.py README.md docs/*.md packages/*/README.md",
+    "lint:docs": "uv run --no-project python scripts/ste-lint.py AGENTS.md README.md docs/*.md packages/*/README.md",
     "check": "npm run typecheck && npm run lint && npm run test && npm run validate:package"
   },
   "dependencies": {

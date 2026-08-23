@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { access, readdir, readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import askUserQuestion from "../packages/ask-user-question/index.js";
 import codexCompaction from "../packages/codex-compaction/index.js";
@@ -140,6 +141,94 @@ describe("package manifest", () => {
       "https://github.com/mksglu/context-mode/blob/v1.0.169/LICENSE",
     ])
       expect(notices).toContain(url);
+  });
+
+  it("keeps one portable offline repository guidance contract", async () => {
+    const rootEntries = await readdir(".");
+    const rootInstructionFiles = rootEntries
+      .filter(
+        (name) =>
+          /^(?:(?:agents|claude|gemini|copilot)(?:\.[^.]+)?|instructions|rules)\.md$/i.test(name) ||
+          name.toLowerCase() === ".cursorrules",
+      )
+      .sort();
+    expect(rootEntries.filter((name) => name.toLowerCase() === "agents.md")).toEqual(["AGENTS.md"]);
+    expect(rootInstructionFiles).toEqual(["AGENTS.md"]);
+
+    const agentsBuffer = await readFile("AGENTS.md");
+    expect(agentsBuffer.byteLength).toBeLessThan(32 * 1024);
+    const agents = agentsBuffer.toString("utf8");
+    expect(agents).toContain("Do not add a competing root instruction file");
+
+    const guidance = new Map([
+      ["AGENTS.md", agents],
+      ["docs/development.md", await readFile("docs/development.md", "utf8")],
+      ["docs/harnesses.md", await readFile("docs/harnesses.md", "utf8")],
+    ]);
+    const missingLinks: string[] = [];
+    for (const [path, source] of guidance) {
+      for (const match of source.matchAll(/!?\[[^\]]*\]\(([^)]+)\)/g)) {
+        const href = (match[1] ?? "").trim().replace(/^<|>$/g, "");
+        if (/^(?:https?:|mailto:)/.test(href)) continue;
+        const [rawTarget = "", rawFragment = ""] = href.split("#", 2);
+        const target = decodeURIComponent(rawTarget.replace(/\?.*$/, ""));
+        const targetPath = target ? resolve(dirname(path), target) : resolve(path);
+        try {
+          await access(targetPath);
+        } catch {
+          missingLinks.push(`${path} -> ${href}`);
+          continue;
+        }
+        if (!rawFragment) continue;
+        const targetSource = await readFile(targetPath, "utf8");
+        const headingSlugs = new Set(
+          [...targetSource.matchAll(/^#{1,6}\s+(.+?)\s*#*$/gm)].map((heading) =>
+            (heading[1] ?? "")
+              .replace(/[`*_~]/g, "")
+              .toLowerCase()
+              .replace(/[^a-z0-9\s-]/g, "")
+              .trim()
+              .replace(/\s+/g, "-"),
+          ),
+        );
+        const fragment = decodeURIComponent(rawFragment).toLowerCase();
+        if (!headingSlugs.has(fragment)) missingLinks.push(`${path} -> ${href} (missing heading)`);
+      }
+    }
+    expect(missingLinks).toEqual([]);
+
+    const harnesses = guidance.get("docs/harnesses.md") ?? "";
+    for (const heading of [
+      "## Implementation authority",
+      "## Core references — mandatory relevance screening",
+      "## Task-specific references — use when directly relevant",
+      "## Optional references — candidates, not requirements or endorsements",
+    ])
+      expect(harnesses).toContain(heading);
+    for (const url of [
+      "https://github.com/anomalyco/opencode",
+      "https://github.com/openai/codex",
+      "https://github.com/can1357/oh-my-pi",
+    ])
+      expect(harnesses).toContain(url);
+    const reviewDate = harnesses.match(/^Last reviewed: \*\*(\d{4}-\d{2}-\d{2})\*\*\.$/m)?.[1];
+    expect(reviewDate).toBeDefined();
+    if (reviewDate)
+      expect(new Date(`${reviewDate}T00:00:00Z`).toISOString().slice(0, 10)).toBe(reviewDate);
+
+    const notices = await readFile("THIRD_PARTY_NOTICES.md", "utf8");
+    for (const url of [
+      "https://github.com/anomalyco/opencode",
+      "https://github.com/anomalyco/opencode/blob/dev/LICENSE",
+      "https://github.com/can1357/oh-my-pi",
+      "https://github.com/can1357/oh-my-pi/blob/main/LICENSE",
+    ])
+      expect(notices).toContain(url);
+
+    const manifest = JSON.parse(await readFile("package.json", "utf8")) as {
+      scripts?: Record<string, string>;
+    };
+    expect(manifest.scripts?.["lint:docs"]).toMatch(/(?:^|\s)AGENTS\.md(?:\s|$)/);
   });
 
   it("documents the Subagents v2 configuration and orchestration contract", async () => {

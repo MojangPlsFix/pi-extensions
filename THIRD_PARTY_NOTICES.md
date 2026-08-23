@@ -71,6 +71,18 @@ The projects below were used as references or inspiration. Their inclusion does 
 - License: [Elastic License 2.0](https://github.com/mksglu/context-mode/blob/v1.0.169/LICENSE)
 - Relationship: This repository resolves the separately installed runtime at execution time and uses only its narrow MCP bridge for indexed read/search/fetch/stats tools. The Context Mode engine is not vendored or copied here. The upstream Pi entrypoint is intentionally not loaded concurrently.
 
+## OpenCode
+
+- Repository: <https://github.com/anomalyco/opencode>
+- License: [MIT](https://github.com/anomalyco/opencode/blob/dev/LICENSE)
+- Relationship: Standing design reference for cross-harness comparisons of architecture, tools, context, orchestration, provider behavior, and terminal UX. This relationship does not claim copied or adapted source.
+
+## oh-my-pi
+
+- Repository: <https://github.com/can1357/oh-my-pi>
+- License: [MIT](https://github.com/can1357/oh-my-pi/blob/main/LICENSE)
+- Relationship: Standing design reference for Pi-derived architecture, tools, context, providers, sessions, orchestration, performance, and TUI experiments. This relationship does not claim copied or adapted source.
+
 ## Pi
 
 - Repository: <https://github.com/earendil-works/pi>
