@@ -1,11 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { runCodexSearch } from "./codex-backend.js";
 import { runCopilotSearch } from "./copilot-backend.js";
+import { CopilotSearchRuntime } from "./copilot-sdk-backend.js";
 import { renderSearchCall, renderSearchResult } from "./renderers.js";
 import {
   type BackendSearchResult,
   backendForProvider,
-  DEFAULT_COPILOT_SEARCH_EFFORT,
   DEFAULT_COPILOT_SEARCH_MODEL,
   detailsFor,
   externalContent,
@@ -34,8 +34,29 @@ export {
   DEFAULT_COPILOT_SEARCH_TIMEOUT_MS,
   runCopilotSearch,
 } from "./copilot-backend.js";
+export type {
+  CopilotRuntimeFileSystem,
+  CopilotSdkClientAdapter,
+  CopilotSdkClientFactory,
+  CopilotSdkHostResolver,
+  CopilotSdkSessionAdapter,
+  CopilotSearchRuntimeOptions,
+} from "./copilot-sdk-backend.js";
+export {
+  buildCopilotSdkSessionConfig,
+  COPILOT_SDK_RUNTIME_LAUNCHER_PATH,
+  COPILOT_SDK_SESSION_CLEANUP_GRACE_MS,
+  COPILOT_SDK_SHUTDOWN_GRACE_MS,
+  CopilotSearchRuntime,
+  copilotSdkPermissionHandler,
+  copilotSdkRuntimeEnvironment,
+  isCopilotWebSearchTool,
+  runCopilotSdkSearch,
+  verifyCopilotSdkToolMetadata,
+} from "./copilot-sdk-backend.js";
 export { renderSearchCall, renderSearchResult } from "./renderers.js";
 export type {
+  CopilotSearchTransport,
   SearchBackend,
   SearchDetails,
   SearchKind,
@@ -46,6 +67,7 @@ export type {
 export {
   backendForProvider,
   boundedCopilotOutput,
+  copilotSearchTransport,
   DEFAULT_COPILOT_SEARCH_EFFORT,
   DEFAULT_COPILOT_SEARCH_MODEL,
   normalizeCodexSources,
@@ -55,11 +77,35 @@ export {
   sourcesFromText,
 } from "./search.js";
 
-export default function searchExtension(pi: ExtensionAPI): void {
+type CopilotSdkRuntime = {
+  search(
+    params: SearchParams,
+    signal?: AbortSignal,
+    onStatus?: (value: string) => void,
+  ): Promise<BackendSearchResult>;
+  shutdown(): Promise<void>;
+};
+
+export function registerSearchExtension(
+  pi: ExtensionAPI,
+  sdkRuntime: CopilotSdkRuntime = new CopilotSearchRuntime(),
+  createSdkRuntime: () => CopilotSdkRuntime = () => new CopilotSearchRuntime(),
+): void {
+  let activeSdkRuntime = sdkRuntime;
+  let sdkRuntimeClosed = false;
+  pi.on("session_start", () => {
+    if (!sdkRuntimeClosed) return;
+    activeSdkRuntime = createSdkRuntime();
+    sdkRuntimeClosed = false;
+  });
+  pi.on("session_shutdown", async () => {
+    sdkRuntimeClosed = true;
+    await activeSdkRuntime.shutdown();
+  });
   pi.registerTool({
     name: "search",
     label: "Search",
-    description: `Retrieve external evidence using the active provider: GitHub Copilot uses the local Copilot CLI (${DEFAULT_COPILOT_SEARCH_MODEL} with effort ${DEFAULT_COPILOT_SEARCH_EFFORT} for every search), while OpenAI Codex uses native /codex/alpha/search with refreshed OAuth. Other providers return an availability error. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
+    description: `Retrieve external evidence using the active provider. GitHub Copilot uses the one-shot legacy CLI by default while the bundled SDK capability gate remains unverified. Set PI_COPILOT_SEARCH_TRANSPORT=sdk to opt into one lazy bundled runtime with an isolated session per search (${DEFAULT_COPILOT_SEARCH_MODEL} unless overridden). OpenAI Codex uses native /codex/alpha/search with refreshed OAuth. Search never retries with another transport. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
     promptSnippet:
       "Search current web sources or programming documentation through the active provider",
     parameters: searchParameters,
@@ -78,7 +124,7 @@ export default function searchExtension(pi: ExtensionAPI): void {
       }
       const model =
         normalized.model ??
-        (backend === "copilot-cli" ? DEFAULT_COPILOT_SEARCH_MODEL : (ctx.model?.id ?? "unknown"));
+        (backend === "codex-native" ? (ctx.model?.id ?? "unknown") : DEFAULT_COPILOT_SEARCH_MODEL);
       const progressDetails: SearchDetails = {
         backend,
         kind: normalized.kind,
@@ -102,7 +148,9 @@ export default function searchExtension(pi: ExtensionAPI): void {
         onUpdate?.({ content: [{ type: "text", text: status }], details: progressDetails });
       };
       let result: BackendSearchResult;
-      if (backend === "copilot-cli") {
+      if (backend === "copilot-sdk") {
+        result = await activeSdkRuntime.search(normalized, signal, forwardStatus);
+      } else if (backend === "copilot-cli") {
         const output = await runCopilotSearch(
           normalized.kind,
           normalized,
@@ -138,4 +186,8 @@ export default function searchExtension(pi: ExtensionAPI): void {
     renderCall: renderSearchCall,
     renderResult: renderSearchResult,
   });
+}
+
+export default function searchExtension(pi: ExtensionAPI): void {
+  registerSearchExtension(pi);
 }

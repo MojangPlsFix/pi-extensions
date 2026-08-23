@@ -6,7 +6,7 @@ One Pi package delivers all resources. Use `pi config` to enable or disable them
 
 - Usage Meter runs with the active `github-copilot` or `openai-codex` provider.
 - Session Summary makes one automatic attempt with the active provider. Copilot uses Luna. Codex tries Spark before Luna. Other providers use their active model.
-- The `search` tool selects its backend at run time. `github-copilot` uses the SDK-bundled Copilot runtime by default. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider or cross-transport fallback.
+- The `search` tool selects its backend at run time. `github-copilot` uses the installed Copilot CLI by default while the SDK release gate remains open. `openai-codex` uses native `/codex/alpha/search` with refreshed Pi OAuth. Other providers receive an availability error. The tool does not use a cross-provider or cross-transport fallback.
 - Hackler resolves model policy when it starts. Resolution checks an explicit review override, `models.overrides`, profile frontmatter, `models.default`, and the parent snapshot. `inherit` selects the parent value.
 
 Use the [Hackler model-selection guide](../packages/subagents/MODEL_SELECTION.md) to compare models and thinking levels. Use the [orchestration evaluation guide](../packages/subagents/ORCHESTRATION_EVALUATION.md) to compare topologies under matched aggregate budgets.
@@ -20,13 +20,13 @@ Hackler model IDs include the provider name. Child sessions use the selected mod
 | GitHub Copilot | `github-copilot/gpt-5.6-luna` | Pi's GitHub Copilot login flow or `COPILOT_GITHUB_TOKEN` |
 | OpenAI Codex | `openai-codex/gpt-5.6-luna` | `/login openai-codex` |
 
-The local `copilot` CLI is required only when Search uses the explicit legacy CLI transport. Run `copilot login` to authenticate that transport. The default SDK transport uses its bundled runtime. It can use a stored Copilot login, GitHub CLI credentials, or supported token environment variables. Hackler workers that use Pi's `github-copilot` provider do not need the CLI.
+The default Search transport requires the local `copilot` CLI. Run `copilot login` to authenticate it. The opt-in SDK transport uses its bundled runtime. It can use GitHub CLI credentials or supported token environment variables. Its isolated empty mode does not import the CLI's stored login. Hackler workers that use Pi's `github-copilot` provider do not need the CLI.
 
 ## Configuration variables
 
 - `PI_EXTENSIONS_LARGE_PASTE_CACHE_DIR`: private cache location for Large Paste files.
 - `PI_WINDOWS_TOAST_APP_ID`: optional Windows toast application identity.
-- `PI_COPILOT_SEARCH_TRANSPORT=sdk|cli`: selects the GitHub Search transport. `sdk` is the default. `cli` selects the legacy one-shot CLI transport. Invalid values cause a configuration error. Search does not retry on the other transport.
+- `PI_COPILOT_SEARCH_TRANSPORT=sdk|cli`: selects the GitHub Search transport. `cli` remains the default until the SDK live release gate passes. `sdk` selects the opt-in bundled runtime preview. Invalid values cause a configuration error. Search does not retry on the other transport.
 - `PI_COPILOT_SEARCH_TIMEOUT_MS`: Copilot Search inactivity limit in milliseconds. Meaningful SDK events or legacy CLI output reset the timer. The default is 600,000 (10 minutes).
 - `PI_SESSION_SUMMARY=off`: disables automatic, manual, and backfill Session Summary title generation.
 - `PI_CODING_AGENT_DIR`: Pi's agent directory. User Hackler profiles and configuration live below this directory. New Hackler transcripts use `<agent-dir>/subagents/sessions`.
@@ -65,7 +65,7 @@ An empty provider array disables summaries for that provider. Pi ignores missing
 
 ## Optional capabilities
 
-- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`. It then requests the trusted GitHub Copilot quota endpoint. GitHub Search defaults to the SDK-bundled runtime. Authentication can come from a stored Copilot login, GitHub CLI credentials, or supported token environment variables. The legacy CLI transport requires the local `copilot` command. `gpt-5.6-luna` is the default Search model unless the request overrides it. The SDK omits reasoning effort. The legacy CLI uses effort `none`.
+- **GitHub authentication:** Usage Meter reads Pi's GitHub Copilot credentials or falls back to `gh auth token`. It then requests the trusted GitHub Copilot quota endpoint. GitHub Search uses the local `copilot` command by default. The opt-in SDK runtime can use GitHub CLI credentials or supported token environment variables. Its isolated empty mode does not import the CLI's stored login. `gpt-5.6-luna` is the default Search model unless the request overrides it. The SDK omits reasoning effort. The CLI uses effort `none`.
 - **OpenAI Codex OAuth:** Usage Meter and Search require OpenAI Codex OAuth under `openai-codex`. Run `/login openai-codex`. Pi refreshes the credential for each direct request. Usage Meter requests subscription quota from the trusted HTTPS `chatgpt.com/backend-api/wham/usage` endpoint. Neither feature needs the Codex CLI. Both features reject plaintext and custom-host endpoints.
 - **Hackler capabilities:** The user catalog can load trusted extensions, skills, and external command rules. Profiles select capability names. Project profiles cannot define implementation paths.
 - **Herdr:** Hackler can open a raw display pane for a persisted child transcript. The Agent Hub remains the lifecycle authority.

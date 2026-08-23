@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import {
   boundedCopilotOutput,
-  cleanSingleLine,
   DEFAULT_COPILOT_SEARCH_EFFORT,
   DEFAULT_COPILOT_SEARCH_MODEL,
   maximumOutputCharacters,
@@ -39,10 +38,7 @@ export function buildCopilotArguments(mode: SearchMode, params: SearchParams): s
   const model = normalized.model ?? DEFAULT_COPILOT_SEARCH_MODEL;
   // Search is retrieval-only. Never allow a caller to raise Copilot reasoning effort.
   const effort = DEFAULT_COPILOT_SEARCH_EFFORT;
-  const availableTools =
-    mode === "web"
-      ? `--available-tools=web_search${normalized.includeContent ? ",web_fetch" : ""}`
-      : undefined;
+  const availableTools = `--available-tools=web_search${normalized.includeContent ? ",web_fetch" : ""}`;
   return [
     "-p",
     promptFor(normalized),
@@ -54,7 +50,7 @@ export function buildCopilotArguments(mode: SearchMode, params: SearchParams): s
     model,
     "--effort",
     effort,
-    ...(availableTools ? [availableTools] : []),
+    availableTools,
     "--output-format",
     "json",
   ];
@@ -137,6 +133,10 @@ function isWebSearchTool(name: string | undefined): boolean {
   return typeof name === "string" && /(?:^|[-_:/])web_search$/i.test(name.trim());
 }
 
+function isWebFetchTool(name: string | undefined): boolean {
+  return typeof name === "string" && /(?:^|[-_:/])web_fetch$/i.test(name.trim());
+}
+
 function toolExecutionFailed(data: unknown): boolean {
   const record = asRecord(data);
   if (!record) return false;
@@ -158,8 +158,9 @@ function toolExecutionFailed(data: unknown): boolean {
 }
 
 function displayToolName(name: string | undefined): string {
-  const safeName = name ? cleanSingleLine(name, 120) : "";
-  return safeName || "a web tool";
+  if (isWebSearchTool(name)) return "web_search";
+  if (isWebFetchTool(name)) return "web_fetch";
+  return "a retrieval tool";
 }
 
 function handleCopilotEvent(
@@ -386,16 +387,12 @@ export async function runCopilotSearch(
         `Copilot CLI search failed (exit code ${exitCode ?? "unknown"}). Confirm the configured model and run \`copilot login\`.`,
       );
 
-    if (mode === "web") {
-      if (!state.webSearchStarted)
-        throw new Error(
-          "Copilot completed without invoking github-mcp-server/web_search; refusing to return an unverified answer.",
-        );
-      if (!state.webSearchCompleted || state.webSearchFailed)
-        throw new Error(
-          "github-mcp-server/web_search failed; refusing to return an unverified answer.",
-        );
-    }
+    if (!state.webSearchStarted)
+      throw new Error(
+        "Copilot completed without invoking web_search; refusing to return an unverified answer.",
+      );
+    if (!state.webSearchCompleted || state.webSearchFailed)
+      throw new Error("web_search failed; refusing to return an unverified answer.");
 
     const answer = state.latestAssistantContent || assistantAnswer(stdout);
     if (!answer) throw new Error("Copilot CLI search completed without an answer.");

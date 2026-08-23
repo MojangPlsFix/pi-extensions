@@ -102,10 +102,10 @@ export function normalizeCodexResponse(payload: unknown): BackendSearchResult {
     throw new Error("Codex native search returned a malformed response.");
   if (record.results !== undefined && !Array.isArray(record.results))
     throw new Error("Codex native search returned malformed structured results.");
-  const output = boundedText(record.output);
+  const answer = boundedText(record.output, 8_000, 280);
   const rawResults = (record.results as unknown[] | undefined) ?? [];
   const structured = normalizeCodexSources(rawResults);
-  const textual = sourcesFromText(output.text);
+  const textual = sourcesFromText(answer.text);
   const sources: SearchSource[] = [];
   const seen = new Set<string>();
   for (const source of [...structured.sources, ...textual.sources]) {
@@ -115,13 +115,14 @@ export function normalizeCodexResponse(payload: unknown): BackendSearchResult {
   }
   const sourcesTruncated = structured.truncated || textual.truncated || seen.size > maximumSources;
   const sourceSection = formatSources(sources, sourcesTruncated);
-  if (!output.text && sources.length === 0)
+  if (!answer.text && sources.length === 0)
     throw new Error("Codex native search completed without results.");
+  const output = boundedText([answer.text, sourceSection.text].filter(Boolean).join("\n\n"));
   return {
-    output: [output.text, sourceSection.text].filter(Boolean).join("\n\n"),
+    output: output.text,
     sources,
-    resultCount: rawResults.length || sources.length || (output.text ? 1 : 0),
-    outputTruncated: output.truncated,
+    resultCount: rawResults.length || sources.length || (answer.text ? 1 : 0),
+    outputTruncated: answer.truncated || output.truncated,
     sourcesTruncated: sourceSection.truncated,
   };
 }

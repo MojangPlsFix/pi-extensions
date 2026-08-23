@@ -2,7 +2,7 @@
 
 Web Search registers one `search` tool for bounded web and programming-documentation retrieval. The active Pi provider selects the backend at run time:
 
-- `github-copilot` uses the SDK-bundled Copilot runtime by default.
+- `github-copilot` uses the installed Copilot CLI by default while the SDK release gate remains open.
 - `openai-codex` uses native `POST /codex/alpha/search` with refreshed Pi OAuth.
 - Other providers return an actionable availability error.
 
@@ -14,8 +14,8 @@ The extension does not retain `web_search` or `code_search` aliases. Use the opt
 
 Set `PI_COPILOT_SEARCH_TRANSPORT=sdk|cli` to select the GitHub transport:
 
-- `sdk` is the default. It uses the runtime that ships with `@github/copilot-sdk`.
-- `cli` is the explicit legacy fallback. It starts the installed `copilot` command once per search.
+- `cli` is the default until the authenticated SDK capability and reliability gates pass. It starts the installed `copilot` command once per search.
+- `sdk` is the opt-in capability preview. It uses the runtime that ships with `@github/copilot-sdk`.
 
 Invalid values cause an actionable configuration error. The extension never retries a request on another transport. A failed SDK request is not sent again through the CLI. If the SDK connection breaks, only a later independent search can start a new runtime.
 
@@ -27,13 +27,13 @@ Concurrent searches can share the runtime. Cancellation calls the affected SDK s
 
 Both general and programming-documentation searches use a retrieval-only policy. The SDK session exposes only canonical `web_search`. It also exposes `web_fetch` when `includeContent` is true. The extension denies shell, file, write, memory, custom-tool, and unrelated MCP requests. It does not return a factual answer unless a search succeeds and supplies at least one safe source URL.
 
-Search output is bounded and marked as untrusted external content. The backend returns at most 12,000 characters or 400 lines. The extension normalizes at most 20 sources and 8,000 characters per source section. Expanded TUI output shows at most 8 URLs and a 600-character preview. Codex results contain only safe source titles, HTTPS URLs, and snippets. The extension removes duplicate URLs. It never returns credentials, signed-URL capabilities, encrypted output, unknown payload fields, raw SDK events, or raw backend responses. It marks truncation.
+Search output is bounded and marked as untrusted external content. The backend returns at most 12,000 characters or 400 lines. The extension normalizes at most 20 sources and 8,000 characters per source section. Expanded TUI output shows at most 8 URLs and a 600-character preview. Codex results contain only safe source titles, HTTP(S) URLs, and snippets. The extension removes duplicate URLs. It never returns credentials, signed-URL capabilities, encrypted output, unknown payload fields, raw SDK events, or raw backend responses. It marks truncation.
 
 The TUI identifies `copilot-sdk`, `copilot-cli`, or `codex-native`. It then shows a compact completion summary. Expanded results show a bounded URL list and a short preview. Safe result details include the backend, kind, model, query and source counts, truncation state, and provider-accounted usage status.
 
 ## Authentication, model, and accounting
 
-The extension does not contact either backend during Pi startup. The SDK-bundled runtime can authenticate with a stored Copilot login, GitHub CLI credentials, or supported token environment variables. The explicit CLI transport requires an installed and authenticated local `copilot` command.
+The extension does not contact either backend during Pi startup. The default transport requires an installed and authenticated local `copilot` command. The SDK-bundled runtime can authenticate with GitHub CLI credentials or supported token environment variables. Its isolated empty mode does not import the CLI's stored login.
 
 `gpt-5.6-luna` is the default Copilot Search model unless the request supplies a model override. The SDK transport omits reasoning effort because the SDK does not support the CLI's historical `none` value. The legacy CLI transport uses effort `none`.
 
@@ -45,6 +45,6 @@ Both providers can charge retrieval against provider subscription quota. The bac
 
 ## Opt-in live capability tests
 
-Normal CI skips the authenticated live tests. Set `PI_COPILOT_SEARCH_LIVE=1` to run the bundled-runtime authentication, tool-isolation, `web_search`, and `web_fetch` capability checks. These tests consume Copilot provider quota.
+Normal CI skips the authenticated live tests. Set `PI_COPILOT_SEARCH_LIVE=1` to run the bundled-runtime authentication, tool-isolation, `web_search`, and `web_fetch` capability checks. These tests consume Copilot provider quota. Keep `cli` as the default until recorded warm latency improves materially and p95 reliability is not worse than the CLI.
 
 Set `PI_COPILOT_SEARCH_LIVE_STRESS=1` with the live flag to add warm-runtime reuse, four-way concurrency, and cancellation checks. Set `PI_COPILOT_SEARCH_LIVE_COMPARE_CLI=1` with the live flag to add source-parity checks. The comparison requires an installed and authenticated legacy Copilot CLI.

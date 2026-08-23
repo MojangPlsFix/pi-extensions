@@ -53,12 +53,14 @@ export type SearchParams = {
   includeContent?: boolean;
   maxTokens?: number;
 };
-export type SearchBackend = "copilot-cli" | "codex-native";
+export type CopilotSearchTransport = "sdk" | "cli";
+export type SearchBackend = "copilot-sdk" | "copilot-cli" | "codex-native";
 export type SearchSource = { url: string; title?: string; snippet?: string };
 export type SearchDetails = {
   backend: SearchBackend;
   kind: SearchKind;
   model: string;
+  reasoningEffort?: string;
   queryCount: number;
   resultCount: number;
   sourceCount: number;
@@ -85,6 +87,8 @@ export type BackendSearchResult = {
   resultCount: number;
   outputTruncated: boolean;
   sourcesTruncated: boolean;
+  model?: string;
+  reasoningEffort?: string;
 };
 
 export const searchParameters = Type.Object({
@@ -134,7 +138,7 @@ export const searchParameters = Type.Object({
   reasoningEffort: Type.Optional(
     Type.String({
       description:
-        "Retained for compatibility. Copilot Search always uses reasoning effort `none`.",
+        "Retained for compatibility. The SDK omits reasoning effort; legacy CLI search uses `none`.",
     }),
   ),
 });
@@ -183,9 +187,19 @@ export function boundedText(
   let text = lines.slice(0, maximumLines).join("\n");
   if (text.length > maximumCharacters) text = text.slice(0, maximumCharacters);
   const truncated = text.length < original.length;
+  if (!truncated) return { text, truncated: false };
+
+  const marker = "… [truncated]";
+  if (maximumCharacters <= marker.length || maximumLines <= 1)
+    return { text: marker.slice(0, maximumCharacters), truncated: true };
+  const body = lines
+    .slice(0, maximumLines - 1)
+    .join("\n")
+    .slice(0, maximumCharacters - marker.length - 1)
+    .trimEnd();
   return {
-    text: truncated ? `${text.trimEnd()}\n… [truncated]` : text,
-    truncated,
+    text: body ? `${body}\n${marker}` : marker,
+    truncated: true,
   };
 }
 
@@ -252,20 +266,20 @@ export function promptFor(params: NormalizedSearchParams): string {
   const constraints = [
     "Return concise retrieved evidence with source URLs; do not present unsupported conclusions.",
     "This is a retrieval-only task. Use no extended reasoning. Search immediately, collect concise evidence, and return source URLs.",
+    "Use the web_search tool before answering. Do not answer factual claims from memory.",
+    "If web_search is unavailable or fails, return an explicit error and no unverified fallback answer.",
+    "Use no more than 8 web_search calls. Stop when the evidence is sufficient.",
+    "Extract only facts relevant to the request. Do not quote or reproduce full pages.",
     ...(params.kind === "web"
-      ? [
-          "Use current external web sources; do not inspect local repository files.",
-          "Use live web research with the native github-mcp-server/web_search tool to answer the request.",
-          "You MUST use github-mcp-server/web_search before answering any request involving current, recent, or time-sensitive facts. Do not answer those facts from memory. Search at least one relevant current source, and search more when the user asks for source verification.",
-          "If github-mcp-server/web_search is unavailable or fails, return an explicit error and do not provide an unverified fallback answer from memory.",
-          "Use no more than 8 web tool calls. Stop when the evidence is sufficient. Extract only the facts relevant to the request; do not quote or reproduce full page contents.",
-        ]
+      ? ["Use current external web sources. Do not inspect local repository files."]
       : [
           "Prefer official documentation, release notes, specifications, and primary repositories.",
         ]),
     params.recencyFilter ? `Prefer sources from the last ${params.recencyFilter}.` : "",
     params.domainFilter?.length ? `Domain constraints: ${params.domainFilter.join(", ")}.` : "",
-    params.includeContent ? "Open relevant source pages rather than relying only on snippets." : "",
+    params.includeContent
+      ? "Use web_fetch only to inspect relevant source pages after web_search."
+      : "",
     params.maxTokens ? `Keep the retrieval output within about ${params.maxTokens} tokens.` : "",
   ].filter(Boolean);
   return `${constraints.join("\n")}\n\nRequest:\n${params.requests.join("\n\n")}`;
@@ -323,7 +337,8 @@ export function normalizeCodexSources(results: unknown[]): {
       safeUrl(record.url) ??
       safeUrl(record.link) ??
       safeUrl(record.source_url) ??
-      safeUrl(record.href);
+      safeUrl(record.href) ??
+      safeUrl(record.uri);
     if (url && !seen.has(url)) {
       seen.add(url);
       discovered += 1;
@@ -339,7 +354,9 @@ export function normalizeCodexSources(results: unknown[]): {
     }
     for (const [key, child] of Object.entries(record)) {
       if (sensitiveKey.test(key)) continue;
-      if (["results", "sources", "items", "documents", "data"].includes(key))
+      if (
+        ["results", "sources", "items", "documents", "data", "resource", "contents"].includes(key)
+      )
         visit(child, depth + 1);
     }
     if (discovered > maximumSources * 5) scanTruncated = true;
@@ -402,7 +419,8 @@ export function detailsFor(
   return {
     backend,
     kind: params.kind,
-    model,
+    model: result.model ?? model,
+    ...(result.reasoningEffort ? { reasoningEffort: result.reasoningEffort } : {}),
     queryCount: params.requests.length,
     resultCount: result.resultCount,
     sourceCount: result.sources.length,
@@ -417,8 +435,23 @@ export function detailsFor(
   };
 }
 
-export function backendForProvider(provider: string | undefined): SearchBackend {
-  if (provider === "github-copilot") return "copilot-cli";
+export function copilotSearchTransport(
+  environment: NodeJS.ProcessEnv = process.env,
+): CopilotSearchTransport {
+  const configured = environment.PI_COPILOT_SEARCH_TRANSPORT?.trim().toLowerCase();
+  if (!configured || configured === "cli") return "cli";
+  if (configured === "sdk") return "sdk";
+  throw new Error(
+    "Invalid PI_COPILOT_SEARCH_TRANSPORT. Set it to `cli` (default) or `sdk` (opt-in capability preview).",
+  );
+}
+
+export function backendForProvider(
+  provider: string | undefined,
+  environment: NodeJS.ProcessEnv = process.env,
+): SearchBackend {
+  if (provider === "github-copilot")
+    return copilotSearchTransport(environment) === "sdk" ? "copilot-sdk" : "copilot-cli";
   if (provider === "openai-codex") return "codex-native";
   const active = provider ? `\`${cleanSingleLine(provider, 120)}\`` : "no active provider";
   throw new Error(
