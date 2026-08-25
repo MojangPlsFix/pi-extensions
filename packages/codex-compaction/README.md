@@ -95,11 +95,17 @@ When another provider is active, this extension does not change its context, hea
 
 ## Failure behavior
 
-Native compaction fails closed. If the remote request fails, the extension cancels Pi's compaction, closes its shared gate, and keeps the existing history.
+Native compaction fails closed. If the remote request fails, the extension cancels Pi's compaction. It closes only the matching native and threshold gates. It keeps the existing history. It does not fall back to Pi text summarization.
 
-The threshold reservation is intentionally in memory until successful compaction emits the synchronous coordinator request. There is no timer-based recovery and no cross-extension transaction: if the process dies after the checkpoint is committed but before the coordinator handles that event, the extension cannot reconstruct the pending reservation on restart. Once handled, the workflow coordinator owns durable reconciliation and delivery.
+Pi 0.84.3 emits the `session_compact_failed` lifecycle event for failures and aborts after `session_before_compact` returns a native result. The extension retains each native attempt until that terminal event. This closes the correct gate and writes one terminal status marker after a post-hook failure or abort.
 
-The extension does not fall back to Pi text summarization. It retries transport failures, incomplete streams, HTTP 408, HTTP 409, HTTP 429, and server errors up to two times.
+The hook finalizes native request failures. Pi's later generic cancellation event then does not duplicate the status or notification. Older Pi 0.84.x releases can register the event name but do not emit it. The existing native-request catch and `ctx.compact({ onError })` fallback handling remains active.
+
+Failed or aborted compactions never enqueue the `Compaction completed. Continue.` continuation. The threshold reservation stays in memory until successful compaction emits the synchronous coordinator request. The process has no timer-based recovery or cross-extension transaction. If the process dies after it commits the checkpoint but before the coordinator handles the event, the extension cannot rebuild the pending reservation after restart. The workflow coordinator owns durable reconciliation and delivery after it handles the event.
+
+Pi's failure event has no compaction operation ID. Local generation and attempt identity protect normal resets and overlapping in-flight requests. Complete attribution of arbitrarily reordered same-session terminal events needs a future Pi operation identifier.
+
+The extension retries transport failures, incomplete streams, HTTP 408, HTTP 409, HTTP 429, and server errors up to two times.
 
 In TUI mode, the session shows these display-only entries:
 

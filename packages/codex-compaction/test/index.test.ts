@@ -475,6 +475,534 @@ describe("pi-codex-compaction", () => {
     expect(rendered).toContain("OpenAI compaction complete");
   });
 
+  test("observes a failure after a native result and finalizes exactly once", async () => {
+    globalThis.fetch = (async () => compactionSse("post-result-failure")) as typeof fetch;
+    const entry = userEntry("user-post-result-failure", "fail after returning the checkpoint");
+    const harness = extensionHarness([entry]);
+    const result = await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    const failed = harness.handlers.get("session_compact_failed")!;
+
+    failed(
+      {
+        reason: "manual",
+        errorMessage: "failure after native result",
+        aborted: false,
+        willRetry: false,
+        fromExtension: true,
+      },
+      harness.context,
+    );
+    failed(
+      {
+        reason: "manual",
+        errorMessage: "duplicate failure",
+        aborted: false,
+        willRetry: false,
+        fromExtension: true,
+      },
+      harness.context,
+    );
+
+    expect(result.compaction.details.replacementHistory.at(-1)).toMatchObject({
+      encrypted_content: "post-result-failure",
+    });
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+    expect(harness.notifications).toEqual([
+      "OpenAI Codex native compaction failed: failure after native result",
+    ]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+  });
+
+  test("aborting after a native result closes the matching attempt without notifying", async () => {
+    globalThis.fetch = (async () => compactionSse("post-result-abort")) as typeof fetch;
+    const entry = userEntry("user-post-result-abort", "abort after returning the checkpoint");
+    const harness = extensionHarness([entry]);
+    await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    const failedEvent = {
+      reason: "manual",
+      errorMessage: "Compaction cancelled",
+      aborted: true,
+      willRetry: false,
+      fromExtension: true,
+    };
+    harness.handlers.get("session_compact_failed")!(failedEvent, harness.context);
+    harness.handlers.get("session_compact_failed")!(failedEvent, harness.context);
+
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+    expect(harness.notifications).toEqual([]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+  });
+
+  test("does not duplicate native failure handling when Pi follows a request error", async () => {
+    globalThis.fetch = (async () =>
+      new Response("request failed", { status: 400 })) as typeof fetch;
+    const entry = userEntry("user-native-error", "request failure");
+    const harness = extensionHarness([entry]);
+    await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "threshold",
+        errorMessage: undefined,
+        aborted: true,
+        willRetry: false,
+        fromExtension: false,
+      },
+      harness.context,
+    );
+
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+    expect(harness.notifications).toHaveLength(1);
+    expect(harness.notifications[0]).toContain("request failed");
+  });
+
+  test("handles Pi failure before the fallback callback without duplicate status or notification", async () => {
+    globalThis.fetch = (async () => compactionSse("threshold-failure")) as typeof fetch;
+    const entry = userEntry("user-pi-failure", "Pi reports a post-hook failure");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+    const result = await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "threshold",
+        errorMessage: "Pi failure after the native result",
+        aborted: false,
+        willRetry: false,
+        fromExtension: true,
+      },
+      harness.context,
+    );
+    harness.compactionRequests[0].onError(new Error("duplicate callback failure"));
+
+    expect(result.compaction.details.kind).toBe(NATIVE_COMPACTION_KIND);
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(
+      harness.notifications.filter((message) => message.includes("native compaction failed")),
+    ).toEqual(["OpenAI Codex native compaction failed: Pi failure after the native result"]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+  });
+
+  test("marks effective-input preparation failures with a running and terminal marker", async () => {
+    const entry = userEntry("user-input-failure", "malformed checkpoint follows");
+    const malformed = {
+      type: "compaction",
+      id: "malformed-checkpoint",
+      parentId: entry.id,
+      timestamp: new Date().toISOString(),
+      summary: "local marker",
+      firstKeptEntryId: entry.id,
+      tokensBefore: 50_000,
+      details: {
+        kind: NATIVE_COMPACTION_KIND,
+        version: NATIVE_COMPACTION_VERSION,
+        modelKey: "openai-codex:openai-codex-responses:gpt-test",
+        replacementHistory: [],
+      },
+    } as SessionEntry;
+    const harness = extensionHarness([entry, malformed]);
+    const pending = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry, malformed],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await expect(pending).resolves.toEqual({ cancel: true });
+
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+    expect(harness.notifications[0]).toContain("malformed");
+  });
+
+  test("ignores an unrelated overflow failure without consuming a threshold reservation", () => {
+    const entry = userEntry("user-unrelated-overflow", "keep the threshold reservation");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "overflow",
+        errorMessage: "unrelated overflow failure",
+        aborted: false,
+        willRetry: false,
+        fromExtension: false,
+      },
+      harness.context,
+    );
+
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([true]);
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.notifications).toEqual([
+      "OpenAI Codex context reached 90.0%; stopping for compaction.",
+    ]);
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status"),
+    ).toEqual([]);
+  });
+
+  test("ignores a manual failure before the native hook starts", () => {
+    const harness = extensionHarness([userEntry("user-prehook-failure", "manual failure")]);
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "manual",
+        errorMessage: "Pi failed before hooks",
+        aborted: false,
+        willRetry: false,
+        fromExtension: false,
+      },
+      harness.context,
+    );
+
+    expect(harness.eventsNamed(events.compactionGate)).toEqual([]);
+    expect(harness.notifications).toEqual([]);
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status"),
+    ).toEqual([]);
+  });
+
+  test("does not duplicate native completion status or gate closure", async () => {
+    globalThis.fetch = (async () => compactionSse("duplicate-success")) as typeof fetch;
+    const entry = userEntry("user-duplicate-success", "complete once");
+    const harness = extensionHarness([entry]);
+    const result = await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    const completion = {
+      reason: "manual",
+      willRetry: false,
+      fromExtension: true,
+      compactionEntry: { id: "compaction-success", details: result.compaction.details },
+    };
+    harness.handlers.get("session_compact")!(completion, harness.context);
+    harness.handlers.get("session_compact")!(completion, harness.context);
+
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "complete"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  test("retires stale native attempts on reset without touching later lifecycle state", async () => {
+    let rejectFetch: ((error: unknown) => void) | undefined;
+    globalThis.fetch = (() =>
+      new Promise<Response>((_resolve, reject) => {
+        rejectFetch = reject;
+      })) as typeof fetch;
+    const entry = userEntry("user-reset-native", "reset while compacting");
+    const harness = extensionHarness([entry]);
+    const pending = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await Promise.resolve();
+    harness.handlers.get("model_select")!({ model, previousModel: model }, harness.context);
+    rejectFetch?.(new Error("late stale failure"));
+    await expect(pending).resolves.toEqual({ cancel: true });
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "manual",
+        errorMessage: "duplicate late failure",
+        aborted: false,
+        willRetry: false,
+        fromExtension: true,
+      },
+      harness.context,
+    );
+
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed"]);
+    expect(harness.notifications).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+    ]);
+  });
+
+  test("does not let an overlapping stale request close the newer native gate", async () => {
+    const resolves: Array<(response: Response) => void> = [];
+    const rejects: Array<(error: unknown) => void> = [];
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve, reject) => {
+        resolves.push(resolve);
+        rejects.push(reject);
+      })) as typeof fetch;
+    const firstEntry = userEntry("user-overlap-first", "first native operation");
+    const secondEntry = userEntry("user-overlap-second", "second native operation");
+    const harness = extensionHarness([firstEntry]);
+    const first = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [firstEntry],
+        preparation: { firstKeptEntryId: firstEntry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await Promise.resolve();
+    const second = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [secondEntry],
+        preparation: { firstKeptEntryId: secondEntry.id, tokensBefore: 50_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await Promise.resolve();
+    expect(resolves).toHaveLength(2);
+    rejects[0]?.(new Error("stale operation failure"));
+    resolves[1]?.(compactionSse("new-operation"));
+    await expect(first).resolves.toEqual({ cancel: true });
+    const secondResult = await second;
+
+    harness.handlers.get("session_compact")!(
+      {
+        reason: "manual",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry: { id: "new-compaction", details: secondResult.compaction.details },
+      },
+      harness.context,
+    );
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed", "running", "complete"]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      false,
+      true,
+      false,
+    ]);
+    expect(harness.notifications).toEqual([]);
+  });
+
+  test("preserves a newer threshold reservation when native attempts overlap", async () => {
+    const resolves: Array<(response: Response) => void> = [];
+    const rejects: Array<(error: unknown) => void> = [];
+    globalThis.fetch = (() =>
+      new Promise<Response>((resolve, reject) => {
+        resolves.push(resolve);
+        rejects.push(reject);
+      })) as typeof fetch;
+    const entry = userEntry("user-threshold-overlap", "continue after the newer attempt");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+
+    const first = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await Promise.resolve();
+    const second = harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "manual",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    await Promise.resolve();
+    expect(resolves).toHaveLength(2);
+    rejects[0]?.(new Error("stale threshold operation"));
+    resolves[1]?.(compactionSse("new-threshold-operation"));
+    await expect(first).resolves.toEqual({ cancel: true });
+    const secondResult = await second;
+    harness.handlers.get("session_compact")!(
+      {
+        reason: "manual",
+        willRetry: false,
+        fromExtension: true,
+        compactionEntry: {
+          id: "threshold-overlap-compaction",
+          details: secondResult.compaction.details,
+        },
+      },
+      harness.context,
+    );
+
+    expect(harness.eventsNamed(events.continuationEnqueue)).toHaveLength(1);
+    expect(harness.eventsNamed(events.compactionGate).at(-1)).toMatchObject({
+      active: false,
+      resume: true,
+    });
+    expect(
+      harness
+        .getBranch()
+        .filter((branchEntry: any) => branchEntry.customType === "openai-codex-compaction-status")
+        .map((branchEntry: any) => branchEntry.data.state),
+    ).toEqual(["running", "failed", "running", "complete"]);
+    expect(
+      harness.notifications.filter((message) => message.includes("native compaction failed")),
+    ).toEqual([]);
+  });
+
+  test("does not enqueue after a failed threshold compaction or its abort callback", async () => {
+    globalThis.fetch = (async () => compactionSse("aborted-threshold")) as typeof fetch;
+    const entry = userEntry("user-threshold-abort", "do not continue");
+    const harness = extensionHarness([entry]);
+    harness.setUsageTokens(180_000);
+    harness.handlers.get("turn_end")!({}, harness.context);
+    harness.handlers.get("agent_settled")!({}, harness.context);
+    const result = await harness.handlers.get("session_before_compact")!(
+      {
+        branchEntries: [entry],
+        preparation: { firstKeptEntryId: entry.id, tokensBefore: 180_000 },
+        reason: "threshold",
+        willRetry: false,
+        signal: new AbortController().signal,
+      },
+      harness.context,
+    );
+    expect(result.compaction.details.kind).toBe(NATIVE_COMPACTION_KIND);
+    harness.handlers.get("session_compact_failed")!(
+      {
+        reason: "threshold",
+        aborted: true,
+        willRetry: false,
+        fromExtension: true,
+      },
+      harness.context,
+    );
+    harness.compactionRequests[0].onError(new Error("Compaction cancelled"));
+
+    expect(harness.eventsNamed(events.continuationEnqueue)).toEqual([]);
+    expect(harness.eventsNamed(events.compactionGate).map((event) => event.active)).toEqual([
+      true,
+      true,
+      false,
+      false,
+    ]);
+  });
+
   test("does not compact inside the provider request hook", async () => {
     let called = false;
     globalThis.fetch = (async () => {

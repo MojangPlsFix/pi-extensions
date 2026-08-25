@@ -135,7 +135,7 @@ async function emit(subject: Harness, name: string): Promise<void> {
 }
 
 describe("working indicator lifecycle", () => {
-  it("resets Hackler's message without replacing Pi's parent spinner", async () => {
+  it("restores Pi's default message without replacing its native spinner", async () => {
     const subject = harness();
 
     await emit(subject, "session_start");
@@ -153,7 +153,7 @@ describe("working indicator lifecycle", () => {
     subject.emitExtensionEvent(events.subagentsStatus, status([snapshot()]));
 
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler working");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler hackeln...");
     expect(subject.ui.setWorkingIndicator).not.toHaveBeenCalled();
     const output = subject.widget()?.render(160).join("\n") ?? "";
     expect(output).toContain("Hackler · ◐ 1/4 active");
@@ -161,17 +161,27 @@ describe("working indicator lifecycle", () => {
     expect(output).not.toMatch(/[!●✗△▵▴▲]/u);
   });
 
-  it("shows a waiting message for blocked Hackler runs and restores the idle message", async () => {
+  it("shows the legacy waiting message for blocked Hackler runs and restores Pi's default", async () => {
     const subject = harness();
     await emit(subject, "session_start");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([snapshot({ status: "blocked" })]));
-    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler blocked");
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Subagents waiting for input...");
 
     subject.emitExtensionEvent(events.subagentsStatus, status([]));
     expect(subject.ui.setWorkingVisible).toHaveBeenLastCalledWith(true);
     expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith();
     expect(subject.widget()?.render(120)).toEqual([]);
+  });
+
+  it("keeps wrapping-up activity distinguishable", async () => {
+    const subject = harness();
+    await emit(subject, "session_start");
+
+    subject.emitExtensionEvent(events.subagentsStatus, status([snapshot({ wrappingUp: true })]));
+
+    expect(subject.ui.setWorkingMessage).toHaveBeenLastCalledWith("Hackler wrapping up");
+    expect(subject.widget()?.render(120).join("\n")).toContain("wrapping up");
   });
 
   it("strips terminal controls from child activity", async () => {

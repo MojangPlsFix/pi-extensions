@@ -70,9 +70,9 @@ function foregroundCount(status: SubagentsStatusEvent): number {
 
 function workingMessage(status: SubagentsStatusEvent): string | undefined {
   if (foregroundCount(status) === 0) return undefined;
-  if (status.blocked > 0) return "Hackler blocked";
+  if (status.blocked > 0) return "Subagents waiting for input...";
   if (status.wrappingUp > 0) return "Hackler wrapping up";
-  return "Hackler working";
+  return "Hackler hackeln...";
 }
 
 function applyWorkingMessage(

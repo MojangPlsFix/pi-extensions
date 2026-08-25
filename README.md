@@ -34,7 +34,7 @@ pi update --extensions
 | [Session Summary](packages/session-summary/) | Makes one automatic title attempt for an unnamed session and shows the result in `/resume`. | `/session-summary`, `/session-summary-cost`, `/session-summaries` | Active provider. Built-in Copilot and Codex profiles |
 | [Hackler](packages/subagents/) | Runs child sessions with ownership, leases, parked reports, approvals, and reviewed integration. | `/agents`, `/agents trace`, `/orchestrate`, `subagent_dispatch`, `subagent_status`, `subagent_respond`, `subagent_collect`, `subagent_steer`, `subagent_stop` | Native Pi AgentSession by default. RPC and external runners are optional |
 | [UV](packages/uv/) | Replaces the Pi Bash tool with a UV-aware wrapper and redirects unsafe Python environment commands to UV workflows. | `bash` replacement | All sessions |
-| [Working Indicator](packages/working-indicator/) | Keeps Pi's normal loading indicator visible with `Hackler hackeln...` while native Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
+| [Working Indicator](packages/working-indicator/) | Keeps Pi's native spinner visible with `Hackler hackeln...` and shows a compact activity widget while Hackler runs. | Automatic | Running, blocked, and completed Hackler runs |
 | [Web Search](packages/web-search/) | Routes bounded web and documentation retrieval through the active provider. | `search` | `github-copilot` with Copilot CLI by default or the opt-in bundled SDK runtime, or authenticated `openai-codex` |
 | [Usage Meter](packages/usage-meter/) | Shows GitHub Copilot and OpenAI Codex quota without retaining credentials. | `/usage-meter` | Active `github-copilot` or authenticated `openai-codex` model |
 

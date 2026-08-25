@@ -46,6 +46,31 @@ function restoreWave(branch: SessionEntry[]): ImplementationWaveState {
   return state;
 }
 
+/**
+ * Pi 0.84.3 added this event after the development peer used by this
+ * repository. Keep the event shape local so older Pi declarations continue
+ * to typecheck without importing private Pi internals.
+ */
+type SessionCompactFailedEvent = {
+  reason: "manual" | "threshold" | "overflow";
+  errorMessage?: string;
+  aborted: boolean;
+  willRetry: boolean;
+  fromExtension: boolean;
+};
+
+type SessionCompactFailedRegistration = (
+  event: "session_compact_failed",
+  handler: (event: SessionCompactFailedEvent, ctx: ExtensionContext) => void,
+) => void;
+
+function registerSessionCompactFailed(
+  pi: ExtensionAPI,
+  handler: (event: SessionCompactFailedEvent, ctx: ExtensionContext) => void,
+): void {
+  (pi.on as unknown as SessionCompactFailedRegistration)("session_compact_failed", handler);
+}
+
 export default function workflowFinalization(pi: ExtensionAPI): void {
   let context: ExtensionContext | undefined;
   let wave = createImplementationWaveState();
@@ -265,6 +290,13 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
     setGate("compaction:native", false, false, false);
     coordinator.setIdle(ctx.isIdle());
     maybeFinalize(ctx);
+  });
+
+  registerSessionCompactFailed(pi, (_event, ctx) => {
+    context = ctx;
+    // Pi emits this while the failed compaction callback is still unwinding.
+    // Close the gate, but leave dispatch and finalization to agent_settled.
+    setGate("compaction:native", false, false, false);
   });
 
   pi.on("agent_start", (_event, ctx) => {

@@ -1,5 +1,5 @@
-import { realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Model } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -12,10 +12,60 @@ type Selector = {
   selectedIndex: number;
   render(width: number): string[];
 };
-type SelectorModule = { ModelSelectorComponent: { prototype: Selector } };
+type SelectorModule = { ModelSelectorComponent?: unknown };
 const originalRender = Symbol.for("pi-extensions.model-cost-badges.original-render");
 const panelTop = Symbol.for("pi-extensions.model-cost-badges.panel-top");
-type PatchedSelector = Selector & { [originalRender]?: Selector["render"]; [panelTop]?: number };
+const patchState = Symbol.for("pi-extensions.model-cost-badges.patch-state");
+type SelectorPatchState = { getTheme: () => Theme | undefined };
+type PatchedSelector = Selector & {
+  [originalRender]?: Selector["render"];
+  [panelTop]?: number;
+  [patchState]?: SelectorPatchState;
+};
+
+const selectorRelativePath = join("modes", "interactive", "components", "model-selector.js");
+
+function isFile(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve the selector module belonging to Pi's real Node CLI entrypoint.
+ *
+ * Pi ships either an unbundled `dist/cli.js` with a sibling `dist/modes` tree,
+ * or a bundled `dist/bundle/cli.js` whose selector class is re-exported by
+ * `dist/bundle/index.js`. Other entrypoints are intentionally unsupported.
+ */
+export function resolveModelSelectorModulePath(
+  cliPath: string | undefined = process.argv[1],
+): string | undefined {
+  if (!cliPath) return undefined;
+
+  let resolvedCliPath: string;
+  try {
+    resolvedCliPath = realpathSync(cliPath);
+  } catch {
+    return undefined;
+  }
+  if (!isFile(resolvedCliPath) || basename(resolvedCliPath) !== "cli.js") return undefined;
+
+  const cliDirectory = dirname(resolvedCliPath);
+  const parentDirectory = dirname(cliDirectory);
+  const selectorPath =
+    basename(cliDirectory) === "dist"
+      ? join(cliDirectory, selectorRelativePath)
+      : basename(cliDirectory) === "bundle" && basename(parentDirectory) === "dist"
+        ? join(cliDirectory, "index.js")
+        : undefined;
+
+  return selectorPath && existsSync(selectorPath) && isFile(selectorPath)
+    ? selectorPath
+    : undefined;
+}
 
 const dollars = (value: number): string =>
   `$${value.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
@@ -72,52 +122,67 @@ function overlay(lines: string[], panel: string[], start: number, width: number)
   return result;
 }
 
+function getSelectorPrototype(module: SelectorModule): PatchedSelector | undefined {
+  const component = module.ModelSelectorComponent;
+  if (typeof component !== "function") return undefined;
+  const prototype = (component as { prototype?: unknown }).prototype;
+  if (!prototype || typeof prototype !== "object") return undefined;
+  const selector = prototype as PatchedSelector;
+  return typeof selector.render === "function" ? selector : undefined;
+}
+
+function patchSelector(module: SelectorModule, getTheme: () => Theme | undefined): boolean {
+  const prototype = getSelectorPrototype(module);
+  if (!prototype) return false;
+
+  const existingState = prototype[patchState];
+  if (existingState) {
+    existingState.getTheme = getTheme;
+    return true;
+  }
+
+  const original = prototype[originalRender] ?? prototype.render;
+  if (typeof original !== "function") return false;
+  const state: SelectorPatchState = { getTheme };
+  prototype[originalRender] = original;
+  prototype[patchState] = state;
+  prototype.render = function render(width: number): string[] {
+    const selector = this as PatchedSelector;
+    const lines = original.call(this, width);
+    const selected = selector.filteredModels[selector.selectedIndex];
+    const theme = state.getTheme();
+    if (!selected || !theme) return lines;
+    const selectedRow = lines.findIndex((line) =>
+      stripAnsi(line).includes(`→ ${selected.id} [${selected.provider}]`),
+    );
+    if (selectedRow < 0) return lines;
+    const panel = formatModelCostPanel(selected.model, theme);
+    selector[panelTop] ??= Math.max(0, Math.min(selectedRow, lines.length - panel.length - 1));
+    return overlay(
+      lines,
+      panel,
+      Math.min(selector[panelTop] ?? 0, Math.max(0, lines.length - panel.length - 1)),
+      width,
+    );
+  };
+  return true;
+}
+
 export default function modelCostBadgesExtension(pi: ExtensionAPI): void {
   let theme: Theme | undefined;
   let patched = false;
   pi.on("session_start", async (_event, ctx) => {
     theme = ctx.ui.theme;
     if (patched) return;
+    const selectorPath = resolveModelSelectorModulePath();
+    if (!selectorPath) return;
     try {
-      const cliPath = process.argv[1];
-      if (!cliPath) return;
-      const selectorPath = join(
-        dirname(realpathSync(cliPath)),
-        "modes",
-        "interactive",
-        "components",
-        "model-selector.js",
-      );
-      const { ModelSelectorComponent } = (await import(
+      const selectorModule = (await import(
         pathToFileURL(selectorPath).href
-      )) as SelectorModule;
-      const prototype = ModelSelectorComponent.prototype as PatchedSelector;
-      const original = prototype[originalRender] ?? prototype.render;
-      prototype[originalRender] = original;
-      prototype.render = function render(width: number): string[] {
-        const selector = this as PatchedSelector;
-        const lines = original.call(this, width);
-        const selected = this.filteredModels[this.selectedIndex];
-        if (!selected || !theme) return lines;
-        const selectedRow = lines.findIndex((line) =>
-          stripAnsi(line).includes(`→ ${selected.id} [${selected.provider}]`),
-        );
-        if (selectedRow < 0) return lines;
-        const panel = formatModelCostPanel(selected.model, theme);
-        selector[panelTop] ??= Math.max(0, Math.min(selectedRow, lines.length - panel.length - 1));
-        return overlay(
-          lines,
-          panel,
-          Math.min(selector[panelTop] ?? 0, Math.max(0, lines.length - panel.length - 1)),
-          width,
-        );
-      };
-      patched = true;
-    } catch (error) {
-      ctx.ui.notify(
-        `Model cost badges are unavailable in this Pi build: ${error instanceof Error ? error.message : String(error)}`,
-        "warning",
-      );
+      )) as unknown as SelectorModule;
+      patched = patchSelector(selectorModule, () => theme);
+    } catch {
+      // Model cost badges are optional. Unsupported or broken Pi layouts stay quiet.
     }
   });
 }

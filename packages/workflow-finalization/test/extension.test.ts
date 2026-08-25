@@ -77,9 +77,10 @@ function harness() {
   };
   workflowFinalization(api as never);
   api.events.on(events.continuationReceipt, (value) => receipts.push(value));
-  const emit = async (name: string, event: any = {}) => {
+  const emit = async (name: string, event: any = {}, handlerContext = context) => {
     const results = [];
-    for (const handler of piHandlers.get(name) ?? []) results.push(await handler(event, context));
+    for (const handler of piHandlers.get(name) ?? [])
+      results.push(await handler(event, handlerContext));
     return results;
   };
   const bus = (name: string, value: unknown) => api.events.emit(name, value);
@@ -261,6 +262,105 @@ describe("workflow-finalization extension", () => {
       operationId: "codex-native",
       resume: true,
     });
+    expect(subject.sends).toHaveLength(1);
+  });
+
+  it("closes the native gate on a Pi failure and defers dispatch to agent_settled", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    await subject.emit("session_before_compact", {});
+
+    let failureIdle = false;
+    const failureContext = {
+      ...subject.context,
+      isIdle: () => failureIdle,
+    };
+    await subject.emit(
+      "session_compact_failed",
+      {
+        reason: "manual",
+        errorMessage: "native compaction failed",
+        aborted: false,
+        willRetry: false,
+        fromExtension: true,
+      },
+      failureContext,
+    );
+    subject.bus(events.continuationEnqueue, {
+      producerId: "test:native-failure",
+      message: { content: "continue after failure" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    failureIdle = true;
+    await subject.emit("agent_settled", {}, failureContext);
+    expect(subject.sends).toHaveLength(1);
+  });
+
+  it("closes an aborted native compaction without re-entrant finalization or duplicate work", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    await subject.emit("tool_result", {
+      toolName: "write",
+      toolCallId: "w",
+      input: {},
+      isError: false,
+      content: [],
+    });
+    subject.assistant("invalid summary");
+    await subject.emit("session_before_compact", {});
+
+    const aborted = {
+      reason: "threshold",
+      aborted: true,
+      willRetry: false,
+      fromExtension: false,
+    };
+    await subject.emit("session_compact_failed", aborted);
+    await subject.emit("session_compact_failed", aborted);
+    expect(subject.sends).toHaveLength(0);
+    expect(subject.notify).not.toHaveBeenCalled();
+
+    await subject.emit("agent_settled", {});
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.message.content).toContain("Make no more repository changes");
+  });
+
+  it("keeps overlapping external, UI, and relevant Hackler gates after native failure", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    await subject.emit("session_before_compact", {});
+    subject.bus(events.compactionGate, { active: true, operationId: "external" });
+    subject.bus(events.userInteraction, { active: true, reason: "question" });
+    subject.bus(events.hacklerBatchGate, {
+      batchId: "review",
+      active: true,
+      relevant: true,
+      phase: "review",
+    });
+    subject.bus(events.continuationEnqueue, {
+      producerId: "test:overlapping-gates",
+      message: { content: "continue after all gates" },
+    });
+
+    await subject.emit("session_compact_failed", {
+      reason: "manual",
+      aborted: true,
+      willRetry: false,
+      fromExtension: false,
+    });
+    await subject.emit("session_compact_failed", {
+      reason: "manual",
+      aborted: true,
+      willRetry: false,
+      fromExtension: false,
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    subject.bus(events.compactionGate, { active: false, operationId: "external" });
+    subject.bus(events.userInteraction, { active: false, reason: "question" });
+    expect(subject.sends).toHaveLength(0);
+    subject.bus(events.hacklerBatchGate, { batchId: "review", active: false });
     expect(subject.sends).toHaveLength(1);
   });
 
