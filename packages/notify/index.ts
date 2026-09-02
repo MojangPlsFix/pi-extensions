@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { basename } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, delimiter, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const maximumBodyLength = 160;
@@ -50,9 +51,69 @@ function roleIs(message: unknown, role: string): boolean {
 function powershellEncoded(script: string): string {
   return Buffer.from(script, "utf16le").toString("base64");
 }
+
+type PowerShellInvocation = {
+  command: string;
+  args: string[];
+};
+
+export function powershellInvocation(
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+  fileExists: (path: string) => boolean = existsSync,
+): PowerShellInvocation {
+  const directInvocation = { command: "powershell.exe", args: [] };
+  if (platform !== "linux" || !isWsl(env) || !fileExists("/init")) return directInvocation;
+
+  const candidates = [
+    ...(env.PATH ?? "")
+      .split(delimiter)
+      .filter((directory) => directory.length > 0)
+      .map((directory) => join(directory, "powershell.exe")),
+    "/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe",
+  ];
+  const executable = candidates.find(fileExists);
+  return executable ? { command: "/init", args: [executable] } : directInvocation;
+}
+
 function powershellText(value: string): string {
   return `[System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('${Buffer.from(value).toString("base64")}'))`;
 }
+type PowerShellResult = {
+  code: number;
+  stdout: string;
+  stderr: string;
+};
+
+function runPowerShell(script: string): Promise<PowerShellResult> {
+  const invocation = powershellInvocation();
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      invocation.command,
+      [
+        ...invocation.args,
+        "-NoProfile",
+        "-NonInteractive",
+        "-EncodedCommand",
+        powershellEncoded(script),
+      ],
+      { stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+    );
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on("data", (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    child.once("error", reject);
+    child.once("close", (code) =>
+      resolve({ code: code ?? -1, stdout: stdout.trim(), stderr: stderr.trim() }),
+    );
+  });
+}
+
 async function sendWindowsToast(title: string, body: string): Promise<void> {
   const appId =
     process.env.PI_WINDOWS_TOAST_APP_ID?.trim() || "Microsoft.WindowsTerminal_8wekyb3d8bbwe!App";
@@ -68,17 +129,10 @@ async function sendWindowsToast(title: string, body: string): Promise<void> {
     "$nodes.Item(1).AppendChild($xml.CreateTextNode($body)) > $null",
     "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show([Windows.UI.Notifications.ToastNotification]::new($xml))",
   ].join("\n");
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-EncodedCommand", powershellEncoded(script)],
-      { stdio: "ignore", windowsHide: true },
-    );
-    child.once("error", reject);
-    child.once("close", (code) =>
-      code === 0 ? resolve() : reject(new Error(`powershell.exe exited with ${code ?? -1}`)),
-    );
-  });
+  const result = await runPowerShell(script);
+  if (result.code === 0) return;
+  const detail = compact(result.stderr || result.stdout, 240);
+  throw new Error(detail || `powershell.exe exited with ${result.code}`);
 }
 
 export async function sendNotification(title: string, body: string): Promise<void> {

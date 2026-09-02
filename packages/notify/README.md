@@ -2,7 +2,7 @@
 
 Notify sends a desktop or terminal notification after an assistant turn completes without pending tool results or queued messages.
 
-It uses Windows toast notifications on Windows and WSL. It uses terminal notification protocols on other supported systems.
+It uses Windows toast notifications on Windows and WSL. On WSL, it starts Windows PowerShell through the `/init` launcher so it also works when Windows executable support is not registered through `binfmt_misc`. It uses terminal notification protocols on other supported systems.
 
 Use `/notify-test`, `/notify-toggle`, and `/notify-status` to control and inspect the feature.
 
