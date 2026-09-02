@@ -272,6 +272,8 @@ export type DispatchBatch = {
   codeChanging: boolean;
   reviewing?: boolean;
   phase: DispatchBatchPhase;
+  /** Restored top-level batches require explicit collection instead of automatic replay. */
+  manualRecovery?: boolean;
   results: DispatchBatchResult[];
   continuationId?: string;
   claimedBy?: string;

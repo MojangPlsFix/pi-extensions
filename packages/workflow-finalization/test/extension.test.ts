@@ -1,7 +1,19 @@
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it, vi } from "vitest";
 import { events } from "../../../shared/events.js";
+import { CONTINUATION_STATE_ENTRY, type ContinuationSnapshot } from "../coordinator.js";
 import workflowFinalization from "../index.js";
+
+function continuationState(snapshot: ContinuationSnapshot, id = "state"): SessionEntry {
+  return {
+    type: "custom",
+    customType: CONTINUATION_STATE_ENTRY,
+    data: snapshot,
+    id,
+    parentId: "root",
+    timestamp: "2026-01-01T00:00:00Z",
+  } as SessionEntry;
+}
 
 function harness() {
   const piHandlers = new Map<string, Array<(event: any, ctx: any) => any>>();
@@ -20,6 +32,7 @@ function harness() {
   const sends: Array<{ message: any; options: any }> = [];
   const receipts: unknown[] = [];
   let idle = true;
+  let agentStarts = 0;
   let startSynchronouslyOnSend = false;
   const append = (entry: Omit<SessionEntry, "id" | "parentId" | "timestamp">): void => {
     branch.push({
@@ -61,6 +74,7 @@ function harness() {
       } as never);
       if (startSynchronouslyOnSend) {
         idle = false;
+        agentStarts += 1;
         for (const handler of piHandlers.get("agent_start") ?? []) handler({}, context);
       }
     },
@@ -78,6 +92,7 @@ function harness() {
   workflowFinalization(api as never);
   api.events.on(events.continuationReceipt, (value) => receipts.push(value));
   const emit = async (name: string, event: any = {}, handlerContext = context) => {
+    if (name === "agent_start") agentStarts += 1;
     const results = [];
     for (const handler of piHandlers.get(name) ?? [])
       results.push(await handler(event, handlerContext));
@@ -108,6 +123,7 @@ function harness() {
     notify,
     sends,
     receipts,
+    agentStarts: () => agentStarts,
     emit,
     bus,
     assistant,
@@ -143,6 +159,183 @@ describe("workflow-finalization extension", () => {
     expect((await subject.emit("before_agent_start", { systemPrompt: "base" }))[0]).toMatchObject({
       systemPrompt: expect.stringContaining("## Risks and blockers"),
     });
+  });
+
+  it("keeps restored Hackler completions passive without starting a model turn", async () => {
+    const subject = harness();
+    const requestId = "hackler-batches-v3:restored";
+    subject.branch.push(
+      continuationState({
+        version: 1,
+        producerSequences: { "hackler-batches-v3": 1 },
+        nextOrdinal: 1,
+        requests: [
+          {
+            version: 1,
+            requestId,
+            producerId: "hackler-batches-v3",
+            sequence: 1,
+            ordinal: 1,
+            revision: 1,
+            message: { customType: "subagent-completion-v3", content: "reports" },
+            sessionId: "session",
+            originEntryId: "root",
+            status: "queued",
+          },
+        ],
+      }),
+    );
+
+    await subject.emit("session_start", {});
+
+    expect(subject.sends).toHaveLength(0);
+    expect(subject.agentStarts()).toBe(0);
+    expect(subject.branch.filter((entry) => entry.type === "custom_message")).toHaveLength(0);
+    expect(subject.branch.at(-1)).toMatchObject({ type: "custom" });
+  });
+
+  it("retains automatic restore for non-Hackler continuation producers", async () => {
+    const subject = harness();
+    const requestId = "normal:restored";
+    subject.branch.push(
+      continuationState({
+        version: 1,
+        producerSequences: { normal: 1 },
+        nextOrdinal: 1,
+        requests: [
+          {
+            version: 1,
+            requestId,
+            producerId: "normal",
+            sequence: 1,
+            ordinal: 1,
+            revision: 1,
+            message: { content: "continue" },
+            sessionId: "session",
+            originEntryId: "root",
+            status: "queued",
+          },
+        ],
+      }),
+    );
+
+    await subject.emit("session_start", {});
+
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.options).toEqual({ triggerTurn: true });
+  });
+
+  it("does not let a restored passive Hackler delivery block Plan implementation", async () => {
+    const subject = harness();
+    const requestId = "hackler-batches-v3:restored-delivery";
+    subject.branch.push(
+      continuationState({
+        version: 1,
+        producerSequences: { "hackler-batches-v3": 1 },
+        nextOrdinal: 1,
+        requests: [
+          {
+            version: 1,
+            requestId,
+            producerId: "hackler-batches-v3",
+            sequence: 1,
+            ordinal: 1,
+            revision: 1,
+            resumeOnRestore: false,
+            message: { customType: "subagent-completion-v3", content: "reports" },
+            sessionId: "session",
+            originEntryId: "root",
+            status: "dispatched",
+          },
+        ],
+      }),
+      {
+        type: "custom_message",
+        id: "hackler-delivery",
+        parentId: "root",
+        timestamp: "2026-01-01T00:00:00Z",
+        customType: "subagent-completion-v3",
+        content: "reports",
+        details: {
+          workflowContinuation: {
+            version: 1,
+            requestId,
+            producerId: "hackler-batches-v3",
+          },
+        },
+      } as SessionEntry,
+    );
+
+    await subject.emit("session_start", {});
+    expect(subject.sends).toHaveLength(0);
+
+    const planRequestId = "plan-mode:implementation:v2:restored";
+    subject.bus(events.continuationEnqueue, {
+      producerId: "plan-mode:implementation:v2",
+      requestId: planRequestId,
+      message: {
+        customType: "plan-mode-implementation",
+        content: "Implement the approved plan.",
+      },
+    });
+
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.options).toEqual({ triggerTurn: true });
+    expect(subject.sends[0]?.message).toMatchObject({
+      customType: "plan-mode-implementation",
+      content: "Implement the approved plan.",
+    });
+  });
+
+  it("keeps live Hackler continuations on the automatic trigger-turn path", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+
+    subject.bus(events.continuationEnqueue, {
+      producerId: "hackler-batches-v3",
+      requestId: "hackler-batches-v3:live",
+      message: { customType: "subagent-completion-v3", content: "live reports" },
+    });
+
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.options).toEqual({ triggerTurn: true });
+  });
+
+  it("pumps a live continuation after the parent reaches idle after settlement", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    subject.setIdle(false);
+    subject.bus(events.continuationEnqueue, {
+      producerId: "hackler-batches-v3",
+      requestId: "hackler-batches-v3:late-idle",
+      message: { customType: "subagent-completion-v3", content: "late reports" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    await subject.emit("agent_settled", {});
+    subject.setIdle(true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.options).toEqual({ triggerTurn: true });
+  });
+
+  it("does not downgrade a live Hackler continuation during tree navigation", async () => {
+    const subject = harness();
+    await subject.emit("session_start", {});
+    subject.setIdle(false);
+    subject.bus(events.continuationEnqueue, {
+      producerId: "hackler-batches-v3",
+      requestId: "hackler-batches-v3:tree-live",
+      message: { customType: "subagent-completion-v3", content: "tree reports" },
+    });
+    expect(subject.sends).toHaveLength(0);
+
+    subject.setIdle(true);
+    await subject.emit("session_tree", {});
+
+    expect(subject.sends).toHaveLength(1);
+    expect(subject.sends[0]?.options).toEqual({ triggerTurn: true });
   });
 
   it("queues exactly one correction and warns once after the correction settles invalid", async () => {

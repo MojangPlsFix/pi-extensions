@@ -13,7 +13,7 @@ The coordinator persists each claim before it sends one custom-context message. 
 
 `continuationCancel`, named `continuationGate`, `compactionGate`, and blocking UI events stop dispatch. `continuationActivity` reports active-branch queue, in-flight, and gate state.
 
-Each request retains its origin branch entry. A request waits while its branch is inactive. Reload reconciliation follows entry ancestry, so sibling assistant messages cannot complete the request. The coordinator does not resend a delivered custom message. A persisted claim without a delivered message returns to the queue.
+Each request retains its origin branch entry. A request waits while its branch is inactive. Reload reconciliation follows entry ancestry, so sibling assistant messages cannot complete the request. The coordinator does not resend a delivered custom message. Hackler completion requests are marked for manual recovery when restored, so an undelivered result remains available through Agent Hub and `subagent_collect` without creating a chat message or starting a turn. An already-delivered passive result stays deduplicable without occupying the coordinator's in-flight slot or blocking unrelated continuation dispatch. Manual-recovery batches do not emit active workflow gates. Live Hackler completions keep their automatic idle-parent delivery. A persisted claim from another producer without a delivered message follows that producer's restore policy.
 
 Shutdown and session replacement clear all runtime references. The queue never calls `hasPendingMessages` and uses no debounce timer.
 
@@ -39,7 +39,7 @@ The Bash classifier detects reviewed mutation patterns. These include file comma
 
 ## State and migration
 
-The extension stores continuation snapshots and implementation waves as version-1 custom entries. It merges continuation request revisions across the session tree. It restores implementation waves only from the active branch. Malformed or unknown state versions do not start work.
+The extension stores continuation snapshots and implementation waves as version-1 custom entries. It merges continuation request revisions across the session tree. It restores implementation waves only from the active branch. Malformed or unknown state versions do not start work. Restore policy is persisted per continuation request; legacy Hackler requests migrate to manual recovery, while other producers retain the automatic default.
 
 A producer owns its canonical request ID and producer state. The coordinator owns dispatch, custom-message correlation, and settlement receipts. A producer must not send the same automatic continuation directly as a fallback.
 

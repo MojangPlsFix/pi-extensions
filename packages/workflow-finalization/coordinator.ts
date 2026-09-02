@@ -21,13 +21,15 @@ export type PersistedContinuationRequest = {
   legacyOrdinal?: true;
   /** Monotonic per-request revision prevents stale sibling snapshots from regressing status. */
   revision: number;
+  /** Whether restore may dispatch this request; omitted legacy values default by producer. */
+  resumeOnRestore?: boolean;
   dedupeKey?: string;
   message: ContinuationMessage;
   sessionId: string;
   originEntryId: string | null;
   deliveryEntryId?: string;
   settledEntryId?: string;
-  status: "queued" | "dispatched" | "settled" | "cancelled";
+  status: "queued" | "dispatched" | "deferred" | "settled" | "cancelled";
 };
 
 export type ContinuationSnapshot = {
@@ -79,10 +81,54 @@ function cloneMessage(message: ContinuationMessage): ContinuationMessage {
 
 function sameMessage(left: ContinuationMessage, right: ContinuationMessage): boolean {
   try {
-    return JSON.stringify(left) === JSON.stringify(right);
+    const keys = new Set<string>();
+    const collectKeys = (value: unknown, seen: Set<object>): void => {
+      if (Array.isArray(value)) {
+        if (seen.has(value)) throw new Error("cyclic continuation message");
+        seen.add(value);
+        for (const item of value) collectKeys(item, seen);
+        seen.delete(value);
+        return;
+      }
+      if (!record(value)) return;
+      if (seen.has(value)) throw new Error("cyclic continuation message");
+      seen.add(value);
+      for (const [key, item] of Object.entries(value)) {
+        keys.add(key);
+        collectKeys(item, seen);
+      }
+      seen.delete(value);
+    };
+    collectKeys(left, new Set());
+    collectKeys(right, new Set());
+    const replacer = [...keys].sort();
+    return JSON.stringify(left, replacer) === JSON.stringify(right, replacer);
   } catch {
     return false;
   }
+}
+
+// These stable IDs are owned by the subagents extension. Keep the compatibility
+// recognition here so old snapshots remain passive even before that producer can
+// write the explicit policy field.
+const HACKLER_COMPLETION_PRODUCER = /^hackler-batches-v\d+$/;
+const HACKLER_COMPLETION_MESSAGE = /^subagent-completion-v\d+$/;
+
+type ContinuationRequestIdentity = Pick<PersistedContinuationRequest, "producerId" | "message">;
+
+export function isHacklerCompletionRequest(request: ContinuationRequestIdentity): boolean {
+  return (
+    HACKLER_COMPLETION_PRODUCER.test(request.producerId) ||
+    (typeof request.message.customType === "string" &&
+      HACKLER_COMPLETION_MESSAGE.test(request.message.customType))
+  );
+}
+
+/** Restore policy after applying the legacy Hackler safety default. */
+function resumesOnRestore(
+  request: ContinuationRequestIdentity & { resumeOnRestore?: boolean },
+): boolean {
+  return !isHacklerCompletionRequest(request) && request.resumeOnRestore !== false;
 }
 
 export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot | undefined {
@@ -105,11 +151,16 @@ export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot 
       !Number.isSafeInteger(candidate.sequence) ||
       !(candidate.ordinal === undefined || Number.isSafeInteger(candidate.ordinal)) ||
       !(candidate.revision === undefined || Number.isSafeInteger(candidate.revision)) ||
+      !(
+        candidate.resumeOnRestore === undefined || typeof candidate.resumeOnRestore === "boolean"
+      ) ||
       typeof candidate.sessionId !== "string" ||
       !(candidate.originEntryId === null || typeof candidate.originEntryId === "string") ||
       !(candidate.deliveryEntryId === undefined || typeof candidate.deliveryEntryId === "string") ||
       !(candidate.settledEntryId === undefined || typeof candidate.settledEntryId === "string") ||
-      !["queued", "dispatched", "settled", "cancelled"].includes(String(candidate.status)) ||
+      !["queued", "dispatched", "deferred", "settled", "cancelled"].includes(
+        String(candidate.status),
+      ) ||
       !validMessage(candidate.message)
     )
       continue;
@@ -123,6 +174,9 @@ export function parseContinuationSnapshot(value: unknown): ContinuationSnapshot 
       ordinal: typeof candidate.ordinal === "number" ? candidate.ordinal : requests.length + 1,
       ...(candidate.ordinal === undefined ? { legacyOrdinal: true } : {}),
       revision: typeof candidate.revision === "number" ? candidate.revision : 0,
+      ...(typeof candidate.resumeOnRestore === "boolean"
+        ? { resumeOnRestore: candidate.resumeOnRestore }
+        : {}),
       ...(typeof candidate.dedupeKey === "string" ? { dedupeKey: candidate.dedupeKey } : {}),
       message: cloneMessage(candidate.message),
       sessionId: candidate.sessionId,
@@ -297,7 +351,22 @@ export class ContinuationCoordinator {
     const restoredReceipts: ContinuationReceiptEvent[] = [];
     let changed = false;
     for (const request of this.requests) {
-      if (request.status !== "queued" && request.status !== "dispatched") continue;
+      // Hackler completion requests predate the explicit policy field. Normalize
+      // all legacy requests before deciding whether a restored claim may enter
+      // the queue. An explicit true can never turn a known Hackler result into
+      // an auto-turn.
+      const restoredPolicy = resumesOnRestore(request);
+      if (request.resumeOnRestore !== restoredPolicy) {
+        request.resumeOnRestore = restoredPolicy;
+        request.revision += 1;
+        changed = true;
+      }
+      if (
+        request.status !== "queued" &&
+        request.status !== "dispatched" &&
+        request.status !== "deferred"
+      )
+        continue;
       const delivery = deliveries
         .get(request.requestId)
         ?.find(
@@ -307,21 +376,23 @@ export class ContinuationCoordinator {
               isDescendant(entriesById, entry.id, request.originEntryId)),
         );
       if (!delivery) {
-        if (request.status === "dispatched") {
-          request.status = "queued";
-          request.revision += 1;
+        // A deferred request is terminal for automatic restore purposes. Keep
+        // it deduplicable, but never let a later reload or canonical replay
+        // promote it back to an automatic dispatch.
+        const restoredStatus = resumesOnRestore(request)
+          ? request.status === "dispatched"
+            ? "queued"
+            : request.status
+          : "deferred";
+        if (restoredStatus !== request.status || request.deliveryEntryId !== undefined) {
+          request.status = restoredStatus;
           delete request.deliveryEntryId;
+          request.revision += 1;
           changed = true;
         }
         continue;
       }
 
-      if (request.status !== "dispatched" || request.deliveryEntryId !== delivery.id) {
-        request.status = "dispatched";
-        request.deliveryEntryId = delivery.id;
-        request.revision += 1;
-        changed = true;
-      }
       const completion = entries.find(
         (entry) =>
           entry.type === "message" &&
@@ -329,15 +400,34 @@ export class ContinuationCoordinator {
           isDescendant(entriesById, entry.id, delivery.id),
       );
       if (completion) {
+        // A completed delivery is settled even when its producer is passive on
+        // restore. The assistant descendant proves that the parent consumed it.
         request.status = "settled";
+        request.deliveryEntryId = delivery.id;
         request.settledEntryId = completion.id;
         request.revision += 1;
         changed = true;
         restoredReceipts.push(this.receiptFor(request, "settled"));
-      } else if (this.branchIds.has(delivery.id)) {
+      } else if (!restoredPolicy) {
+        // A passive delivery must remain deduplicable without reserving the
+        // coordinator's single-flight slot. No restore-created turn will settle
+        // it; explicit producer collection owns acknowledgement instead.
+        if (request.status !== "deferred" || request.deliveryEntryId !== delivery.id) {
+          request.status = "deferred";
+          request.deliveryEntryId = delivery.id;
+          request.revision += 1;
+          changed = true;
+        }
+      } else {
         // Pi exposes no message-less turn reservation after process death. Keep
-        // the durable delivery claimed rather than appending a duplicate.
-        this.inFlight = request.requestId;
+        // a resumable delivery claimed rather than appending a duplicate.
+        if (request.status !== "dispatched" || request.deliveryEntryId !== delivery.id) {
+          request.status = "dispatched";
+          request.deliveryEntryId = delivery.id;
+          request.revision += 1;
+          changed = true;
+        }
+        if (this.branchIds.has(delivery.id)) this.inFlight = request.requestId;
       }
     }
     if (changed) this.persist();
@@ -395,6 +485,8 @@ export class ContinuationCoordinator {
     if (!this.active || !this.sessionId) return { accepted: false, reason: "no active session" };
     if (!producerId || !validMessage(event.message))
       return { accepted: false, reason: "invalid continuation request" };
+    if (event.resumeOnRestore !== undefined && typeof event.resumeOnRestore !== "boolean")
+      return { accepted: false, reason: "invalid continuation request" };
     if (event.sessionId && event.sessionId !== this.sessionId)
       return { accepted: false, reason: "session mismatch" };
     const explicitId = event.requestId?.trim();
@@ -438,6 +530,9 @@ export class ContinuationCoordinator {
     const sequence = (this.sequences[producerId] ?? 0) + 1;
     this.sequences[producerId] = sequence;
     const ordinal = ++this.nextOrdinal;
+    const resumeOnRestore =
+      !isHacklerCompletionRequest({ producerId, message: event.message }) &&
+      event.resumeOnRestore !== false;
     const request: PersistedContinuationRequest = {
       version: 1,
       requestId: explicitId ?? `${producerId}:${sequence}`,
@@ -445,6 +540,7 @@ export class ContinuationCoordinator {
       sequence,
       ordinal,
       revision: 1,
+      resumeOnRestore,
       ...(event.dedupeKey !== undefined ? { dedupeKey: event.dedupeKey } : {}),
       message: cloneMessage(event.message),
       sessionId: this.sessionId,

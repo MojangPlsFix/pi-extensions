@@ -2996,7 +2996,100 @@ describe("SubagentManager v2", () => {
     await vi.waitFor(() => expect(restored.manager.batchSnapshots()[0]?.phase).toBe("delivered"));
     expect(
       restored.emitted.filter((event) => event.name === events.continuationEnqueue),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
+    await restored.manager.shutdown();
+  });
+
+  it("keeps restored Hackler results ready until explicitly collected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const original = harness(root);
+    const [run] = await original.manager.dispatch([boundedTask("manual-restore")], original.ctx, {
+      toolCallId: "manual-restore-call",
+    });
+    original.native.emit(run!.id, { type: "settled", report: "Manual restore result." });
+    await vi.waitFor(() => expect(run!.status).toBe("parked"));
+    await original.manager.shutdown();
+
+    const restored = harness(root);
+    await restored.manager.status(restored.ctx);
+    const batch = restored.manager.batchSnapshots()[0]!;
+    expect(batch).toMatchObject({ phase: "ready", manualRecovery: true });
+    expect(
+      restored.emitted.filter((event) => event.name === events.hacklerBatchGate).at(-1)?.data,
+    ).toMatchObject({ batchId: batch.id, active: false });
+    expect(restored.emitted.filter((event) => event.name === events.continuationEnqueue)).toEqual(
+      [],
+    );
+    expect(restored.manager.store.get(run!.id)?.completionAcknowledgedGeneration).toBeUndefined();
+
+    const collected = await restored.manager.collect([run!.id], "none");
+    expect(collected.runs[0]?.report).toBe("Manual restore result.");
+    expect(restored.manager.batchSnapshots()[0]?.phase).toBe("delivered");
+    expect(restored.manager.store.get(run!.id)?.completionAcknowledgedGeneration).toBe(1);
+    expect(restored.emitted.filter((event) => event.name === events.continuationEnqueue)).toEqual(
+      [],
+    );
+    await restored.manager.shutdown();
+  });
+
+  it("applies a late receipt to a restored manual batch without routing it", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const original = harness(root);
+    const [run] = await original.manager.dispatch(
+      [boundedTask("late-manual-receipt")],
+      original.ctx,
+      {
+        toolCallId: "late-manual-receipt-call",
+      },
+    );
+    original.native.emit(run!.id, { type: "settled", report: "Late receipt result." });
+    await vi.waitFor(() => expect(run!.status).toBe("parked"));
+    await original.manager.shutdown();
+
+    const restored = harness(root);
+    await restored.manager.status(restored.ctx);
+    const batch = restored.manager.batchSnapshots()[0]!;
+    restored.emit(events.continuationReceipt, {
+      producerId: "hackler-batches-v3",
+      requestId: batch.continuationId,
+      status: "settled",
+    });
+
+    expect(restored.manager.batchSnapshots()[0]?.phase).toBe("delivered");
+    expect(restored.manager.store.get(run!.id)?.completionAcknowledgedGeneration).toBe(1);
+    expect(restored.emitted.filter((event) => event.name === events.continuationEnqueue)).toEqual(
+      [],
+    );
+    await restored.manager.shutdown();
+  });
+
+  it("keeps a restored multi-member batch ready until every member is collected", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const original = harness(root);
+    const runs = await original.manager.dispatch(
+      [boundedTask("manual-member-a"), boundedTask("manual-member-b", "reviewer")],
+      original.ctx,
+      { toolCallId: "manual-multi-restore-call" },
+    );
+    for (const run of runs)
+      original.native.emit(run.id, { type: "settled", report: `${run.id} result.` });
+    await vi.waitFor(() => expect(runs.every((run) => run.status === "parked")).toBe(true));
+    await original.manager.shutdown();
+
+    const restored = harness(root);
+    await restored.manager.status(restored.ctx);
+    expect(restored.manager.batchSnapshots()[0]).toMatchObject({
+      phase: "ready",
+      manualRecovery: true,
+    });
+
+    await restored.manager.collect([runs[0]!.id], "none");
+    expect(restored.manager.batchSnapshots()[0]?.phase).toBe("ready");
+    await restored.manager.collect([runs[1]!.id], "none");
+    expect(restored.manager.batchSnapshots()[0]?.phase).toBe("delivered");
     await restored.manager.shutdown();
   });
 

@@ -78,6 +78,7 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
   let herdrBlockedDepth = 0;
   const finalizationGates = new Set<string>();
   const batchGates = new Map<string, HacklerBatchGateEvent>();
+  let idlePump: ReturnType<typeof setTimeout> | undefined;
 
   const coordinator = new ContinuationCoordinator({
     persist(snapshot: ContinuationSnapshot) {
@@ -164,6 +165,19 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
     if (!active && evaluate && finalizationGates.size === 0 && context) maybeFinalize(context);
   };
 
+  const scheduleIdlePump = (ctx: ExtensionContext): void => {
+    if (idlePump) return;
+    const sessionId = ctx.sessionManager.getSessionId();
+    idlePump = setTimeout(() => {
+      idlePump = undefined;
+      if (context !== ctx || ctx.sessionManager.getSessionId() !== sessionId) return;
+      const idle = ctx.isIdle();
+      coordinator.setIdle(idle);
+      if (idle) maybeFinalize(ctx);
+    }, 0);
+    idlePump.unref?.();
+  };
+
   const arm = (reason: string, anchorEntryId?: string): void => {
     if (!context) return;
     const branch = context.sessionManager.getBranch() as SessionEntry[];
@@ -176,16 +190,14 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
     persistWave();
   };
 
-  const reload = (ctx: ExtensionContext): void => {
+  const reload = (ctx: ExtensionContext, restoreContinuations = true): void => {
     context = ctx;
     const branch = ctx.sessionManager.getBranch() as SessionEntry[];
     wave = restoreWave(branch);
-    coordinator.restore(
-      ctx.sessionManager.getSessionId(),
-      ctx.sessionManager.getEntries() as SessionEntry[],
-      branch,
-      false,
-    );
+    const entries = ctx.sessionManager.getEntries() as SessionEntry[];
+    if (restoreContinuations)
+      coordinator.restore(ctx.sessionManager.getSessionId(), entries, branch, false);
+    else coordinator.observeBranch(entries, branch);
     // restore() intentionally resets runtime gates. Reapply live application
     // gates before allowing an idle dispatch on the newly active branch.
     for (const gateId of finalizationGates) coordinator.setGate(gateId, true);
@@ -270,9 +282,11 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
   });
 
   pi.on("session_start", (_event, ctx) => reload(ctx));
-  pi.on("session_tree", (_event, ctx) => reload(ctx));
+  pi.on("session_tree", (_event, ctx) => reload(ctx, false));
 
   pi.on("session_shutdown", () => {
+    if (idlePump) clearTimeout(idlePump);
+    idlePump = undefined;
     context = undefined;
     userInteractionDepth = 0;
     herdrBlockedDepth = 0;
@@ -323,5 +337,6 @@ export default function workflowFinalization(pi: ExtensionAPI): void {
     coordinator.agentSettled(ctx.sessionManager.getLeafId() ?? undefined);
     coordinator.setIdle(ctx.isIdle());
     maybeFinalize(ctx);
+    scheduleIdlePump(ctx);
   });
 }

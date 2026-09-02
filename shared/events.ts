@@ -41,12 +41,17 @@ export type ContinuationMessage = {
   details?: unknown;
 };
 
-/** Enqueue one durable automatic turn. producerId and any explicit requestId must be reload-stable. */
+/** Enqueue one durable continuation request. producerId and any explicit requestId must be reload-stable. */
 export type ContinuationEnqueueEvent = {
   producerId: string;
   message: ContinuationMessage;
   /** Optional canonical ID, for producers that already persist their own request identity. */
   requestId?: string;
+  /**
+   * Whether a pending request may dispatch automatically when the session is restored.
+   * Defaults to true for existing producers; Hub/collect-only producers set false.
+   */
+  resumeOnRestore?: boolean;
   dedupeKey?: string;
   /** Defaults to the coordinator's current session. A mismatch is rejected. */
   sessionId?: string;

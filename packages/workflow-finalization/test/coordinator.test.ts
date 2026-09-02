@@ -44,6 +44,29 @@ function delivered(id: string, requestId: string, producerId: string): SessionEn
   };
 }
 
+function assistant(id: string, parentId: string): SessionEntry {
+  return {
+    type: "message",
+    id,
+    parentId,
+    timestamp: "2026-01-01T00:00:00Z",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "done" }],
+      timestamp: 2,
+      stopReason: "stop",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+    },
+  } as SessionEntry;
+}
+
 function harness() {
   let latest: ContinuationSnapshot | undefined;
   const host = {
@@ -83,6 +106,213 @@ describe("ContinuationCoordinator", () => {
       }),
     );
     expect(subject.host.send).toHaveBeenCalledTimes(2);
+  });
+
+  it("defers restored Hackler completions without opening automatic work", () => {
+    const subject = harness();
+    const root = entry("root");
+    const requestId = "hackler-batches-v3:batch-1";
+    const state = custom("state", {
+      version: 1,
+      producerSequences: { "hackler-batches-v3": 1 },
+      nextOrdinal: 1,
+      requests: [
+        {
+          version: 1,
+          requestId,
+          producerId: "hackler-batches-v3",
+          sequence: 1,
+          ordinal: 1,
+          revision: 1,
+          message: { customType: "subagent-completion-v3", content: "reports" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "queued",
+        },
+      ],
+    });
+
+    subject.coordinator.restore("session", [root, state], [root], true);
+
+    expect(subject.host.send).not.toHaveBeenCalled();
+    expect(subject.coordinator.getRequest(requestId)).toMatchObject({
+      status: "deferred",
+      resumeOnRestore: false,
+    });
+    expect(subject.coordinator.hasOpenRequests()).toBe(false);
+  });
+
+  it("keeps a deferred canonical Hackler replay deduplicated and passive", () => {
+    const subject = harness();
+    const root = entry("root");
+    const requestId = "hackler-batches-v3:batch-2";
+    const state = custom("state", {
+      version: 1,
+      producerSequences: { "hackler-batches-v3": 1 },
+      nextOrdinal: 1,
+      requests: [
+        {
+          version: 1,
+          requestId,
+          producerId: "hackler-batches-v3",
+          sequence: 1,
+          ordinal: 1,
+          revision: 1,
+          resumeOnRestore: false,
+          message: { customType: "subagent-completion-v3", content: "reports" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "queued",
+        },
+      ],
+    });
+    subject.coordinator.restore("session", [root, state], [root], true);
+
+    expect(
+      subject.coordinator.enqueue({
+        producerId: "hackler-batches-v3",
+        requestId,
+        resumeOnRestore: true,
+        message: { customType: "subagent-completion-v3", content: "reports" },
+      }),
+    ).toMatchObject({ accepted: false, requestId, reason: "deduplicated" });
+    expect(subject.coordinator.getRequest(requestId)).toMatchObject({
+      status: "deferred",
+      resumeOnRestore: false,
+    });
+    expect(subject.host.send).not.toHaveBeenCalled();
+  });
+
+  it("restores non-Hackler requests with the existing automatic policy", () => {
+    const subject = harness();
+    const root = entry("root");
+    const requestId = "normal:restore";
+    const state = custom("state", {
+      version: 1,
+      producerSequences: { normal: 1 },
+      nextOrdinal: 1,
+      requests: [
+        {
+          version: 1,
+          requestId,
+          producerId: "normal",
+          sequence: 1,
+          ordinal: 1,
+          revision: 1,
+          message: { content: "continue" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "queued",
+        },
+      ],
+    });
+
+    subject.coordinator.restore("session", [root, state], [root], true);
+
+    expect(subject.host.send).toHaveBeenCalledTimes(1);
+    expect(subject.host.send).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId, resumeOnRestore: true }),
+    );
+  });
+
+  it("keeps an already-delivered passive Hackler message deduplicable without blocking work", () => {
+    const subject = harness();
+    const root = entry("root");
+    const requestId = "hackler-batches-v3:batch-delivered";
+    const state = custom("state", {
+      version: 1,
+      producerSequences: { "hackler-batches-v3": 1 },
+      nextOrdinal: 1,
+      requests: [
+        {
+          version: 1,
+          requestId,
+          producerId: "hackler-batches-v3",
+          sequence: 1,
+          ordinal: 1,
+          revision: 1,
+          resumeOnRestore: false,
+          message: { customType: "subagent-completion-v3", content: "reports" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "dispatched",
+        },
+      ],
+    });
+    const delivery = delivered("delivery", requestId, "hackler-batches-v3");
+
+    subject.coordinator.restore("session", [root, state, delivery], [root, delivery], true);
+
+    expect(subject.host.send).not.toHaveBeenCalled();
+    expect(subject.coordinator.getRequest(requestId)).toMatchObject({
+      status: "deferred",
+      resumeOnRestore: false,
+      deliveryEntryId: "delivery",
+    });
+    expect(subject.coordinator.hasOpenRequests()).toBe(false);
+
+    const planRequestId = "plan-mode:implementation:v2:plan-1";
+    expect(
+      subject.coordinator.enqueue({
+        producerId: "plan-mode:implementation:v2",
+        requestId: planRequestId,
+        message: {
+          customType: "plan-mode-implementation",
+          content: "Implement the approved plan.",
+        },
+      }),
+    ).toEqual({ accepted: true, requestId: planRequestId });
+    expect(subject.host.send).toHaveBeenCalledTimes(1);
+    expect(subject.host.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        producerId: "plan-mode:implementation:v2",
+        requestId: planRequestId,
+      }),
+    );
+  });
+
+  it("settles an already-delivered Hackler request from an assistant descendant", () => {
+    const subject = harness();
+    const root = entry("root");
+    const requestId = "hackler-batches-v3:batch-settled";
+    const state = custom("state", {
+      version: 1,
+      producerSequences: { "hackler-batches-v3": 1 },
+      nextOrdinal: 1,
+      requests: [
+        {
+          version: 1,
+          requestId,
+          producerId: "hackler-batches-v3",
+          sequence: 1,
+          ordinal: 1,
+          revision: 1,
+          resumeOnRestore: false,
+          message: { customType: "subagent-completion-v3", content: "reports" },
+          sessionId: "session",
+          originEntryId: "root",
+          status: "dispatched",
+        },
+      ],
+    });
+    const delivery = delivered("delivery", requestId, "hackler-batches-v3");
+    const response = assistant("assistant", "delivery");
+
+    subject.coordinator.restore(
+      "session",
+      [root, state, delivery, response],
+      [root, delivery, response],
+      true,
+    );
+
+    expect(subject.host.send).not.toHaveBeenCalled();
+    expect(subject.coordinator.getRequest(requestId)).toMatchObject({
+      status: "settled",
+      settledEntryId: "assistant",
+    });
+    expect(subject.host.receipt).toHaveBeenCalledWith(
+      expect.objectContaining({ requestId, status: "settled" }),
+    );
   });
 
   it("defers an inactive origin branch and dispatches it when that branch is active", () => {

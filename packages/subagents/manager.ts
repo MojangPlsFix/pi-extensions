@@ -552,7 +552,7 @@ export class SubagentManager {
         batch,
         active && ["collecting", "ready", "in-flight"].includes(batch.phase),
       );
-      if (active && batch.phase === "ready") void this.routeBatch(batch);
+      if (active && batch.phase === "ready" && !batch.manualRecovery) void this.routeBatch(batch);
     }
     this.publish();
   }
@@ -1209,7 +1209,7 @@ export class SubagentManager {
     const branchActive = batch.route !== "pi" || this.isActiveTopLevelBatch(batch);
     this.pi.events.emit(events.hacklerBatchGate, {
       batchId: batch.id,
-      active: active && branchActive,
+      active: active && batch.manualRecovery !== true && branchActive,
       relevant: batch.codeChanging || batch.reviewing === true,
       phase:
         phase ??
@@ -1326,7 +1326,7 @@ export class SubagentManager {
     if (batch.phase === "collecting" && batch.results.length === batch.members.length) {
       batch.phase = "ready";
       batch.readyAt = batch.updatedAt;
-      void this.routeBatch(batch);
+      if (!batch.manualRecovery) void this.routeBatch(batch);
     }
     this.publish();
   }
@@ -1360,7 +1360,7 @@ export class SubagentManager {
       batch.phase = "ready";
       batch.readyAt = iso();
       batch.updatedAt = batch.readyAt;
-      void this.routeBatch(batch);
+      if (!batch.manualRecovery) void this.routeBatch(batch);
     }
   }
 
@@ -1396,10 +1396,36 @@ export class SubagentManager {
       this.pendingContinuationReceipts.delete(requestId);
       return;
     }
-    if (batch.phase !== "in-flight") return;
+    if (batch.phase !== "in-flight" && !(batch.manualRecovery && batch.phase === "ready")) return;
     this.pendingContinuationReceipts.delete(requestId);
     if (receipt.status === "settled") this.markBatchDelivered(batch);
     else this.orphanBatch(batch, "continuation cancelled");
+  }
+
+  private applyRestoredContinuationReceipt(batch: DispatchBatch): void {
+    const requestId = batch.continuationId ?? `${COMPLETION_PRODUCER_ID}:${batch.id}`;
+    const receipt = this.pendingContinuationReceipts.get(requestId);
+    if (!receipt) return;
+    this.pendingContinuationReceipts.delete(requestId);
+    if (batch.phase === "delivered" || batch.phase === "orphaned") return;
+    if (receipt.status === "settled") this.markBatchDelivered(batch);
+    else this.orphanBatch(batch, "continuation cancelled");
+  }
+
+  private acknowledgeManuallyCollectedBatches(): void {
+    for (const batch of this.batches.values()) {
+      if (!batch.manualRecovery || batch.phase !== "ready") continue;
+      const complete = batch.members.every((member) => {
+        const run = this.store.get(member.runId);
+        return Boolean(
+          run &&
+            !ACTIVE_STATUSES.has(run.status) &&
+            this.terminalGeneration(run) === member.generation &&
+            run.completionAcknowledgedGeneration === member.generation,
+        );
+      });
+      if (complete) this.markBatchDelivered(batch);
+    }
   }
 
   private routeBatch(batch: DispatchBatch): Promise<void> {
@@ -1413,7 +1439,7 @@ export class SubagentManager {
   }
 
   private async routeBatchOnce(batch: DispatchBatch): Promise<void> {
-    if (batch.phase !== "ready") return;
+    if (batch.phase !== "ready" || batch.manualRecovery) return;
     if (batch.route === "silent") {
       this.markBatchDelivered(batch);
       return;
@@ -1466,6 +1492,7 @@ export class SubagentManager {
       dedupeKey: batch.id,
       sessionId: batch.originSessionId,
       originEntryId: batch.originEntryId,
+      resumeOnRestore: false,
       message: {
         customType: COMPLETION_MESSAGE_TYPE,
         content: this.batchContent(batch),
@@ -3164,6 +3191,7 @@ export class SubagentManager {
           changed = true;
       }
       if (changed) this.store.changed();
+      this.acknowledgeManuallyCollectedBatches();
       return selected.map((run) => runSnapshot(run));
     };
     if (wait === "none") return { runs: collectedSnapshots() };
@@ -4274,6 +4302,7 @@ export class SubagentManager {
             typeof batch.id !== "string" ||
             !Array.isArray(batch.members) ||
             !Array.isArray(batch.results) ||
+            !(batch.manualRecovery === undefined || typeof batch.manualRecovery === "boolean") ||
             !["pi", "owner", "silent"].includes(batch.route) ||
             !["collecting", "ready", "in-flight", "delivered", "orphaned"].includes(batch.phase)
           )
@@ -4543,6 +4572,10 @@ export class SubagentManager {
           if (this.acknowledgeDeliveredBatch(batch)) acknowledgementChanged = true;
         if (acknowledgementChanged) this.store.changed();
         for (const batch of this.batches.values()) {
+          if (batch.route === "pi") {
+            batch.manualRecovery = true;
+            if (batch.phase === "in-flight") batch.phase = "ready";
+          }
           this.settleMissingBatchMembers(
             batch,
             "member run state was unavailable after manager restore",
@@ -4559,7 +4592,9 @@ export class SubagentManager {
             if (run && !ACTIVE_STATUSES.has(run.status))
               this.settleBatchMember(run, member.generation);
           }
-          if (batch.route === "owner") {
+          if (batch.manualRecovery) {
+            this.applyRestoredContinuationReceipt(batch);
+          } else if (batch.route === "owner") {
             const owner = batch.ownerRunId ? this.store.get(batch.ownerRunId) : undefined;
             if (!owner || !ACTIVE_STATUSES.has(owner.status))
               this.orphanBatch(batch, "owning orchestrator was not active after restore");
