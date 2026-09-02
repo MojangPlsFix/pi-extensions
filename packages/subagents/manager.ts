@@ -548,10 +548,7 @@ export class SubagentManager {
     for (const batch of this.batches.values()) {
       if (batch.route !== "pi") continue;
       const active = this.isActiveTopLevelBatch(batch);
-      this.emitBatchGate(
-        batch,
-        active && ["collecting", "ready", "in-flight"].includes(batch.phase),
-      );
+      this.emitBatchGate(batch, active && ["collecting", "ready"].includes(batch.phase));
       if (active && batch.phase === "ready" && !batch.manualRecovery) void this.routeBatch(batch);
     }
     this.publish();

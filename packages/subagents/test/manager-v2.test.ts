@@ -2782,6 +2782,44 @@ describe("SubagentManager v2", () => {
     await subject.manager.shutdown();
   });
 
+  it("keeps an accepted reviewing batch gate closed during status reconciliation", async () => {
+    const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
+    temporary.push(root);
+    const subject = harness(root);
+    const [run] = await subject.manager.dispatch(
+      [boundedTask("review-gate-reconciliation", "reviewer")],
+      subject.ctx,
+      { toolCallId: "review-gate-reconciliation-call" },
+    );
+
+    subject.native.emit(run!.id, { type: "settled", report: "Review complete." });
+    await vi.waitFor(() => expect(subject.manager.batchSnapshots()[0]?.phase).toBe("in-flight"));
+    const batch = subject.manager.batchSnapshots()[0]!;
+    expect(batch).toMatchObject({
+      route: "pi",
+      codeChanging: false,
+      reviewing: true,
+      phase: "in-flight",
+    });
+
+    await subject.manager.status(subject.ctx);
+
+    const latestGate = subject.emitted
+      .filter(
+        (event) =>
+          event.name === events.hacklerBatchGate &&
+          (event.data as { batchId?: string }).batchId === batch.id,
+      )
+      .at(-1)?.data;
+    expect(latestGate).toMatchObject({
+      batchId: batch.id,
+      active: false,
+      relevant: true,
+      phase: "review",
+    });
+    await subject.manager.shutdown();
+  });
+
   it("keeps concurrent dispatch batches isolated and preserves exact stop evidence", async () => {
     const root = await mkdtemp(join(tmpdir(), "subagent-manager-v3-"));
     temporary.push(root);
