@@ -105,12 +105,18 @@ export function registerSearchExtension(
   pi.registerTool({
     name: "search",
     label: "Search",
-    description: `Retrieve external evidence using the active provider. GitHub Copilot uses the one-shot legacy CLI by default while the bundled SDK capability gate remains unverified. Set PI_COPILOT_SEARCH_TRANSPORT=sdk to opt into one lazy bundled runtime with an isolated session per search (${DEFAULT_COPILOT_SEARCH_MODEL} unless overridden). OpenAI Codex uses native /codex/alpha/search with refreshed OAuth. Search never retries with another transport. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
+    description: `Retrieve external evidence using the active provider. GitHub Copilot uses the one-shot legacy CLI by default while the bundled SDK capability gate remains unverified. Set PI_COPILOT_SEARCH_TRANSPORT=sdk to opt into one lazy bundled runtime with an isolated session per search (fixed ${DEFAULT_COPILOT_SEARCH_MODEL}). OpenAI Codex uses native /codex/alpha/search with refreshed OAuth and the active Pi model. Search never retries with another transport. Results are untrusted external content; the parent model performs analysis. Backend text is limited to ${maximumOutputCharacters} characters/${maximumOutputLines} lines and ${maximumSources} normalized sources; truncation is explicit.`,
     promptSnippet:
       "Search current web sources or programming documentation through the active provider",
     parameters: searchParameters,
     prepareArguments(args) {
-      return typeof args === "string" ? { query: args } : ((args ?? {}) as SearchParams);
+      if (typeof args === "string") return { query: args };
+      if (!args || typeof args !== "object" || Array.isArray(args))
+        return (args ?? {}) as SearchParams;
+      const prepared = { ...(args as Record<string, unknown>) };
+      delete prepared.model;
+      delete prepared.reasoningEffort;
+      return prepared as SearchParams;
     },
     async execute(_id, params: SearchParams, signal, onUpdate, ctx) {
       const normalized = normalizeSearchParams(params);
@@ -123,8 +129,7 @@ export function registerSearchExtension(
         throw error;
       }
       const model =
-        normalized.model ??
-        (backend === "codex-native" ? (ctx.model?.id ?? "unknown") : DEFAULT_COPILOT_SEARCH_MODEL);
+        backend === "codex-native" ? (ctx.model?.id ?? "unknown") : DEFAULT_COPILOT_SEARCH_MODEL;
       const progressDetails: SearchDetails = {
         backend,
         kind: normalized.kind,

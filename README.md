@@ -51,7 +51,7 @@ The SDK transport starts one lazy bundled runtime per Pi session. The extension 
 
 Set `PI_COPILOT_SEARCH_TRANSPORT=sdk|cli` to select the GitHub transport. `cli` remains the default until the authenticated SDK capability and reliability gates pass. `sdk` selects the opt-in bundled runtime preview. Search never retries a request on another transport automatically.
 
-`gpt-5.6-luna` is the default Copilot Search model unless the request overrides the model. The SDK transport omits reasoning effort. The legacy CLI transport uses effort `none`. Codex uses native `/codex/alpha/search`. All backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because the backends do not expose usage or cost for local Pi totals.
+`gpt-5.6-luna` is the fixed Copilot Search model. The SDK transport omits reasoning effort, and the legacy CLI transport uses effort `none`. Codex uses native `/codex/alpha/search` with the active Pi model. Search inputs cannot override the model or reasoning effort. All backends return bounded, untrusted source evidence. The active parent model handles the analysis. Retrieval uses provider-accounted quota because the backends do not expose usage or cost for local Pi totals.
 
 The Copilot inactivity timeout resets on meaningful SDK events or legacy CLI output. Cancellation stops only the current SDK search session. It does not stop other searches that share the runtime. GitHub does not publish a supported standalone REST API or direct GitHub MCP contract for `web_search`. This package does not use private Copilot endpoints.
 

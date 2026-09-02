@@ -8,7 +8,7 @@ Web Search registers one `search` tool for bounded web and programming-documenta
 
 The tool does not use a silent provider or transport fallback. GitHub does not publish a supported standalone REST API or direct GitHub MCP contract for `web_search`. The extension does not call private Copilot search endpoints.
 
-The extension does not retain `web_search` or `code_search` aliases. Use the optional `kind: "web" | "code"` value to select the retrieval type. The input also accepts `prompt`, `query`, or `queries`, recency and domain filters, source-page inspection, an output budget, and a model override. Multiple query strings remain one search turn.
+The extension does not retain `web_search` or `code_search` aliases. Use the optional `kind: "web" | "code"` value to select the retrieval type. The input also accepts `prompt`, `query`, or `queries`, recency and domain filters, source-page inspection, and an output budget. Multiple query strings remain one search turn.
 
 ## GitHub transport and lifecycle
 
@@ -35,7 +35,7 @@ The TUI identifies `copilot-sdk`, `copilot-cli`, or `codex-native`. It then show
 
 The extension does not contact either backend during Pi startup. The default transport requires an installed and authenticated local `copilot` command. The SDK-bundled runtime can authenticate with GitHub CLI credentials or supported token environment variables. Its isolated empty mode does not import the CLI's stored login.
 
-`gpt-5.6-luna` is the default Copilot Search model unless the request supplies a model override. The SDK transport omits reasoning effort because the SDK does not support the CLI's historical `none` value. The legacy CLI transport uses effort `none`.
+`gpt-5.6-luna` is the fixed Copilot Search model. Codex native search uses the active Pi model. Search inputs cannot override the model or reasoning effort. The SDK transport omits reasoning effort because the SDK does not support the CLI's historical `none` value. The legacy CLI transport uses effort `none`.
 
 The timeout is an inactivity limit of 600,000 milliseconds (10 minutes) by default. Meaningful SDK events or legacy CLI output reset the timer. Set `PI_COPILOT_SEARCH_TIMEOUT_MS` to a positive integer to change the limit. Timeout and cancellation stop the current search and run bounded session cleanup.
 

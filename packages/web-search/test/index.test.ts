@@ -94,6 +94,7 @@ function details(overrides: Partial<SearchDetails> = {}): SearchDetails {
 
 type RegisteredTool = {
   name: string;
+  parameters: { properties: Record<string, unknown> };
   prepareArguments: (args: unknown) => unknown;
   execute: (
     id: string,
@@ -115,10 +116,19 @@ function registeredSearchTool(): RegisteredTool {
 }
 
 describe("unified search interface", () => {
-  it("registers exactly one search tool and normalizes string and object arguments", () => {
+  it("registers one strict schema and removes legacy overrides before validation", () => {
     const tool = registeredSearchTool();
+    expect(tool.parameters.properties).not.toHaveProperty("model");
+    expect(tool.parameters.properties).not.toHaveProperty("reasoningEffort");
     expect(tool.prepareArguments("release notes")).toEqual({ query: "release notes" });
-    expect(tool.prepareArguments({ prompt: "research", kind: "code" })).toEqual({
+    expect(
+      tool.prepareArguments({
+        prompt: "research",
+        kind: "code",
+        model: "legacy-model",
+        reasoningEffort: "high",
+      }),
+    ).toEqual({
       prompt: "research",
       kind: "code",
     });
@@ -146,6 +156,13 @@ describe("unified search interface", () => {
     expect(() =>
       normalizeSearchParams({ query: "docs", domainFilter: ["https://example.com"] }),
     ).toThrow("Invalid domain");
+    const legacy = normalizeSearchParams({
+      query: "docs",
+      model: "legacy-model",
+      reasoningEffort: "high",
+    } as SearchParams & { model: string; reasoningEffort: string });
+    expect(legacy).not.toHaveProperty("model");
+    expect(legacy).not.toHaveProperty("reasoningEffort");
   });
 
   it("includes native web-search guidance without changing code-search prompts", () => {
@@ -201,7 +218,7 @@ describe("Copilot CLI backend", () => {
     ).rejects.toThrow("Install and authenticate");
   });
 
-  it("always uses no reasoning for Copilot retrieval", () => {
+  it("always uses the fixed Copilot model and no reasoning effort", () => {
     expect(buildCopilotArguments("code", { query: "docs" })).toEqual(
       expect.arrayContaining([
         "--model",
@@ -219,19 +236,21 @@ describe("Copilot CLI backend", () => {
     expect(buildCopilotArguments("code", { query: "docs" })).toEqual(
       expect.arrayContaining(["--available-tools=web_search"]),
     );
-    expect(
-      buildCopilotArguments("code", {
-        query: "docs",
-        model: "gpt-5.4",
-        reasoningEffort: "high",
-      }),
-    ).toEqual(expect.arrayContaining(["--model", "gpt-5.4", "--effort", "none"]));
-    expect(
-      buildCopilotArguments("code", {
-        query: "docs",
-        reasoningEffort: "high",
-      }),
-    ).not.toContain("high");
+    const legacyArguments = buildCopilotArguments("code", {
+      query: "docs",
+      model: "legacy-model",
+      reasoningEffort: "high",
+    } as SearchParams & { model: string; reasoningEffort: string });
+    expect(legacyArguments).toEqual(
+      expect.arrayContaining([
+        "--model",
+        DEFAULT_COPILOT_SEARCH_MODEL,
+        "--effort",
+        DEFAULT_COPILOT_SEARCH_EFFORT,
+      ]),
+    );
+    expect(legacyArguments).not.toContain("legacy-model");
+    expect(legacyArguments).not.toContain("high");
   });
 
   it("emits backend-specific progress, bounds output, and keeps CLI payloads out of errors", async () => {
@@ -341,48 +360,35 @@ describe("Copilot CLI backend", () => {
     }
   });
 
-  it("rejects unsafe overrides before process execution and never invokes a shell", async () => {
-    expect(() => buildCopilotArguments("code", { query: "docs", model: "x;bad" })).toThrow(
-      "Invalid model",
-    );
-    expect(() =>
-      buildCopilotArguments("code", { query: "docs", reasoningEffort: "bad value" }),
-    ).toThrow("Invalid reasoning effort");
+  it("passes request text without invoking a shell", () => {
     const prompt = "quoted; query $(never-a-shell-command)";
     const argumentsList = buildCopilotArguments("code", { query: prompt });
     expect(argumentsList[argumentsList.indexOf("-p") + 1]).toContain(prompt);
     expect(copilotSpawnOptions().shell).toBe(false);
-    await expect(
-      runCopilotSearch(
-        "code",
-        { query: "docs", reasoningEffort: "bad value" },
-        undefined,
-        "missing",
-      ),
-    ).rejects.toThrow("Invalid reasoning effort");
   });
 });
 
 describe("Codex native backend", () => {
-  it("constructs a native filtered request with bounded output and model override", () => {
+  it("constructs a native filtered request with the active model", () => {
     expect(
       buildCodexSearchRequest(
         {
           prompt: "Research OpenAI",
           queries: ["Codex search"],
           kind: "code",
-          model: "gpt-5.4",
+          model: "legacy-model",
+          reasoningEffort: "high",
           recencyFilter: "week",
           domainFilter: ["openai.com", "-example.com"],
           includeContent: true,
           maxTokens: 7_000,
-        },
+        } as SearchParams & { model: string; reasoningEffort: string },
         "active-model",
         "request-id",
       ),
     ).toEqual({
       id: "request-id",
-      model: "gpt-5.4",
+      model: "active-model",
       input: expect.stringContaining("Prefer official documentation"),
       commands: {
         search_query: [
@@ -399,9 +405,9 @@ describe("Codex native backend", () => {
       },
       max_output_tokens: 7_000,
     });
-    expect(() =>
-      buildCodexSearchRequest({ query: "docs", reasoningEffort: "high" }, "active"),
-    ).toThrow("only by Copilot");
+    expect(() => buildCodexSearchRequest({ query: "docs" }, "  ")).toThrow(
+      "non-empty active model",
+    );
   });
 
   it("extracts OAuth account identity and builds required request headers", () => {

@@ -46,8 +46,6 @@ export type SearchParams = {
   query?: string;
   queries?: string[];
   kind?: SearchKind;
-  model?: string;
-  reasoningEffort?: string;
   recencyFilter?: string;
   domainFilter?: string[];
   includeContent?: boolean;
@@ -77,8 +75,6 @@ export type SearchDetails = {
 export type NormalizedSearchParams = SearchParams & {
   kind: SearchKind;
   requests: string[];
-  model?: string;
-  reasoningEffort?: string;
   maxTokens?: number;
 };
 export type BackendSearchResult = {
@@ -132,13 +128,6 @@ export const searchParameters = Type.Object({
       minimum: 1,
       maximum: maximumCodexMaxTokens,
       description: "Approximate bounded backend output budget.",
-    }),
-  ),
-  model: Type.Optional(Type.String({ description: "Optional search-backend model override." })),
-  reasoningEffort: Type.Optional(
-    Type.String({
-      description:
-        "Retained for compatibility. The SDK omits reasoning effort; legacy CLI search uses `none`.",
     }),
   ),
 });
@@ -236,13 +225,14 @@ export function normalizeSearchParams(params: SearchParams): NormalizedSearchPar
   )
     throw new Error("Invalid recency filter.");
   const normalized: NormalizedSearchParams = {
-    ...params,
+    prompt: params.prompt,
+    query: params.query,
+    queries: params.queries,
     kind,
     requests,
     recencyFilter,
     domainFilter,
-    model: safeOption(params.model, "model"),
-    reasoningEffort: safeOption(params.reasoningEffort, "reasoning effort"),
+    includeContent: params.includeContent,
     maxTokens:
       params.maxTokens === undefined
         ? undefined

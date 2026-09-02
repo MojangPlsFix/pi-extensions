@@ -618,7 +618,12 @@ describe("Copilot SDK retrieval policy and normalization", () => {
   it("uses empty-mode session controls, web-only filters, and selective permissions", async () => {
     const permissionCallIds = new Set(["url-one"]);
     const config = buildCopilotSdkSessionConfig(
-      { query: "docs", includeContent: true, reasoningEffort: "high" },
+      {
+        query: "docs",
+        includeContent: true,
+        model: "legacy-model",
+        reasoningEffort: "high",
+      } as SearchParams & { model: string; reasoningEffort: string },
       "/tmp/session",
       ["mcp:github-mcp-server-web_search", "builtin:web_fetch"],
       permissionCallIds,

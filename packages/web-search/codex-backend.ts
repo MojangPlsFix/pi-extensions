@@ -44,17 +44,17 @@ export function buildCodexSearchRequest(
   id: string = randomUUID(),
 ): Record<string, unknown> {
   const normalized = normalizeSearchParams(params);
-  if (normalized.reasoningEffort)
-    throw new Error("reasoningEffort is supported only by Copilot CLI search.");
   const allowedDomains = normalized.domainFilter?.filter((domain) => !domain.startsWith("-"));
   const blockedDomains = normalized.domainFilter
     ?.filter((domain) => domain.startsWith("-"))
     .map((domain) => domain.slice(1));
   const days = recencyDays(normalized.recencyFilter);
   const maxTokens = normalized.maxTokens ?? defaultCodexMaxTokens;
+  const activeModel = safeOption(activeModelId, "active model");
+  if (!activeModel) throw new Error("OpenAI Codex search requires a non-empty active model.");
   return {
     id,
-    model: normalized.model ?? safeOption(activeModelId, "active model") ?? activeModelId,
+    model: activeModel,
     input: promptFor(normalized),
     commands: {
       search_query: normalized.requests.map((query) => ({

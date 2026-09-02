@@ -512,7 +512,7 @@ export function buildCopilotSdkSessionConfig(
   const normalized = normalizeSearchParams(params);
   return {
     sessionId: randomUUID(),
-    model: normalized.model ?? DEFAULT_COPILOT_SEARCH_MODEL,
+    model: DEFAULT_COPILOT_SEARCH_MODEL,
     workingDirectory: sessionDirectory,
     configDirectory: join(sessionDirectory, "config"),
     enableConfigDiscovery: false,

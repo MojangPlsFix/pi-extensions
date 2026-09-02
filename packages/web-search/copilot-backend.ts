@@ -35,7 +35,7 @@ export function copilotSearchTimeoutMs(environment: NodeJS.ProcessEnv = process.
 /** Builds shell-free retrieval arguments, including the intentionally cheap default backend. */
 export function buildCopilotArguments(mode: SearchMode, params: SearchParams): string[] {
   const normalized = normalizeSearchParams({ ...params, kind: mode });
-  const model = normalized.model ?? DEFAULT_COPILOT_SEARCH_MODEL;
+  const model = DEFAULT_COPILOT_SEARCH_MODEL;
   // Search is retrieval-only. Never allow a caller to raise Copilot reasoning effort.
   const effort = DEFAULT_COPILOT_SEARCH_EFFORT;
   const availableTools = `--available-tools=web_search${normalized.includeContent ? ",web_fetch" : ""}`;
@@ -276,7 +276,7 @@ export async function runCopilotSearch(
 ): Promise<string> {
   const normalized = normalizeSearchParams({ ...params, kind: mode });
   const args = buildCopilotArguments(mode, normalized);
-  const model = normalized.model ?? DEFAULT_COPILOT_SEARCH_MODEL;
+  const model = DEFAULT_COPILOT_SEARCH_MODEL;
   if (signal?.aborted) throw abortError();
   onStatus?.("Searching with Copilot CLI…");
 
