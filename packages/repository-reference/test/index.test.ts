@@ -102,6 +102,42 @@ describe("repository_reference tool", () => {
     expect(onUpdate.mock.calls[0]?.[0].content[0].text).toBe("Cloning repository…");
   });
 
+  it("keeps clone success when an update renderer throws", async () => {
+    const tool = registeredTool();
+    const reference = {
+      id: "ref-test",
+      remote: "https://github.com/example/project.git",
+      revision: "main",
+      resolvedRevision: "0123456789abcdef0123456789abcdef01234567",
+      path: "/tmp/pi-repository-references/ref-test",
+      createdAt: "2025-01-01T00:00:00.000Z",
+    };
+    storeMocks.cloneRepositoryReference.mockImplementationOnce(
+      async (
+        _remote: string,
+        _revision: string,
+        options: { onProgress?: (progress: unknown) => void },
+      ) => {
+        options.onProgress?.({ phase: "clone", message: "Cloning repository…" });
+        return reference;
+      },
+    );
+    const onUpdate = vi.fn(() => {
+      throw new Error("renderer failed");
+    });
+
+    await expect(
+      tool.execute(
+        "call",
+        { action: "clone", remote: reference.remote, revision: reference.revision },
+        undefined,
+        onUpdate,
+        { hasUI: true },
+      ),
+    ).resolves.toMatchObject({ details: { reference } });
+    expect(onUpdate).toHaveBeenCalledOnce();
+  });
+
   it("uses Pi error semantics for invalid clone inputs", async () => {
     const tool = registeredTool();
 

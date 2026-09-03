@@ -61,16 +61,20 @@ function publishProgress(
 ): string[] {
   const nextProgress = appendProgress(progressLines, progress);
   const status = progress.message.split("\n", 1)[0]?.trim() || progress.message;
-  onUpdate?.({
-    content: [{ type: "text", text: status }],
-    details: {
-      action: "clone",
-      phase: progress.phase,
-      status,
-      progress: nextProgress,
-      diagnostics: progress.diagnostics,
-    },
-  });
+  try {
+    onUpdate?.({
+      content: [{ type: "text", text: status }],
+      details: {
+        action: "clone",
+        phase: progress.phase,
+        status,
+        progress: nextProgress,
+        diagnostics: progress.diagnostics,
+      },
+    });
+  } catch {
+    // Rendering updates are best-effort and must not change clone semantics.
+  }
   return nextProgress;
 }
 
@@ -162,7 +166,7 @@ export default function repositoryReferenceExtension(pi: ExtensionAPI): void {
     name: "repository_reference",
     label: "Repository reference",
     description:
-      "Safely clone a validated network Git remote at a validated revision into a managed temporary directory, then list, remove, or clean up only references created by this tool. Clone progress is streamed in the tool row; set verbose=true for more sanitized diagnostics. Use Ctrl+O to expand tool output. It does not use a shell or require Context Mode.",
+      "Safely preflight and clone a validated network Git remote at a validated revision into a managed temporary directory, then list, remove, or clean up only references created by this tool. Advertised branches and tags use a single-branch clone to avoid needless history downloads; advertised arbitrary refs are explicitly fetched into a tool-owned local ref, while unmatched commit revisions retain a full-clone fallback. Clone progress is streamed in the tool row; set verbose=true for more sanitized diagnostics. Use Ctrl+O to expand tool output. Cancellation and timeout terminate the Git process tree with bounded cleanup. It does not use a shell or require Context Mode.",
     parameters: RepositoryReferenceParams,
     async execute(_toolCallId, params, signal, onUpdate) {
       switch (params.action) {

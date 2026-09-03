@@ -26,7 +26,19 @@ export type RepositoryReference = {
   createdAt: string;
 };
 
-export type RepositoryReferencePhase = "clone" | "resolve-revision" | "checkout" | "metadata";
+export type RepositoryReferencePhase =
+  | "preflight"
+  | "clone"
+  | "resolve-revision"
+  | "checkout"
+  | "metadata";
+
+export type RepositoryReferenceCleanupDiagnostics = {
+  path: string;
+  completed: boolean;
+  timedOut?: boolean;
+  error?: string;
+};
 
 export type RepositoryReferenceDiagnostics = {
   phase: RepositoryReferencePhase;
@@ -37,6 +49,7 @@ export type RepositoryReferenceDiagnostics = {
   signal?: string;
   timedOut?: boolean;
   cancelled?: boolean;
+  cleanup?: RepositoryReferenceCleanupDiagnostics;
 };
 
 export type RepositoryReferenceProgress = {
